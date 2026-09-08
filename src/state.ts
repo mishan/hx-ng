@@ -112,15 +112,30 @@ export class Store {
   mail: InboxCounts | null = null;
   /**
    * The lowest stored id this client has pulled, and therefore where the
-   * next page backwards starts. Undefined before the first page, and
-   * after a page that came back empty — there is nothing older.
+   * next page backwards starts. Undefined only before the first page:
+   * once set it stays set and keeps moving down, because a cursor that
+   * reset itself would page the same rows for ever. Exhaustion is
+   * `mailExhausted`, below, and not the absence of this.
    */
   oldestMailId?: number;
-  /** True once a page has come back holding nothing new to page past. */
+  /** True once a page has come back with **no rows at all**. Not "no rows
+   *  this client had yet to see": those are different, and conflating
+   *  them stops paging early over mail the login flush happened to
+   *  deliver first. */
   mailExhausted = false;
-  /** Every stored message id on screen. Mail arrives twice by design —
-   *  the login flush pushes `msg` events for what is unread while
-   *  `inbox` lists the same rows — so both paths check here first. */
+  /**
+   * Stored message ids this client has already placed. Mail arrives
+   * twice by design — the login flush pushes `msg` events for what is
+   * unread while `inbox` lists the same rows — so both paths check here
+   * first.
+   *
+   * Trimming a transcript past `MAX_LINES` deliberately leaves ids here:
+   * those messages were shown and scrolled past, and a later page must
+   * not re-append them under whatever is on screen now. Closing a
+   * conversation does the opposite and forgets them, because closing is
+   * someone saying they are done with it, and paging mail afterwards
+   * should be able to bring it back.
+   */
   private seenMail = new Set<number>();
   /** Every name a PM conversation answers to, mapped to its id. One
    *  conversation may sit under two keys — a uid and a login — which is
@@ -277,6 +292,11 @@ export class Store {
     // Every alias, whatever kind it is — reading them back off `peer`
     // would miss the nick one, which is deliberately not stored there.
     for (const [k, v] of [...this.pmIndex]) if (v === id) this.pmIndex.delete(k);
+    // Forget its mail too, so a later page can bring the thread back
+    // rather than silently skipping every message it used to hold.
+    for (const l of this.conversations.get(id)?.lines ?? []) {
+      if (l.id !== undefined) this.seenMail.delete(l.id);
+    }
     this.conversations.delete(id);
     if (this.active === id) this.active = LOBBY;
   }

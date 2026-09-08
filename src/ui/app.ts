@@ -48,6 +48,7 @@ import { DebugPanel } from './debug';
 import { clock, fill, h } from './dom';
 import { icon } from './icons';
 import { pickIcon } from './iconpicker';
+import { IdentityPanel } from './identity';
 import { renderRoster } from './roster';
 import { Tiles } from './tiles';
 import { appendLine, isAtBottom, renderTranscript, scrollToEnd } from './transcript';
@@ -61,6 +62,7 @@ export class App {
   private conn: Connection | null = null;
   private media: VoiceSession | null = null;
   private debug: DebugPanel;
+  private identityPanel: IdentityPanel;
   private pingTimer: number | null = null;
   private url = '';
   /** The store revision the transcript element was last drawn from. */
@@ -108,6 +110,14 @@ export class App {
       () => this.facts(),
       () => this.media?.stats() ?? Promise.resolve({ media: 'not connected' }),
     );
+    // Identity is server-independent (`docs/identity-keys.md` §4 — one
+    // key, many servers), but the panel still needs *a* server address
+    // for the `hlid link` line and the card fallback fetch. The
+    // connected server wins once there is one; before that, the
+    // deployment's own default is the reasonable guess — it is, after
+    // all, "the ordinary case of the client sitting in front of its own
+    // server" the rest of this client already assumes.
+    this.identityPanel = new IdentityPanel(() => this.url || this.config.defaultServer);
     this.buildShell();
     this.applyTheme(readTheme());
 
@@ -123,8 +133,12 @@ export class App {
   }
 
   mount(): void {
-    const screen = connectScreen(this.config, (d) => this.connect(d));
-    this.root.append(screen, this.shell, this.debug.el);
+    const screen = connectScreen(
+      this.config,
+      (d) => this.connect(d),
+      () => this.identityPanel.toggle(true),
+    );
+    this.root.append(screen, this.shell, this.debug.el, this.identityPanel.el);
     // `?debug` opens the drawer before the first frame, which is what you
     // want when the thing you are debugging is the login itself.
     if (new URLSearchParams(location.search).has('debug')) this.debug.toggle(true);
@@ -932,6 +946,9 @@ export class App {
     const debugBtn = h('button', { class: 'ghost', title: 'Wire trace and session state (⇧⌘D)' }, 'Debug');
     debugBtn.onclick = () => this.debug.toggle();
 
+    const identityBtn = h('button', { class: 'ghost', title: 'Device keys, enrolment, and renewal' }, 'Identity');
+    identityBtn.onclick = () => this.identityPanel.toggle();
+
     const themeBtn = h('button', { class: 'ghost', title: 'Theme' });
     const paintTheme = (t: Theme) => (themeBtn.textContent = t === 'auto' ? 'Auto' : t === 'dark' ? 'Dark' : 'Light');
     paintTheme(readTheme());
@@ -981,6 +998,7 @@ export class App {
         this.mailBtn,
         this.peopleBtn,
         themeBtn,
+        identityBtn,
         debugBtn,
       ),
       h(

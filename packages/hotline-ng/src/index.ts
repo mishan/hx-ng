@@ -25,9 +25,13 @@
  *   `document.body`. Video it does not draw: it hands you a
  *   `MediaStream` and the mid it arrived on, and where that belongs on
  *   your page is your business.
+ * - `identity` needs `crypto.subtle` (Ed25519, X25519, SHA-256) and
+ *   `fetch`. It holds no keys of its own — a device's private keys live
+ *   in the app's own `IndexedDB` store, never here.
  */
 
 export * from './protocol';
+export * from './identity';
 export {
   Connection,
   hasSavedSession,

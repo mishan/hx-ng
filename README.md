@@ -120,9 +120,35 @@ registers handlers per request name and pushes events, and replies come
 back asynchronously and in order, on a socket the test can close out from
 under the client.
 
-What is *not* covered yet: `src/ui/`, which would want a DOM, and the
-voice and video session, which would want a WebRTC stack. Both are worth
-doing and neither is done.
+What is *not* covered here: `src/ui/` in general, which would want a
+DOM, and the voice and video session, which would want a WebRTC stack.
+Identity's slice of `src/ui/` is the exception — see below.
+
+### End-to-end: identity against a real server
+
+```sh
+npx playwright install chromium   # once
+npm run test:e2e
+```
+
+The unit tests fake everything below `Connection`; this is the one
+thing worth checking against the real pieces instead, because the bug
+it exists to catch — `wsToHttp` building a URL the browser's own CORS
+policy refuses — only shows up with a real browser's CORS policy and a
+real dev-proxy config in front of it, neither of which a fake can
+represent honestly. [`e2e/identity.spec.ts`](e2e/identity.spec.ts)
+opens the Identity panel in a real headless Chromium, certifies the
+real generated device key with a real `hlid`, pastes it back, and logs
+in against a real `hxd` — then drops the socket and confirms resume
+still works without going through identity again.
+
+It needs a sibling checkout of
+[hxd-ng](https://github.com/mishan/hxd-ng) — `git clone` it next to
+this repo — and `cargo` to build `hxd` and `hlid` from it, same
+convention as `gtkhx` for the icons below. Neither is a dependency of
+`npm test` or `npm run build`; without them,
+[`e2e/hxd-ng.ts`](e2e/hxd-ng.ts) skips this test rather than failing
+the run.
 
 ## The icons
 

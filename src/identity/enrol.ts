@@ -27,6 +27,16 @@ import {
   type DeviceCert,
 } from '@hotline-ng/client';
 
+/** POSIX single-quote a shell argument: wrap it in `'...'`, escaping any
+ *  embedded `'` as `'\''` — the standard trick, since nothing can be
+ *  escaped *inside* a single-quoted string. These commands are meant to
+ *  be copied straight into a terminal, so a device label or account
+ *  name with a space, a `$`, or a `"` in it would otherwise silently
+ *  turn into a different command than the one on screen. */
+function shq(s: string): string {
+  return `'${s.replace(/'/g, `'\\''`)}'`;
+}
+
 export function buildHlidCertCommand(
   devicePubHex: string,
   deviceEncPubHex: string,
@@ -34,11 +44,15 @@ export function buildHlidCertCommand(
 ): string {
   const days = opts.days ?? 90;
   const name = opts.name ?? 'browser';
-  return `hlid cert --device-pub ${devicePubHex} --device-enc-pub ${deviceEncPubHex} --caps web --days ${days} --name "${name}" -o web.bundle`;
+  return `hlid cert --device-pub ${devicePubHex} --device-enc-pub ${deviceEncPubHex} --caps web --days ${days} --name ${shq(name)} -o web.bundle`;
 }
 
+/** `server` should be the identity HTTP base (`https://host`, per
+ *  `docs/identity-keys.md`'s own example) — `hlid` talks to the identity
+ *  endpoints, not the ng WebSocket, so callers must convert a `ws(s)://`
+ *  connect URL with `wsToHttp()` before this. */
 export function buildHlidLinkCommand(server: string, login: string): string {
-  return `hlid link --server ${server} --login ${login} --password-stdin`;
+  return `hlid link --server ${shq(server)} --login ${shq(login)} --password-stdin`;
 }
 
 export interface ParsedPaste {

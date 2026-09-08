@@ -23,13 +23,24 @@ describe('buildHlidCertCommand / buildHlidLinkCommand', () => {
     expect(cmd).toContain('--device-enc-pub bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb');
     expect(cmd).toContain('--caps web');
     expect(cmd).toContain('--days 90');
-    expect(cmd).toContain('"Firefox"');
+    expect(cmd).toContain("'Firefox'");
   });
 
   it('names the server and account for the link line', () => {
     expect(buildHlidLinkCommand('https://hotline.example.org', 'alice')).toBe(
-      'hlid link --server https://hotline.example.org --login alice --password-stdin',
+      "hlid link --server 'https://hotline.example.org' --login 'alice' --password-stdin",
     );
+  });
+
+  it('shell-quotes a name, server, or login that would otherwise break the command', () => {
+    // A space alone would already split into extra shell words; the
+    // quote is the sharper case, since it also has to survive *inside*
+    // the quoting this function adds.
+    const cmd = buildHlidCertCommand('aa'.repeat(32), 'bb'.repeat(32), { name: `Alice's phone` });
+    expect(cmd).toContain(String.raw`--name 'Alice'\''s phone'`);
+
+    const link = buildHlidLinkCommand('https://host', `o'brien`);
+    expect(link).toBe(String.raw`hlid link --server 'https://host' --login 'o'\''brien' --password-stdin`);
   });
 });
 

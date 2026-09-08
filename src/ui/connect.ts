@@ -76,12 +76,25 @@ function remember(d: Details): void {
 }
 
 function identityCreateChoices(): Record<string, boolean> {
+  // A null-prototype object, and only boolean values copied in one at a
+  // time: `url` is whatever the server field holds, and a plain `{}`
+  // would let a value of `__proto__` (or a read of `constructor` /
+  // `toString`) reach through to `Object.prototype` instead of behaving
+  // like the plain string-keyed map this is meant to be.
+  const out: Record<string, boolean> = Object.create(null);
   try {
     const raw = localStorage.getItem(IDENTITY_CREATE_KEY);
-    return raw ? (JSON.parse(raw) as Record<string, boolean>) : {};
+    if (!raw) return out;
+    const parsed: unknown = JSON.parse(raw);
+    if (parsed && typeof parsed === 'object') {
+      for (const [k, v] of Object.entries(parsed)) {
+        if (typeof v === 'boolean') out[k] = v;
+      }
+    }
   } catch {
-    return {};
+    /* storage disabled, or not valid JSON; start from empty */
   }
+  return out;
 }
 
 function rememberIdentityCreateChoice(url: string, makeAccount: boolean): void {

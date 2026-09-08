@@ -439,5 +439,8 @@ export const ERROR_TEXT: Record<string, string> = {
 };
 
 export function errorText(e: WireError): string {
-  return ERROR_TEXT[e.code] ?? e.text ?? e.code;
+  // `||` rather than `??` on the text: a server that sends an empty one
+  // has said nothing, and nothing rendered as an error message is worse
+  // than the bare code — at least a code can be looked up.
+  return ERROR_TEXT[e.code] || e.text || e.code;
 }

@@ -31,6 +31,8 @@
   },
   "include": [
     "src",
-    "packages/hotline-ng/src"
+    "packages/hotline-ng/src",
+    "test",
+    "packages/hotline-ng/test"
   ]
 }

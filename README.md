@@ -95,6 +95,35 @@ The ng spec mandates WSS in production for its own reasons; the same
 certificate serves the page. `localhost` counts as secure, which is why
 the development setup above works unencrypted on the machine itself.
 
+## Tests
+
+```sh
+npm test           # once
+npm run test:watch # while working
+npm run typecheck  # the tests are typechecked too, so they cannot rot quietly
+```
+
+Vitest, configured from the app's own Vite config so `@hotline-ng/client`
+resolves to workspace source and a change needs no build step between it
+and a test run. The environment is `node` rather than jsdom: nothing
+under test touches a document.
+
+The two browser globals `Connection` does reach for — `WebSocket` and
+`sessionStorage` — are faked in
+[`packages/hotline-ng/test/fake-wire.ts`](packages/hotline-ng/test/fake-wire.ts),
+which is the piece worth knowing about. A session outlives its
+connection, so nearly everything worth asserting about `Connection` is
+about what happens when a socket dies and another opens: resume, replay,
+the `resync_required` recovery. None of that is reachable without playing
+the server, so the fake is a harness rather than a mock — a test
+registers handlers per request name and pushes events, and replies come
+back asynchronously and in order, on a socket the test can close out from
+under the client.
+
+What is *not* covered yet: `src/ui/`, which would want a DOM, and the
+voice and video session, which would want a WebRTC stack. Both are worth
+doing and neither is done.
+
 ## The icons
 
 The user-list icons are the ones every Hotline client of the era shipped:
@@ -154,7 +183,7 @@ Typed into the composer:
 | | |
 |---|---|
 | `/me <text>` | chat with `style: "action"` |
-| `/msg <nick\|uid> <text>` | open a PM conversation and send |
+| `/msg <nick\|uid\|account> <text>` | open a PM conversation and send. An account name reaches somebody who is not here |
 | `/nick <name>` | needs `use_any_name` |
 | `/icon <n>` | or click your own icon in the title bar |
 | `/drop` | close the socket without logging out — exercises resume |
@@ -166,9 +195,12 @@ Typed into the composer:
 - **Sessions outlive connections.** The socket is an attachment, not the
   session. A dropped connection reconnects with backoff and `resume`s,
   replaying what it missed; `resync_required` is handled as the spec
-  intends, with a `sync` on the same socket rather than a new login. A
-  **page reload** resumes too — session id, token and `last_seq` live in
-  `sessionStorage` — so you keep your uid and your place in the room.
+  intends, with a `sync` on the same socket rather than a new login —
+  and then an `inbox` pull, because the events in that gap are gone and
+  any private message among them was already marked delivered, leaving
+  the store as its only copy. A **page reload** resumes too — session
+  id, token and `last_seq` live in `sessionStorage` — so you keep your
+  uid and your place in the room.
 - **Seq accounting is exact.** Every event advances `seq`, including the
   `unsupported` placeholders the server emits for domain events this
   protocol revision cannot express. That is what makes `last_seq`
@@ -180,6 +212,11 @@ Typed into the composer:
   event carrying it arrives — including your own, because the server
   echoes chat to its author. Private messages are the exception the
   protocol forces: `msg` has no echo, so the sender's half is local.
+- **A conversation is a person, not a uid.** Mail that waited for you
+  arrives with `uid: 0`, because its sender had no session when it was
+  flushed — so threads are keyed on the account where there is one, and
+  fall back to the uid. That is also what stops a reissued uid from
+  delivering into the previous holder's thread.
 - **Video is opt-in in both directions.** Nothing is published until you
   ask and nothing is received until you subscribe, and the subscription
   is declared as a complete set so turning it all off is one request.
@@ -212,6 +249,7 @@ published name like anybody else would.
 | `src/state.ts` | roster and transcripts; no DOM |
 | `src/ui/` | the shell, roster, transcript, composer, icon picker, video tiles, debug drawer |
 | `src/ui/tiles.ts` | the video strip, and everything a browser needs before it will paint a `<video>` |
+| `test/`, `packages/hotline-ng/test/` | the tests, kept out of `src` so the published package ships neither them nor a test runner |
 | `tools/build-icons.py` | `icons.rsrc` → sprite sheet |
 
 There is no UI framework, on purpose: this client doubles as a readable

@@ -1,0 +1,15 @@
+{
+  "_comment": "Deployment settings for the hxd-ng web client. Edit this file next to index.html; no rebuild is needed. Every key is optional.",
+
+  "_defaultServer": "The ng listener the connect form starts from. Omit it, or leave it empty, to derive ws://<the host that served this page>:5700 — which is right for the usual case of the client sitting in front of its own server.",
+  "defaultServer": "",
+
+  "_servers": "Extra addresses offered as suggestions in the form.",
+  "servers": [],
+
+  "_title": "The tab title before a server names itself.",
+  "title": "Hotline",
+
+  "_allowCustomServer": "false hides the server field: one deployment, one server.",
+  "allowCustomServer": true
+}

@@ -197,9 +197,16 @@ export class Connection {
     this.ws = ws;
 
     await new Promise<void>((resolve, reject) => {
+      const fail = () => {
+        // Nothing is attached to a socket that never opened, and leaving
+        // it in `this.ws` would let the next `request()` believe it had
+        // one.
+        if (this.ws === ws) this.ws = null;
+        reject(new Error(`Could not reach ${this.creds.url}`));
+      };
       ws.onopen = () => resolve();
-      ws.onerror = () => reject(new Error(`Could not reach ${this.creds.url}`));
-      ws.onclose = () => reject(new Error(`Could not reach ${this.creds.url}`));
+      ws.onerror = fail;
+      ws.onclose = fail;
     });
 
     ws.onmessage = (e) => this.onMessage(String(e.data));

@@ -284,7 +284,15 @@ export class App {
       // which arrives first is a race. Whichever loses is dropped here.
       if (d.id !== undefined && this.store.hasMail(d.id)) return;
       const conv = this.store.openPm({ uid: d.from.uid, login: d.from.login, nick: d.from.nick });
-      if (d.id !== undefined && this.store.mail) this.store.mail.unread++;
+      // An `id` means the server stored it, so both counters move. Moving
+      // only `unread` was enough to render "1 unread of 0 stored" until
+      // the next reply corrected it.
+      if (d.id !== undefined && this.store.mail) {
+        this.store.mail = {
+          unread: this.store.mail.unread + 1,
+          total: this.store.mail.total + 1,
+        };
+      }
       this.push(conv.id, {
         t: d.at * 1000,
         kind: 'chat',
@@ -662,9 +670,26 @@ export class App {
     // conversation is local and never had one.
     for (const l of conv.lines) if (l.id !== undefined && !l.local && l.id > top) top = l.id;
     if (top === 0 || top <= this.markedRead) return;
-    this.markedRead = top;
-    this.store.mail = await conn.msgRead(top);
-    this.renderMail();
+
+    // Two marks can be in flight at once — select one conversation, then
+    // another before the first answers. The spec has the server answering
+    // in order, but the counts here are worth more than that promise is:
+    // claim the cursor, and let only the reply that still owns it write
+    // the result. An older reply arriving late says nothing true about
+    // where the mailbox now stands.
+    const previous = this.markedRead;
+    const cursor = (this.markedRead = top);
+    try {
+      const counts = await conn.msgRead(top);
+      if (cursor !== this.markedRead) return;
+      this.store.mail = counts;
+      this.renderMail();
+    } catch (e) {
+      // Nothing was marked, so stop claiming it was — otherwise one
+      // failure silently retires every id below it for the session.
+      if (this.markedRead === cursor) this.markedRead = previous;
+      throw e;
+    }
   }
 
   private renderMail(): void {

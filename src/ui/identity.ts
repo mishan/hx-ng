@@ -113,9 +113,18 @@ export class IdentityPanel {
     const linkPre = h('pre', { class: 'cmd', hidden: true });
     const updateLink = (): void => {
       const login = loginInput.value.trim();
-      const server = this.serverUrl().trim();
-      linkPre.hidden = !(login && server);
-      if (login && server) linkPre.textContent = buildHlidLinkCommand(server, login);
+      // `hlid link --server` wants the identity HTTP base, not the ng
+      // WebSocket URL this panel otherwise deals in — a malformed or
+      // empty server address just hides the line rather than showing a
+      // command that can't be right.
+      let httpServer: string | null = null;
+      try {
+        httpServer = this.serverUrl().trim() ? wsToHttp(this.serverUrl().trim()) : null;
+      } catch {
+        httpServer = null;
+      }
+      linkPre.hidden = !(login && httpServer);
+      if (login && httpServer) linkPre.textContent = buildHlidLinkCommand(httpServer, login);
     };
     loginInput.oninput = updateLink;
     updateLink();
@@ -257,18 +266,21 @@ export class IdentityPanel {
 
 function copyButton(getText: () => string): HTMLButtonElement {
   const btn = h('button', { class: 'ghost' }, 'Copy');
-  btn.onclick = () => {
-    const was = btn.textContent;
-    navigator.clipboard.writeText(getText()).then(
-      () => {
-        btn.textContent = 'Copied';
-        setTimeout(() => (btn.textContent = was), 1400);
-      },
-      () => {
-        btn.textContent = 'Copy failed';
-        setTimeout(() => (btn.textContent = was), 1400);
-      },
-    );
-  };
+  btn.onclick = () => void copyText(getText(), btn);
   return btn;
+}
+
+async function copyText(text: string, btn: HTMLButtonElement): Promise<void> {
+  const was = btn.textContent;
+  try {
+    // `navigator.clipboard` itself can be `undefined` — an insecure
+    // context, an old browser, or a blocked permission — in which case
+    // reading `.writeText` off it throws synchronously rather than
+    // rejecting a promise. The `try` catches both.
+    await navigator.clipboard.writeText(text);
+    btn.textContent = 'Copied';
+  } catch {
+    btn.textContent = 'Copy failed';
+  }
+  setTimeout(() => (btn.textContent = was), 1400);
 }

@@ -1,8 +1,9 @@
 /**
  * What may appear in a name the identity layer carries — a card's display
- * name (`hotline-ng-identity.md` §3.4) and a device certificate's label
- * (§3.3). Ported character-for-character from hxd-ng's
- * `crates/hl-identity/src/names.rs`, which explains the reasoning: this
+ * name (hxd-ng's `docs/hotline-ng-identity.md` §3.4) and a device
+ * certificate's label (§3.3, same document). Ported character-for-character
+ * from hxd-ng's `crates/hl-identity/src/names.rs`, which explains the
+ * reasoning: this
  * is `Default_Ignorable_Code_Point` (renders as nothing) plus the `Cf`
  * characters outside it, plus every whitespace character but the plain
  * space, plus controls. A zero-width space or a bidi override is

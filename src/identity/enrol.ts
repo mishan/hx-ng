@@ -154,7 +154,9 @@ export async function validateEnrolment(
 }
 
 /** True from one-third of the certificate's lifetime remaining — the
- *  point §3.3 and §7.2 say to start nagging. */
+ *  point hxd-ng's `docs/hotline-ng-identity.md` §3.3 (in the cert's own
+ *  field table) and this repo's `docs/identity-keys.md` §7.2 both say to
+ *  start nagging. */
 export function needsRenewal(cert: DeviceCert, now: number): boolean {
   const lifetime = cert.expires - cert.issued;
   return now >= cert.issued + (lifetime * 2) / 3;

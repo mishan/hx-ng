@@ -1,18 +1,28 @@
-# hxd-ng web client
+# hx-ng
 
 A browser client for the **Hotline-ng** wire: public chat, the user list
 with the classic icons, private messages, and the voice and video the
-SFU already serves. It talks only the JSON/WebSocket protocol in
-[`docs/hotline-ng.md`](../docs/hotline-ng.md) — it never sees the legacy
-wire, and the server cannot tell it apart from any other ng client.
+SFU already serves. It never sees the legacy wire, and the server cannot
+tell it apart from any other ng client. The protocol it speaks is
+[`hotline-ng.md`](https://github.com/mishan/hxd-ng/blob/main/docs/hotline-ng.md).
+
+The reference server is [hxd-ng](https://github.com/mishan/hxd-ng). Any
+server that speaks the protocol will do; this client has no dependency on
+that one beyond the wire.
 
 ## Running it
 
-Against a server on this machine:
+```sh
+npm install
+npm run dev
+```
+
+That wants a server to talk to. Against
+[hxd-ng](https://github.com/mishan/hxd-ng) on the same machine, with an
+`[ng]` section in its config:
 
 ```sh
-cargo run --bin hxd            # [ng] bind = "127.0.0.1:5700"
-cd hx-ng && npm install && npm run dev
+cargo run --bin hxd     # in the hxd-ng checkout; [ng] bind = "127.0.0.1:5700"
 ```
 
 `npm run dev` serves on <http://localhost:5701> with hot reload, bound to
@@ -88,15 +98,24 @@ the development setup above works unencrypted on the machine itself.
 ## The icons
 
 The user-list icons are the ones every Hotline client of the era shipped:
-the `cicn` resources in [`../gtkhx/icons.rsrc`](../gtkhx/icons.rsrc),
-which is the same file GtkHx renders from. `DATA_ICON` on the wire is a
-16-bit index into that table.
+the `cicn` resources in
+[`icons.rsrc`](https://github.com/mishan/gtkhx/blob/main/icons.rsrc), which
+is the same file GtkHx renders from. `DATA_ICON` on the wire is a 16-bit
+index into that table.
 
 They are packed into **one sprite sheet** — `public/icons.png` plus a
 JSON index of `id → [x, y, w, h]` — by `tools/build-icons.py`:
 
 ```sh
 npm run icons     # python3 tools/build-icons.py ../gtkhx/icons.rsrc public
+```
+
+That path is a **sibling checkout** of
+[GtkHx](https://github.com/mishan/gtkhx) — `git clone` it next to this
+repo, or point the script somewhere else:
+
+```sh
+python3 tools/build-icons.py /path/to/icons.rsrc public
 ```
 
 Six hundred separate PNGs would be six hundred requests for a roster
@@ -186,7 +205,7 @@ published name like anybody else would.
 
 | | |
 |---|---|
-| `packages/hotline-ng/src/protocol.ts` | the wire's shapes — the twin of `crates/hxd-ng-session/src/proto.rs` |
+| `packages/hotline-ng/src/protocol.ts` | the wire's shapes — the twin of [`proto.rs`](https://github.com/mishan/hxd-ng/blob/main/crates/hxd-ng-session/src/proto.rs) |
 | `packages/hotline-ng/src/connection.ts` | one session across however many sockets: handshake, resume, backoff, the trace hook |
 | `packages/hotline-ng/src/voice.ts` | the SFU: join, publish, subscribe, and the mid grammar that tells streams apart |
 | `src/config.ts` | `config.json`, and where the server address comes from |
@@ -200,5 +219,6 @@ reference for the protocol, and a reader chasing a bug should not have to
 know a rendering library's rules to follow what the DOM is doing.
 `src/ui/dom.ts` is the whole abstraction.
 
-`tools/ng-voice.html` at the repo root stays as the minimal single-file
-rig for poking at the SFU with no build step at all.
+The minimal single-file rig for poking at the SFU with no build step at all
+stays where it was, in the hxd-ng repo:
+[`tools/ng-voice.html`](https://github.com/mishan/hxd-ng/blob/main/tools/ng-voice.html).

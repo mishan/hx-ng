@@ -71,6 +71,18 @@ function row(u: User, store: Store, media: VoiceSession, hooks: RosterHooks): HT
       }),
     );
   }
+  // A session on a plain TCP legacy socket, or a tunnel that told the
+  // server its own downstream hop was unencrypted. Worth a mark because
+  // a private message to one of these crosses the network in the clear,
+  // and because the person it belongs to may not know.
+  if (u.transport === 'cleartext') {
+    marks.push(
+      h('span', {
+        class: 'mark cleartext',
+        title: 'Unencrypted connection — anything sent here can be read in transit',
+      }),
+    );
+  }
 
   // The icon column is as wide as the widest sprite in the sheet and the
   // art is right-aligned inside it, so banner-width icons extend to the
@@ -86,7 +98,15 @@ function row(u: User, store: Store, media: VoiceSession, hooks: RosterHooks): HT
     'div',
     {
       class: `person${u.admin ? ' admin' : ''}${u.status !== 'active' ? ' away' : ''}${me ? ' me' : ''}`,
-      title: `uid ${u.uid} · icon ${u.icon}${u.admin ? ' · administrator' : ''}${status ? ` · ${status}` : ''}`,
+      title:
+        `uid ${u.uid} · icon ${u.icon}${u.admin ? ' · administrator' : ''}${status ? ` · ${status}` : ''}` +
+        (u.transport === 'cleartext' ? ' · unencrypted' : '') +
+        // The handle is the part of an identity a person can read back;
+        // the fingerprint is shortened because 52 characters in a
+        // tooltip is not something anyone compares by eye.
+        (u.identity
+          ? ` · ${u.identity.handle ?? `unattested (${u.identity.fingerprint.slice(0, 8)}…)`}`
+          : ''),
       tabIndex: 0,
     },
     art,

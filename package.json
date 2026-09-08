@@ -11,14 +11,17 @@
   "scripts": {
     "dev": "vite",
     "build": "npm run typecheck && vite build",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.node.json",
     "build:lib": "npm run build -w @hotline-ng/client",
     "icons": "python3 tools/build-icons.py ../gtkhx/icons.rsrc public"
   },
   "devDependencies": {
+    "@types/node": "^22.9.0",
     "typescript": "^5.6.3",
-    "vite": "^6.4.3",
-    "@types/node": "^22.9.0"
+    "vite": "^8.2.2",
+    "vitest": "^5.0.0"
   }
 }

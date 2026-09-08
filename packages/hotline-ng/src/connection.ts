@@ -16,12 +16,20 @@ import {
   isEvent,
   isReply,
   RESYNC_REQUIRED,
+  type BlocksOk,
+  type BlockParams,
   type EventFrame,
   type Events,
+  type InboxCounts,
+  type InboxOk,
+  type InboxParams,
   type LoginOk,
   type LoginParams,
+  type MsgOk,
+  type MsgParams,
   type ReplyFrame,
   type ResumeOk,
+  type SelfUser,
   type ServerFrame,
   type SyncOk,
   type User,
@@ -101,10 +109,24 @@ export interface ConnectionHooks {
   onTrace?: (entry: TraceEntry) => void;
   /** A full roster replacement: the login snapshot, or a `sync` after
    *  the outbox overflowed. Everything else arrives as events. */
-  onSnapshot?: (ok: { self: User; users: User[]; server: SyncOk['server'] }) => void;
+  onSnapshot?: (ok: { self: SelfUser; users: User[]; server: SyncOk['server'] }) => void;
   onLogin?: (ok: LoginOk) => void;
   /** Resume succeeded; `replay` events are about to arrive. */
   onResumed?: (replay: number) => void;
+  /**
+   * The outbox overflowed, the gap has been resynced, and this is what
+   * the store held across it.
+   *
+   * **A client that shows private messages must implement this.**
+   * `hotline-ng.md` §7.1 makes it an obligation rather than a nicety:
+   * any `msg` in the gap was already marked delivered, so the store is
+   * the only remaining copy of it and nothing will re-send it. Without
+   * this hook a `resync_required` silently eats mail.
+   *
+   * Newest first, and it may overlap messages already on screen — match
+   * on `id` rather than appending blindly.
+   */
+  onMissedMail?: (ok: InboxOk) => void;
   /** The session is gone for good — kicked, logged out, banned, or the
    *  grace window lapsed. No further reconnection will be attempted. */
   onEnded?: (reason: string) => void;
@@ -129,7 +151,7 @@ export class Connection {
   seq = 0;
   session: string | null = null;
   token: string | null = null;
-  self: User | null = null;
+  self: SelfUser | null = null;
   caps: string[] = [];
   grace: number | null = null;
   login: LoginOk | null = null;
@@ -286,11 +308,52 @@ export class Connection {
       }
       // The session lives; only the replay is unrecoverable. Take a
       // fresh snapshot and continue from the seq it reports.
+      //
+      // `sync`'s seq says where to *continue* from, not which frames
+      // already in hand to throw away: the session went live again the
+      // moment the resync_required reply landed, so traffic addressed to
+      // it in the window before this one carries lower seqs and has
+      // already been handed to `onEvent`. Assigning here is safe because
+      // that assignment only ever moves the number forward.
       const ok = await this.snapshot();
       this.seq = ok.seq;
       this.retry = 0;
       this.setState('online');
+      await this.pullMissedMail();
       return true;
+    }
+  }
+
+  /**
+   * The other half of recovering from `resync_required`, and the half
+   * that is easy to forget: `sync` restores the roster, but the `msg`
+   * events in the gap are simply gone — the server marked them
+   * delivered and will not send them again. The store is the only
+   * remaining copy, so a resync that does not read it loses mail.
+   *
+   * Failure here is reported and swallowed. The session is already
+   * recovered at this point; turning a mail-fetch problem into a failed
+   * resume would cost the user their place in the room to fix nothing.
+   */
+  private async pullMissedMail(): Promise<void> {
+    if (!this.hooks.onMissedMail) return;
+    try {
+      // Not gated on `caps`. Everywhere else in this file `caps` is a
+      // hint about what to *draw*, and making it a gate here would mean
+      // a server that under-reports its own extensions silently loses
+      // mail rather than answering `no_inbox` — which is a refusal this
+      // already handles, and a cheaper thing to be wrong about than a
+      // missing message.
+      //
+      // The largest page the wire allows, because this one is not
+      // browsing: it is covering a gap whose size nobody knows. A gap
+      // holding more than this needs the caller to page back with
+      // `inbox({ before })`, and there is no way to know that from
+      // here — the client's position is a seq and the mailbox is
+      // numbered in message ids, which do not convert.
+      this.hooks.onMissedMail(await this.inbox({ limit: 200 }));
+    } catch (e) {
+      this.trace('in', 'missed-mail-failed', String(e instanceof Error ? e.message : e), true);
     }
   }
 
@@ -374,6 +437,46 @@ export class Connection {
     return new Promise<T>((resolve, reject) => {
       this.pending.set(id, { resolve, reject });
     });
+  }
+
+  /** Does the server list this extension in the login reply's `caps`?
+   *  A hint for deciding what to draw, not a gate on what to send. */
+  hasCap(name: string): boolean {
+    return this.caps.includes(name);
+  }
+
+  // --- private messages (docs/hotline-ng.md §7.1) -----------------------
+
+  /** Send one. Pass a `guid` — a UUID of the client's own choosing — and
+   *  a retry after a dropped socket is the same message rather than a
+   *  second one. The answer describes the message as it stands *now*, so
+   *  a retry saying `queued: false` where the original said `true` is the
+   *  message being delivered, not an error. */
+  msg(params: MsgParams): Promise<MsgOk> {
+    return this.request<MsgOk>('msg', params);
+  }
+
+  /** Stored mail, newest first, paging backwards with `before`. */
+  inbox(params: InboxParams = {}): Promise<InboxOk> {
+    return this.request<InboxOk>('inbox', params);
+  }
+
+  /** Mark everything of yours up to `id` read. A cursor rather than a
+   *  list, because that is how a reader moves through a conversation. */
+  msgRead(upTo: number): Promise<InboxCounts> {
+    return this.request<InboxCounts>('msg_read', { up_to: upTo });
+  }
+
+  block(who: BlockParams): Promise<Record<string, never>> {
+    return this.request('block', who);
+  }
+
+  unblock(who: BlockParams): Promise<Record<string, never>> {
+    return this.request('unblock', who);
+  }
+
+  blocks(): Promise<BlocksOk> {
+    return this.request<BlocksOk>('blocks', {});
   }
 
   async ping(): Promise<number> {

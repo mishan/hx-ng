@@ -63,15 +63,19 @@ export interface Credentials {
   nick: string;
   icon: number;
   /**
-   * Present for an identity login (`hotline-ng-identity.md` §5–§8).
+   * Present for an identity login — hxd-ng's `docs/hotline-ng-auth.md`
+   * §6–§7 defines the transport (the token, opening the WebSocket with
+   * it), and its `docs/hotline-ng-identity.md` §5, §8 what identity does
+   * with it (verification, account association).
    * Deliberately just a token-minting callback rather than a device key
    * or any CBOR — this package stays free of the crypto/CBOR dependency
    * that producing a token needs; the caller (built from
    * `src/identity/`) closes over the device key and the challenge/auth
    * round trip.
    *
-   * When set, `login`/`password` are ignored by the server (§6.2) and
-   * should be sent empty; the token, not a password, is the credential.
+   * When set, `login`/`password` are ignored by the server
+   * (`docs/hotline-ng-identity.md` §6.1) and should be sent empty; the
+   * token, not a password, is the credential.
    */
   identity?: { getToken: () => Promise<string> };
 }
@@ -252,9 +256,9 @@ export class Connection {
   }
 
   /** Mint a fresh transport token and open a socket carrying it
-   *  (`hotline-ng-identity.md` §6.1's `?token=`). The token is single-use
-   *  and 60 seconds, so this is only ever called immediately before the
-   *  socket it's for. */
+   *  (hxd-ng's `docs/hotline-ng-auth.md` §7.1's `?token=`). The token is
+   *  single-use and 60 seconds, so this is only ever called immediately
+   *  before the socket it's for. */
   private async openTokenedSocket(): Promise<WebSocket> {
     const token = await this.creds.identity!.getToken();
     const sep = this.creds.url.includes('?') ? '&' : '?';
@@ -274,11 +278,13 @@ export class Connection {
         throw new Error('session expired');
       }
       if (this.creds.identity) {
-        // The token has to exist *before* the socket that redeems it
-        // opens (`hotline-ng-identity.md` §8), so a resume that failed
-        // cannot fall through to `doLogin()` on this same, tokenless
-        // socket the way a classic login would. Close it and start over
-        // with one that carries a token.
+        // The transport token has to exist *before* the socket that
+        // redeems it opens — it's presented in the upgrade URL itself
+        // (hxd-ng's `docs/hotline-ng-auth.md` §7.1), not on a frame sent
+        // after — so a resume that failed cannot fall through to
+        // `doLogin()` on this same, tokenless socket the way a classic
+        // login would. Close it and start over with one that carries a
+        // token.
         ws.onclose = null;
         ws.onmessage = null;
         ws.close();
@@ -297,8 +303,9 @@ export class Connection {
   private async doLogin(): Promise<void> {
     const params: LoginParams = { icon: this.creds.icon };
     // An identity socket ignores `login`/`password` — the token already
-    // said who this is (§6.2) — and sending them would only invite the
-    // question of why a password is being typed at all for this path.
+    // said who this is (hxd-ng's `docs/hotline-ng-identity.md` §6.1) —
+    // and sending them would only invite the question of why a password
+    // is being typed at all for this path.
     if (!this.creds.identity) {
       params.login = this.creds.login;
       params.password = this.creds.password;

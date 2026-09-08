@@ -2,7 +2,9 @@
  * The CBOR subset the identity objects use (RFC 8949 §4.2.1 deterministic
  * encoding), byte-for-byte compatible with hxd-ng's
  * `crates/hl-identity/src/cbor.rs` — checked against that file directly,
- * not just against the prose in `docs/hotline-ng-identity.md`.
+ * not just against the prose in hxd-ng's `docs/hotline-ng-auth.md` §4.1
+ * (the rules `docs/hotline-ng-identity.md` §3.1 also points to, for the
+ * objects this codec ultimately serves).
  *
  * Five major types: unsigned integer, byte string, text string, array,
  * map. `decodeCanonical` is the only decoder exported, and it works the

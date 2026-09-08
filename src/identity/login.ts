@@ -1,18 +1,19 @@
 /**
- * Turning an already-enrolled device into an identity login
- * (`docs/identity-keys.md` §5, §8): fetch discovery, then hand back a
- * token-minting closure `Connection` can call whenever it needs a fresh
- * one — on the first attach, and again if a resume fails and a new
- * socket has to open (`packages/hotline-ng/src/connection.ts`).
+ * Turning an already-enrolled device into an identity login (this
+ * repo's own `docs/identity-keys.md` §5, §8): fetch discovery, then
+ * hand back a token-minting closure `Connection` can call whenever it
+ * needs a fresh one — on the first attach, and again if a resume fails
+ * and a new socket has to open (`packages/hotline-ng/src/connection.ts`).
  *
  * Linking an existing classic account is deliberately not something
  * this module can do: every path that writes a link requires the
- * device certificate's `manage` bit (`hotline-ng-identity.md` §8.2), and
- * a Phase B browser's certificate never carries it (§5's `WEB = LOGIN |
- * MESSAGE`). Linking happens out-of-band with `hlid link`, which is
- * what the identity panel's second command line is for — by the time
- * this module runs, a link either already exists on the server or it
- * doesn't, and nothing here can change that.
+ * device certificate's `manage` bit (hxd-ng's
+ * `docs/hotline-ng-identity.md` §8.2), and a Phase B browser's
+ * certificate never carries it (`docs/identity-keys.md` §5's `WEB =
+ * LOGIN | MESSAGE`). Linking happens out-of-band with `hlid link`,
+ * which is what the identity panel's second command line is for — by
+ * the time this module runs, a link either already exists on the
+ * server or it doesn't, and nothing here can change that.
  */
 
 import {
@@ -32,13 +33,16 @@ import type { StoredDevice } from './storage';
 export interface IdentityLoginPlan {
   discovery: Discovery;
   /** Whether a never-seen identity gets a guest session or an invented
-   *  account here — the question §5.1 says a client must ask before its
-   *  first auth against a `create` server, and only where it matters. */
+   *  account here — hxd-ng's `docs/hotline-ng-identity.md` §5.3 is where
+   *  the `create` flag and this trade-off are described; a client should
+   *  ask before its first auth against a `create` server, and only
+   *  where it matters. */
   couldCreate: boolean;
   identity: NonNullable<Credentials['identity']>;
   /** The most recent auth's own guess at what happened. A prediction,
-   *  not a commitment (§5.2) — `self.identity.outcome` off the login
-   *  reply is the one to trust; this is for showing the guess sooner. */
+   *  not a commitment (hxd-ng's `docs/hotline-ng-identity.md` §5.3) —
+   *  `self.identity.outcome` off the login reply is the one to trust;
+   *  this is for showing the guess sooner. */
   lastOutcome: () => AuthSuccess | null;
 }
 

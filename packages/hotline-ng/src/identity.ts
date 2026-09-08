@@ -1,20 +1,27 @@
 /**
  * Wire-level identity: the signed objects, the fingerprint, and the HTTP
- * calls of `docs/hotline-ng-identity.md` §3–§5. Lives in this
- * dependency-free package rather than the app, on the same reasoning as
- * `connection.ts` — a second client (a bot, a bridge) gets identity
- * without reimplementing it.
+ * calls that put them on the wire. Two documents in the hxd-ng repo
+ * (sibling checkout, not part of this one) split what used to be one:
+ * hxd-ng's `docs/hotline-ng-identity.md` §3 defines the signed objects
+ * and §5 the identity-specific parts of authentication (the `create`
+ * flag, the `outcome`/`account` response fields, linking); hxd-ng's
+ * `docs/hotline-ng-auth.md` §5–§7 defines the transport underneath —
+ * discovery, the challenge and mTLS bindings, and opening the
+ * WebSocket with a token. Lives in this dependency-free package rather
+ * than the app, on the same reasoning as `connection.ts` — a second
+ * client (a bot, a bridge) gets identity without reimplementing it.
  *
  * What this module does *not* do: hold a device's private keys (that's
  * `src/identity/storage.ts`, because `IndexedDB` and non-extractable
  * `CryptoKey`s are a browser concern, not a wire concern), or build a
- * device certificate or user card — a Phase B client (`docs/identity-keys.md`)
- * never signs either; it only decodes ones `hlid` produced, and signs the
- * one thing a device key is for, the login proof.
+ * device certificate or user card — a Phase B client (this repo's own
+ * `docs/identity-keys.md`) never signs either; it only decodes ones
+ * `hlid` produced, and signs the one thing a device key is for, the
+ * login proof.
  *
  * Field names, domains and size limits are checked against hxd-ng's
  * `crates/hl-identity/src/{cert,card,keys,proof}.rs`, not just against
- * the doc's prose.
+ * the docs' prose.
  */
 
 import { cBytes, cMap, cUint, decodeCanonical, encode, mapGet, mapWithout, type CborValue } from './cbor';
@@ -211,8 +218,9 @@ function openEnvelope(bytes: Uint8Array): Envelope {
 
 /** Verify a signed object's envelope against `publicKey` under `domain`.
  *  Returns the decoded map on success. The server re-verifies everything
- *  it is handed; this exists for the enrolment paste (§7.1 step 4) so a
- *  bad paste is caught locally rather than at `/identity/auth`. */
+ *  it is handed; this exists for the enrolment paste (this repo's own
+ *  `docs/identity-keys.md` §7.1 step 4) so a bad paste is caught locally
+ *  rather than at `/identity/auth`. */
 export async function verifyEnvelope(bytes: Uint8Array, publicKey: Uint8Array, domain: string): Promise<CborValue> {
   const { value, signedBytes, sig } = openEnvelope(bytes);
   const key = await crypto.subtle.importKey('raw', bufferSource(publicKey), { name: 'Ed25519' }, false, ['verify']);
@@ -268,10 +276,10 @@ export function decodeDeviceCert(bytes: Uint8Array): DeviceCert {
 // A Phase B client never signs a card, never inspects its attestations
 // (the server tells the client the resulting `handle` at auth time — see
 // `AuthSuccess`), and only ever forwards the exact bytes it was given.
-// So only the fields enrolment actually reads (§7.1 step 4: does this
-// card name the same identity as the pasted certificate?) are decoded;
-// everything else is unknown-and-ignored, same as the spec allows any
-// reader to treat it.
+// So only the fields enrolment actually reads (this repo's own
+// `docs/identity-keys.md` §7.1 step 4: does this card name the same
+// identity as the pasted certificate?) are decoded; everything else is
+// unknown-and-ignored, same as the spec allows any reader to treat it.
 
 export const CARD_DOMAIN = 'hl-identity/card/v1';
 export const CARD_MAX_BYTES = 16 * 1024;
@@ -297,7 +305,8 @@ export function decodeCard(bytes: Uint8Array): Card {
   };
 }
 
-// --- login proof (§3.6) ------------------------------------------------
+// --- login proof (docs/hotline-ng-identity.md §3.6, table in
+// docs/hotline-ng-auth.md §6.2) ------------------------------------------
 
 export const LOGIN_PROOF_DOMAIN = 'hl-identity/login/v1';
 
@@ -325,13 +334,15 @@ export async function signLoginProof(deviceSignKey: CryptoKey, fields: LoginProo
   return encode(cMap([...unsigned, ['sig', cBytes(sig)]]));
 }
 
-// --- HTTP: discovery, challenge, auth (§4, §5.2) ---------------------------
+// --- HTTP: discovery, challenge, auth (hxd-ng's docs/hotline-ng-auth.md
+// §5 discovery, §6.2 challenge binding; docs/hotline-ng-identity.md §4
+// layers the profile's own discovery fields on top) ----------------------
 
 /** `ws(s)://host:port/...` → `http(s)://host:port` — every identity HTTP
  *  call is addressed from the connect URL, not the page's own origin, so
  *  a custom server (not just the vite-proxied default) is reached
- *  directly. Cross-origin, that needs server-side CORS (spec §9); this
- *  client does not add any. */
+ *  directly. Cross-origin, that needs server-side CORS (this repo's own
+ *  `docs/identity-keys.md` §9); this client does not add any. */
 export function wsToHttp(wsUrl: string): string {
   const u = new URL(wsUrl);
   u.protocol = u.protocol === 'wss:' ? 'https:' : 'http:';
@@ -398,14 +409,15 @@ export interface AuthRequest {
   card: Uint8Array;
   deviceCert: Uint8Array;
   proof: Uint8Array;
-  /** The hop *behind* this client, per §5.2 — absent means the default,
-   *  `local`. Only a tunnel forwarding over a non-loopback hop should
-   *  ever say `cleartext`; hx-ng is always the endpoint, so it never
-   *  sends this field at all. */
+  /** The hop *behind* this client, per hxd-ng's `docs/hotline-ng-auth.md`
+   *  §6.2 — absent means the default, `local`. Only a tunnel forwarding
+   *  over a non-loopback hop should ever say `cleartext`; hx-ng is
+   *  always the endpoint, so it never sends this field at all. */
   downstream?: 'local' | 'cleartext';
-  /** Suppress account creation on this call (§5.1, §8.1). A client about
-   *  to link an existing account, or one that wants to stay a guest,
-   *  sends `false`; omitting it accepts whatever `new_accounts` does. */
+  /** Suppress account creation on this call (hxd-ng's
+   *  `docs/hotline-ng-identity.md` §5.3, §8.1). A client about to link
+   *  an existing account, or one that wants to stay a guest, sends
+   *  `false`; omitting it accepts whatever `new_accounts` does. */
   create?: boolean;
   login?: string;
   password?: string;

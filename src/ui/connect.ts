@@ -31,9 +31,10 @@ export interface Details {
 }
 
 const KEY = 'hxd-ng.connect';
-/** Per-server answers to the §5.1 question, kept separate from `KEY`
- *  because it survives independently of "what this browser last typed"
- *  and is keyed by server rather than being the one remembered form. */
+/** Per-server answers to the create-account-or-guest question (hxd-ng's
+ *  `docs/hotline-ng-identity.md` §5.3), kept separate from `KEY` because
+ *  it survives independently of "what this browser last typed" and is
+ *  keyed by server rather than being the one remembered form. */
 const IDENTITY_CREATE_KEY = 'hxd-ng.connect.identity-create';
 
 export function remembered(config: AppConfig): Details {
@@ -108,14 +109,15 @@ function rememberIdentityCreateChoice(url: string, makeAccount: boolean): void {
 }
 
 /**
- * §5.1's question, asked inline and only where discovery says it
- * matters: a never-seen identity on a `new_accounts = create` server
- * either gets a guest session or an invented account, and the client
- * must not send its first auth without knowing which. Linking an
- * existing account is deliberately not offered here — it happens with
- * `hlid link` (the identity panel's second command), because a
+ * The create-account-or-guest question, asked inline and only where
+ * discovery says it matters: a never-seen identity on a `new_accounts =
+ * create` server either gets a guest session or an invented account
+ * (hxd-ng's `docs/hotline-ng-identity.md` §5.3), and the client must
+ * not send its first auth without knowing which. Linking an existing
+ * account is deliberately not offered here — it happens with `hlid
+ * link` (the identity panel's second command), because a
  * web-capability certificate cannot write a link itself
- * (`docs/hotline-ng-identity.md` §8.2).
+ * (`docs/hotline-ng-identity.md` §8.2, same document).
  */
 function askCreateChoice(container: HTMLElement): Promise<boolean> {
   return new Promise((resolve) => {
@@ -176,7 +178,7 @@ export function connectScreen(
   const submit = h('button', { class: 'primary', type: 'submit' }, 'Connect');
   const identityKeysLink = h('button', { class: 'ghost', type: 'button' }, 'Identity keys…');
   identityKeysLink.onclick = onIdentityKeys;
-  const identityBtn = h('button', { class: 'ghost', type: 'button', hidden: true }, 'Log in with identity');
+  const identityBtn = h('button', { class: 'ghost', type: 'button' }, 'Log in with identity');
   const identityChooser = h('div', {});
 
   const form = h(
@@ -196,13 +198,12 @@ export function connectScreen(
     h('p', {}, identityKeysLink),
   );
 
-  // The button only makes sense once this browser actually holds an
-  // enrolled device — checked once, asynchronously, same as the
-  // password-vs-login focus decision below.
-  void getActiveDevice().then((device) => {
-    identityBtn.hidden = !device?.cert;
-  });
-
+  // Always shown rather than hidden pending an async `getActiveDevice()`
+  // check: enrolling happens from the Identity panel this same screen
+  // can open, so a check made once at mount would go stale the moment
+  // someone enrols without a reload. The click handler below re-checks
+  // fresh every time and reports "not enrolled yet" as the ordinary
+  // error it is.
   identityBtn.onclick = () => {
     void (async () => {
       const targetUrl = url.input.value.trim() || config.defaultServer;

@@ -13,7 +13,6 @@
  */
 
 import {
-  CAP_INBOX,
   isEvent,
   isReply,
   RESYNC_REQUIRED,
@@ -337,9 +336,22 @@ export class Connection {
    * resume would cost the user their place in the room to fix nothing.
    */
   private async pullMissedMail(): Promise<void> {
-    if (!this.hooks.onMissedMail || !this.hasCap(CAP_INBOX)) return;
+    if (!this.hooks.onMissedMail) return;
     try {
-      this.hooks.onMissedMail(await this.inbox());
+      // Not gated on `caps`. Everywhere else in this file `caps` is a
+      // hint about what to *draw*, and making it a gate here would mean
+      // a server that under-reports its own extensions silently loses
+      // mail rather than answering `no_inbox` — which is a refusal this
+      // already handles, and a cheaper thing to be wrong about than a
+      // missing message.
+      //
+      // The largest page the wire allows, because this one is not
+      // browsing: it is covering a gap whose size nobody knows. A gap
+      // holding more than this needs the caller to page back with
+      // `inbox({ before })`, and there is no way to know that from
+      // here — the client's position is a seq and the mailbox is
+      // numbered in message ids, which do not convert.
+      this.hooks.onMissedMail(await this.inbox({ limit: 200 }));
     } catch (e) {
       this.trace('in', 'missed-mail-failed', String(e instanceof Error ? e.message : e), true);
     }

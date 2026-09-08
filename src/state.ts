@@ -81,6 +81,8 @@ export function addressOf(c: Conversation): { to_login: string } | { to: number 
 
 const uidKey = (uid: number): string => `uid:${uid}`;
 const loginKey = (login: string): string => `login:${login.toLowerCase()}`;
+/** The last-resort key, for a sender the wire gave no name at all. */
+const nickKey = (nick: string): string => `nick:${nick}`;
 
 /** How many lines a transcript keeps. Long enough that scrolling back
  *  through an evening works, short enough that a room left open
@@ -101,6 +103,12 @@ export class Store {
    *  conversation may sit under two keys — a uid and a login — which is
    *  what stops the same person appearing twice. */
   private pmIndex = new Map<string, ConvId>();
+  /** Conversation ids are opaque and unique. Deriving one from whichever
+   *  name we had first meant a *stale* id could be recomputed: a guest
+   *  parts, their uid is reissued, and the next person's conversation
+   *  lands on the previous one's transcript. Every lookup goes through
+   *  `pmIndex` instead, so an id nothing points at is unreachable. */
+  private pmSeq = 0;
 
   constructor() {
     this.conversations.set(LOBBY, {
@@ -187,6 +195,7 @@ export class Store {
   openPm(who: { uid?: number; login?: string; nick: string }): Conversation {
     const uid = who.uid !== undefined && who.uid > 0 ? who.uid : undefined;
     const login = who.login || undefined;
+    const nameless = uid === undefined && login === undefined;
 
     const byLogin = login !== undefined ? this.pmWith({ login }) : undefined;
     const byUid = uid !== undefined ? this.pmWith({ uid }) : undefined;
@@ -198,14 +207,23 @@ export class Store {
     // index entry pointing at it.
     if (byLogin && byUid && byLogin !== byUid) this.mergePm(byUid, byLogin);
 
-    let c = byLogin ?? byUid;
+    // A sender the wire gave no name at all — stored mail whose account
+    // has gone — can only be recognised by their nick. The alias is
+    // consulted *only* for another equally nameless sighting, never to
+    // resolve a uid or a login: `alice` with no account and `alice` with
+    // one are not known to be the same person, and assuming they are is
+    // the login-recycling failure `private-messages.md` §4 exists to
+    // prevent. Two threads is the safe way to be wrong here.
+    const byNick = nameless
+      ? this.conversations.get(this.pmIndex.get(nickKey(who.nick)) ?? '')
+      : undefined;
+
+    let c = byLogin ?? byUid ?? byNick;
     if (!c) {
-      // The id is whichever name we had first and never changes, so
-      // anything already holding it — the rail, `active` — stays valid
-      // when the other name turns up later.
-      const id = `pm:${login !== undefined ? loginKey(login) : uid !== undefined ? uidKey(uid) : `nick:${who.nick}`}`;
+      const id = `pm:${++this.pmSeq}`;
       c = { id, kind: 'pm', peer: {}, title: who.nick, lines: [], unread: 0 };
       this.conversations.set(id, c);
+      if (nameless) this.pmIndex.set(nickKey(who.nick), id);
     }
     if (login !== undefined) {
       c.peer.login = login;
@@ -233,21 +251,30 @@ export class Store {
 
   closePm(id: ConvId): void {
     if (id === LOBBY) return;
-    const c = this.conversations.get(id);
-    if (c) {
-      if (c.peer.login !== undefined) this.pmIndex.delete(loginKey(c.peer.login));
-      if (c.peer.uid !== undefined) this.pmIndex.delete(uidKey(c.peer.uid));
-    }
+    // Every alias, whatever kind it is — reading them back off `peer`
+    // would miss the nick one, which is deliberately not stored there.
+    for (const [k, v] of [...this.pmIndex]) if (v === id) this.pmIndex.delete(k);
     this.conversations.delete(id);
     if (this.active === id) this.active = LOBBY;
   }
 
-  add(id: ConvId, line: Line): Conversation | undefined {
+  /**
+   * `fresh` is whether this line should bump the conversation's unread
+   * count, and it is not the same question as whether the conversation
+   * is on screen.
+   *
+   * A message pulled back out of the store may already have been read —
+   * on this account, from some other client — and the server says so in
+   * `read`. Counting it would put a badge on a conversation for mail its
+   * owner has already dealt with, which is exactly the thing a badge is
+   * supposed to be trustworthy about.
+   */
+  add(id: ConvId, line: Line, fresh = true): Conversation | undefined {
     const c = this.conversations.get(id);
     if (!c) return undefined;
     c.lines.push(line);
     if (c.lines.length > MAX_LINES) c.lines.splice(0, c.lines.length - MAX_LINES);
-    if (id !== this.active) c.unread++;
+    if (fresh && id !== this.active) c.unread++;
     return c;
   }
 

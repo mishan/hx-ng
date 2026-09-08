@@ -212,9 +212,16 @@ export type MsgParams = { text: string; guid?: string } & (
  * weaker one.
  */
 export function newGuid(): string {
-  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
-    return crypto.randomUUID();
+  // `protocol` is the layer this package promises runs anywhere, so the
+  // absence of a CSPRNG is said plainly rather than thrown as a
+  // ReferenceError from the middle of the fallback. A guid picked
+  // without one would be worse than none: two clients could collide and
+  // the server would treat one person's message as a duplicate of
+  // another's.
+  if (typeof crypto === 'undefined' || typeof crypto.getRandomValues !== 'function') {
+    throw new Error('newGuid needs Web Crypto: no global `crypto.getRandomValues` here');
   }
+  if (typeof crypto.randomUUID === 'function') return crypto.randomUUID();
   const b = new Uint8Array(16);
   crypto.getRandomValues(b);
   b[6] = (b[6]! & 0x0f) | 0x40; // version 4

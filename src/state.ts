@@ -25,15 +25,42 @@ export interface Line {
   /** Set on lines this client generated, so the transcript can mark them
    *  as not having come from the server. */
   local?: boolean;
+  /** This message waited in the store before it reached us. Worth saying:
+   *  its timestamp is when it was *sent*, which may be days ago, and a
+   *  reply is not as prompt as it looks. */
+  queued?: boolean;
+  /** The store's id, when it has one. `msg_read` marks up to it. */
+  id?: number;
 }
 
 export type ConvId = string;
 
+/**
+ * How the far half of a private conversation is named on the wire.
+ *
+ * Two names, because the protocol has two and they have different
+ * lifetimes. `uid` is a roster row and lasts as long as the session
+ * behind it; `login` is an account and outlives every session it ever
+ * had. A message that waited in the store arrives with `uid: 0` and a
+ * login, because there was no session to point at when it was flushed —
+ * so a client that keys conversations on uid alone files all of its
+ * offline mail under one imaginary person and cannot answer any of it.
+ *
+ * Both are optional and a conversation accumulates them: clicking a
+ * roster row knows only a uid (the roster carries no logins), and the
+ * first `msg` from that person adds the login to the same conversation
+ * rather than starting a second one.
+ */
+export interface Peer {
+  uid?: number;
+  login?: string;
+}
+
 export interface Conversation {
   id: ConvId;
   kind: 'lobby' | 'pm';
-  /** The other party, for a PM conversation. */
-  uid?: number;
+  /** Empty for the lobby. */
+  peer: Peer;
   title: string;
   lines: Line[];
   unread: number;
@@ -41,9 +68,19 @@ export interface Conversation {
 
 export const LOBBY: ConvId = 'lobby';
 
-export function pmId(uid: number): ConvId {
-  return `pm:${uid}`;
+/** What `msg` should carry to reach this conversation's other half, or
+ *  `null` when nothing can: a guest who has left the roster has no login
+ *  to fall back on, and their uid is somebody else's now or nobody's. */
+export function addressOf(c: Conversation): { to_login: string } | { to: number } | null {
+  // The login first. It is the durable name, and it is the only one that
+  // reaches someone who is not here.
+  if (c.peer.login !== undefined) return { to_login: c.peer.login };
+  if (c.peer.uid !== undefined) return { to: c.peer.uid };
+  return null;
 }
+
+const uidKey = (uid: number): string => `uid:${uid}`;
+const loginKey = (login: string): string => `login:${login.toLowerCase()}`;
 
 /** How many lines a transcript keeps. Long enough that scrolling back
  *  through an evening works, short enough that a room left open
@@ -56,11 +93,20 @@ export class Store {
   users = new Map<number, User>();
   conversations = new Map<ConvId, Conversation>();
   active: ConvId = LOBBY;
+  /** Bumped whenever a transcript is rewritten wholesale rather than
+   *  appended to — today only a merge. A view that draws incrementally
+   *  watches this to know its DOM has gone stale underneath it. */
+  revision = 0;
+  /** Every name a PM conversation answers to, mapped to its id. One
+   *  conversation may sit under two keys — a uid and a login — which is
+   *  what stops the same person appearing twice. */
+  private pmIndex = new Map<string, ConvId>();
 
   constructor() {
     this.conversations.set(LOBBY, {
       id: LOBBY,
       kind: 'lobby',
+      peer: {},
       title: 'Lobby',
       lines: [],
       unread: 0,
@@ -100,6 +146,19 @@ export class Store {
   remove(uid: number): User | undefined {
     const u = this.users.get(uid);
     this.users.delete(uid);
+    // The roster row is gone, and with it the only thing that made this
+    // uid mean anything. Uids are the legacy wire's 16-bit ids and the
+    // server reuses them, so a conversation that kept this one would
+    // eventually deliver to whoever inherited it. A conversation with a
+    // login is unaffected — that is the name that survives — and one
+    // without becomes unaddressable, which is the truth about a guest
+    // who left.
+    const id = this.pmIndex.get(uidKey(uid));
+    if (id !== undefined) {
+      this.pmIndex.delete(uidKey(uid));
+      const c = this.conversations.get(id);
+      if (c) c.peer.uid = undefined;
+    }
     return u;
   }
 
@@ -107,21 +166,78 @@ export class Store {
     return this.conversations.get(id);
   }
 
-  /** Open (or find) the PM conversation with a user. */
-  openPm(uid: number, nick: string): Conversation {
-    const id = pmId(uid);
-    let c = this.conversations.get(id);
+  /** The conversation this person already has, under either of their
+   *  names, or undefined. */
+  pmWith(who: Peer): Conversation | undefined {
+    const id =
+      (who.login !== undefined ? this.pmIndex.get(loginKey(who.login)) : undefined) ??
+      (who.uid !== undefined ? this.pmIndex.get(uidKey(who.uid)) : undefined);
+    return id === undefined ? undefined : this.conversations.get(id);
+  }
+
+  /**
+   * Find or create the conversation with someone, folding whatever this
+   * sighting of them knows into whatever earlier ones did.
+   *
+   * A uid of 0 is not a uid — it is the wire saying "this message
+   * outlived its sender's session" — so it is dropped here rather than
+   * indexed, which is what keeps every offline sender from sharing one
+   * conversation.
+   */
+  openPm(who: { uid?: number; login?: string; nick: string }): Conversation {
+    const uid = who.uid !== undefined && who.uid > 0 ? who.uid : undefined;
+    const login = who.login || undefined;
+
+    const byLogin = login !== undefined ? this.pmWith({ login }) : undefined;
+    const byUid = uid !== undefined ? this.pmWith({ uid }) : undefined;
+    // Two conversations, one person. It happens in the obvious way:
+    // offline mail from `alice` opens one under her account, then she
+    // arrives and gets clicked in the roster — which carries no logins,
+    // so that opens a second under her uid — and her next message names
+    // both. Fold them rather than leaving the older one stranded with no
+    // index entry pointing at it.
+    if (byLogin && byUid && byLogin !== byUid) this.mergePm(byUid, byLogin);
+
+    let c = byLogin ?? byUid;
     if (!c) {
-      c = { id, kind: 'pm', uid, title: nick, lines: [], unread: 0 };
+      // The id is whichever name we had first and never changes, so
+      // anything already holding it — the rail, `active` — stays valid
+      // when the other name turns up later.
+      const id = `pm:${login !== undefined ? loginKey(login) : uid !== undefined ? uidKey(uid) : `nick:${who.nick}`}`;
+      c = { id, kind: 'pm', peer: {}, title: who.nick, lines: [], unread: 0 };
       this.conversations.set(id, c);
-    } else {
-      c.title = nick;
     }
+    if (login !== undefined) {
+      c.peer.login = login;
+      this.pmIndex.set(loginKey(login), c.id);
+    }
+    if (uid !== undefined) {
+      c.peer.uid = uid;
+      this.pmIndex.set(uidKey(uid), c.id);
+    }
+    if (who.nick) c.title = who.nick;
     return c;
+  }
+
+  /** Pour `from` into `into`, oldest line first, and forget `from`. */
+  private mergePm(from: Conversation, into: Conversation): void {
+    into.lines = [...into.lines, ...from.lines].sort((a, b) => a.t - b.t);
+    if (into.lines.length > MAX_LINES) into.lines.splice(0, into.lines.length - MAX_LINES);
+    into.unread += from.unread;
+    into.peer = { uid: into.peer.uid ?? from.peer.uid, login: into.peer.login ?? from.peer.login };
+    for (const [k, v] of this.pmIndex) if (v === from.id) this.pmIndex.set(k, into.id);
+    this.conversations.delete(from.id);
+    if (this.active === from.id) this.active = into.id;
+    this.revision++;
   }
 
   closePm(id: ConvId): void {
     if (id === LOBBY) return;
+    const c = this.conversations.get(id);
+    if (c) {
+      if (c.peer.login !== undefined) this.pmIndex.delete(loginKey(c.peer.login));
+      if (c.peer.uid !== undefined) this.pmIndex.delete(uidKey(c.peer.uid));
+    }
     this.conversations.delete(id);
     if (this.active === id) this.active = LOBBY;
   }

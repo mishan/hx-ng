@@ -66,15 +66,19 @@ function lineEl(line: Line, prev: Line | undefined, store: Store): HTMLElement {
     prev?.kind === 'chat' &&
     prev.from?.uid === from?.uid &&
     prev.from?.nick === from?.nick &&
+    !!prev.queued === !!line.queued &&
     line.t - prev.t < 5 * 60 * 1000;
 
   const me = from?.uid === store.self?.uid;
-  const user = from ? store.user(from.uid) : undefined;
+  // A message that waited has no live uid to look a face up by — the
+  // sender had no session when it was flushed — so it gets no icon
+  // rather than the wrong one.
+  const user = from && from.uid > 0 ? store.user(from.uid) : undefined;
 
   return h(
     'div',
     {
-      class: `line chat${sameSpeaker ? ' cont' : ''}${me ? ' mine' : ''}`,
+      class: `line chat${sameSpeaker ? ' cont' : ''}${me ? ' mine' : ''}${line.queued ? ' queued' : ''}`,
       title: new Date(line.t).toLocaleString(),
     },
     h('span', { class: 'time' }, stamp(line, prev)),
@@ -83,8 +87,17 @@ function lineEl(line: Line, prev: Line | undefined, store: Store): HTMLElement {
       { class: 'gutter' },
       sameSpeaker || !user ? null : icon(user.icon, CHAT_SCALE),
     ),
-    h('span', { class: 'name', title: from ? `uid ${from.uid}` : '' }, sameSpeaker ? '' : (from?.nick ?? '')),
-    h('span', { class: 'text' }, ...linkify(line.text)),
+    h('span', { class: 'name', title: from?.login ?? (from ? `uid ${from.uid}` : '') }, sameSpeaker ? '' : (from?.nick ?? '')),
+    h(
+      'span',
+      { class: 'text' },
+      // The legacy wire prepends `[queued 2026-09-06 14:22 UTC]` to the
+      // body because it has nowhere else to put it. Here it is a tag
+      // beside the text and the timestamp is already the line's own, in
+      // the reader's timezone rather than in UTC.
+      line.queued ? h('span', { class: 'tag', title: 'Held by the server until you came back' }, 'queued') : null,
+      ...linkify(line.text),
+    ),
   );
 }
 

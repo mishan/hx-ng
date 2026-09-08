@@ -16,18 +16,21 @@ import {
   Connection,
   errorText,
   hasSavedSession,
+  newGuid,
   screenShareBlockedReason,
   VoiceSession,
   WireFailure,
   type ConnState,
   type Credentials,
+  type InboxOk,
+  type MsgParams,
   type RemoteVideo,
   type User,
   type VideoKind,
 } from '@hotline-ng/client';
 
 import type { AppConfig } from '../config';
-import { LOBBY, pmId, type ConvId, type Line, Store, styleToKind } from '../state';
+import { addressOf, LOBBY, type ConvId, type Line, Store, styleToKind } from '../state';
 import { connectScreen, remembered, type Details } from './connect';
 import { DebugPanel } from './debug';
 import { clock, fill, h } from './dom';
@@ -48,6 +51,8 @@ export class App {
   private debug: DebugPanel;
   private pingTimer: number | null = null;
   private url = '';
+  /** The store revision the transcript element was last drawn from. */
+  private drawnRevision = 0;
   /** Whether one's own camera is shown back to oneself. A preview is the
    *  only way to find out that a camera is pointed at the ceiling, or
    *  that it is not sending at all, without asking the room. */
@@ -159,6 +164,7 @@ export class App {
             : 'Reconnected.',
         );
       },
+      onMissedMail: (ok) => this.mergeStoredMail(ok),
       onEnded: (reason) => {
         this.say(reason);
         this.media?.teardown();
@@ -219,7 +225,7 @@ export class App {
           kind: 'notice',
           text: `${before.nick} is now known as ${d.user.nick}.`,
         });
-        const pm = this.store.conversation(pmId(d.user.uid));
+        const pm = this.store.pmWith({ uid: d.user.uid });
         if (pm) pm.title = d.user.nick;
       }
       if (d.user.uid === this.store.self?.uid) this.store.self = d.user;
@@ -249,8 +255,18 @@ export class App {
     });
 
     conn.on('msg', (d) => {
-      const conv = this.store.openPm(d.from.uid, d.from.nick);
-      this.push(conv.id, { t: Date.now(), kind: 'chat', from: d.from, text: d.text });
+      // `at` rather than now: a message that waited in the store was
+      // *sent* whenever it was sent, and stamping the flush time on it
+      // would make a week-old message read as having just arrived.
+      const conv = this.store.openPm({ uid: d.from.uid, login: d.from.login, nick: d.from.nick });
+      this.push(conv.id, {
+        t: d.at * 1000,
+        kind: 'chat',
+        from: d.from,
+        text: d.text,
+        queued: d.queued,
+        id: d.id,
+      });
       this.renderRail();
     });
 
@@ -330,8 +346,21 @@ export class App {
     if (text.startsWith('/')) return this.command(text);
 
     const conv = this.store.conversation(this.store.active);
-    if (conv?.kind === 'pm' && conv.uid !== undefined) {
-      await conn.request('msg', { to: conv.uid, text });
+    if (conv?.kind === 'pm') {
+      const to = addressOf(conv);
+      if (!to) {
+        return this.say(
+          `There is no way to reach ${conv.title}: they have left, and the message they sent named no account to answer.`,
+        );
+      }
+      // A guid makes a resend the same message rather than a second one.
+      // Nothing here resends automatically yet, so today this only stops
+      // a double-tap from arriving twice — but it is the field that makes
+      // a retry safe at all, and it costs one line.
+      const guid = newGuid();
+      const params: MsgParams =
+        'to_login' in to ? { to_login: to.to_login, text, guid } : { to: to.to, text, guid };
+      const ok = await conn.msg(params);
       // PMs have no echo, so the sender's own half is local.
       const me = this.store.self;
       this.push(conv.id, {
@@ -341,6 +370,9 @@ export class App {
         text,
         local: true,
       });
+      if (ok.queued) {
+        this.say(`${conv.title} is not here. The server is holding that for them.`);
+      }
       return;
     }
     await conn.request('chat', { text });
@@ -357,9 +389,15 @@ export class App {
         return;
       case 'msg': {
         const [who, ...words] = rest;
-        const target = who ? this.findUser(who) : undefined;
-        if (!target) return this.say(`No such user: ${who ?? '(nobody)'}`);
-        const conv = this.store.openPm(target.uid, target.nick);
+        if (!who) return this.say('Usage: /msg <nick or account> <text>');
+        // A roster row if there is one, and otherwise the argument is
+        // taken as an account name. That second case is the whole point
+        // of `to_login`: it is how you write to somebody who is not here,
+        // and how you answer mail that arrived while they were gone.
+        const target = this.findUser(who);
+        const conv = target
+          ? this.store.openPm({ uid: target.uid, nick: target.nick })
+          : this.store.openPm({ login: who, nick: who });
         this.select(conv.id);
         if (words.length) await this.send(words.join(' '));
         return;
@@ -398,7 +436,7 @@ export class App {
         return;
       case 'help':
         return this.say(
-          '/me · /msg <nick> <text> · /nick <name> · /icon <n> · /clear · /close · /drop · /debug · /logout',
+          '/me · /msg <nick or account> <text> · /nick <name> · /icon <n> · /clear · /close · /drop · /debug · /logout',
         );
       default:
         return this.say(`Unknown command: /${word}`);
@@ -434,11 +472,58 @@ export class App {
     this.renderComposerHint();
   }
 
+  /**
+   * Private messages recovered from the store after a resync.
+   *
+   * The gap the outbox dropped is unrecoverable as *events*, and any
+   * `msg` in it was already marked delivered — so this is the only copy
+   * that will ever arrive. Deduplicated on the store's id, because the
+   * page may already be showing some of these: the session went live
+   * again the moment `resume` answered `resync_required`, so mail
+   * delivered between then and the `inbox` reply arrives both ways.
+   *
+   * Appended rather than merged by timestamp. These are older than what
+   * is on screen and it shows, which is why they are marked `queued` —
+   * a line whose stamp is Tuesday sitting under one from just now is
+   * better than a client that quietly reorders a transcript.
+   */
+  private mergeStoredMail(ok: InboxOk): void {
+    const seen = new Set<number>();
+    for (const c of this.store.conversations.values()) {
+      for (const l of c.lines) if (l.id !== undefined) seen.add(l.id);
+    }
+    // `inbox` lists newest first; put them back in the order they were sent.
+    let added = 0;
+    for (const m of [...ok.messages].reverse()) {
+      if (seen.has(m.id)) continue;
+      const conv = this.store.openPm({ login: m.from.login, nick: m.from.nick });
+      this.push(conv.id, {
+        t: m.at * 1000,
+        kind: 'chat',
+        from: { uid: 0, nick: m.from.nick, login: m.from.login },
+        text: m.text,
+        queued: true,
+        id: m.id,
+      });
+      added++;
+    }
+    if (added) {
+      this.say(
+        `Recovered ${added} private ${added === 1 ? 'message' : 'messages'} that arrived while this client was behind.`,
+      );
+    }
+    this.renderRail();
+  }
+
   private push(id: ConvId, line: Line): void {
     const conv = this.store.add(id, line);
     if (!conv) return;
-    if (id === this.store.active) appendLine(this.transcript, line, conv, this.store);
-    else this.renderRail();
+    if (id === this.store.active) {
+      // Appending one line assumes the DOM still matches the array it was
+      // drawn from. A merge rewrites that array, so redraw instead.
+      if (this.store.revision !== this.drawnRevision) this.renderTranscript();
+      else appendLine(this.transcript, line, conv, this.store);
+    } else this.renderRail();
     this.renderUnreadTitle();
   }
 
@@ -495,12 +580,16 @@ export class App {
   private renderRail(): void {
     const items = [...this.store.conversations.values()].map((c) => {
       const active = c.id === this.store.active;
+      // Only a conversation whose other half is on the roster has a face
+      // to show. One carried by an account alone — mail from someone who
+      // is not here — falls back to the default icon.
+      const peer = c.peer.uid !== undefined ? this.store.user(c.peer.uid) : undefined;
       const el = h(
         'button',
         { class: `rail-item${active ? ' on' : ''}${c.unread ? ' unread' : ''}` },
         c.kind === 'lobby'
           ? h('span', { class: 'rail-glyph' }, '#')
-          : icon(this.store.user(c.uid!)?.icon ?? 128, 1),
+          : icon(peer?.icon ?? 128, 1),
         h('span', { class: 'rail-title' }, c.title),
         c.unread ? h('span', { class: 'badge' }, String(c.unread)) : null,
       );
@@ -522,7 +611,7 @@ export class App {
     if (!this.media) return;
     renderRoster(this.rosterEl, this.store, this.media, {
       onMessage: (u) => {
-        this.select(this.store.openPm(u.uid, u.nick).id);
+        this.select(this.store.openPm({ uid: u.uid, nick: u.nick }).id);
         this.showRoster(false);
       },
       onClose: () => this.showRoster(false),
@@ -532,6 +621,7 @@ export class App {
   private renderTranscript(): void {
     const conv = this.store.conversation(this.store.active);
     if (conv) renderTranscript(this.transcript, conv, this.store);
+    this.drawnRevision = this.store.revision;
   }
 
   private renderComposerHint(): void {

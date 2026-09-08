@@ -486,6 +486,24 @@ button.call:disabled { opacity: 0.45; cursor: default; }
 .line .text { min-width: 0; }
 
 .line.chat.mine .name { color: var(--accent); }
+
+/* A message the server held while its reader was away. The stamp on it is
+   when it was *sent*, so the tag is what stops a Tuesday timestamp under
+   a line from just now reading as a clock that has gone wrong. */
+.line.queued .text > .tag {
+  display: inline-block;
+  margin-right: 0.4rem;
+  padding: 0 0.3rem;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--surface-2);
+  color: var(--muted);
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  vertical-align: 1px;
+}
 .line.notice .text, .line.system .text { color: var(--muted); font-style: italic; }
 .line.action .text { color: var(--accent); font-style: italic; }
 .line.broadcast .name { color: var(--admin); font-weight: 700; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.05em; padding-top: 0.2rem; }

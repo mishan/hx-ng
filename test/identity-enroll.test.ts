@@ -4,7 +4,6 @@ import { bytesToBase64url, hexToBytes, type DeviceCert } from '@hotline-ng/clien
 
 import {
   buildHlidCertCommand,
-  buildHlidLinkCommand,
   needsRenewal,
   parseEnrollmentPaste,
   validateEnrollment,
@@ -16,7 +15,7 @@ const cardBytes = () => hexToBytes(vectors.card.signed_hex);
 const devicePubHex = vectors.keys.device.public_hex;
 const deviceEncPubHex = vectors.keys.device.public_enc_hex;
 
-describe('buildHlidCertCommand / buildHlidLinkCommand', () => {
+describe('buildHlidCertCommand', () => {
   it('embeds the device keys and the web capability', () => {
     const cmd = buildHlidCertCommand('aa'.repeat(32), 'bb'.repeat(32), { days: 90, name: 'Firefox' });
     expect(cmd).toContain('--device-pub aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
@@ -26,21 +25,12 @@ describe('buildHlidCertCommand / buildHlidLinkCommand', () => {
     expect(cmd).toContain("'Firefox'");
   });
 
-  it('names the server and account for the link line', () => {
-    expect(buildHlidLinkCommand('https://hotline.example.org', 'alice')).toBe(
-      "hlid link --server 'https://hotline.example.org' --login 'alice' --password-stdin",
-    );
-  });
-
   it('shell-quotes a name, server, or login that would otherwise break the command', () => {
     // A space alone would already split into extra shell words; the
     // quote is the sharper case, since it also has to survive *inside*
     // the quoting this function adds.
     const cmd = buildHlidCertCommand('aa'.repeat(32), 'bb'.repeat(32), { name: `Alice's phone` });
     expect(cmd).toContain(String.raw`--name 'Alice'\''s phone'`);
-
-    const link = buildHlidLinkCommand('https://host', `o'brien`);
-    expect(link).toBe(String.raw`hlid link --server 'https://host' --login 'o'\''brien' --password-stdin`);
   });
 });
 

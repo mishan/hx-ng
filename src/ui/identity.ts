@@ -21,7 +21,6 @@ import {
 
 import {
   buildHlidCertCommand,
-  buildHlidLinkCommand,
   fetchCardFallback,
   needsRenewal,
   parseEnrollmentPaste,
@@ -105,30 +104,6 @@ export class IdentityPanel {
     const certCmd = buildHlidCertCommand(devicePubHex, deviceEncPubHex, { days: this.certDays });
     const certPre = h('pre', { class: 'cmd' }, certCmd);
 
-    const loginInput = h('input', {
-      type: 'text',
-      placeholder: 'existing account to link (optional)',
-      spellcheck: false,
-    });
-    const linkPre = h('pre', { class: 'cmd', hidden: true });
-    const updateLink = (): void => {
-      const login = loginInput.value.trim();
-      // `hlid link --server` wants the identity HTTP base, not the ng
-      // WebSocket URL this panel otherwise deals in — a malformed or
-      // empty server address just hides the line rather than showing a
-      // command that can't be right.
-      let httpServer: string | null = null;
-      try {
-        httpServer = this.serverUrl().trim() ? wsToHttp(this.serverUrl().trim()) : null;
-      } catch {
-        httpServer = null;
-      }
-      linkPre.hidden = !(login && httpServer);
-      if (login && httpServer) linkPre.textContent = buildHlidLinkCommand(httpServer, login);
-    };
-    loginInput.oninput = updateLink;
-    updateLink();
-
     const paste = h('textarea', {
       class: 'paste',
       rows: 4,
@@ -155,10 +130,7 @@ export class IdentityPanel {
         { class: 'note' },
         "hlid doesn't write the certificate and card together yet (docs/identity-keys.md §9), so this writes just the certificate — paste it below, and this identity's card too if you have it separately (a second browser can skip the card; the server already has it cached).",
       ),
-      h('h3', {}, '2. Link an existing account here (optional)'),
-      loginInput,
-      linkPre,
-      h('h3', {}, '3. Paste it back'),
+      h('h3', {}, '2. Paste it back'),
       paste,
       error,
       enrollBtn,

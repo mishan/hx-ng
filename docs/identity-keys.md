@@ -304,20 +304,27 @@ enrollment check in §7.1 can report.)
    stores them with no certificate (§4). This costs nothing and can
    happen the first time the user opens the identity panel.
 2. It shows the two public keys as hex, and — the part that makes this
-   bearable — **the exact commands to run**, pre-filled, with a copy
+   bearable — **the exact command to run**, pre-filled, with a copy
    button:
 
    ```
    hlid cert --device-pub 3f2a… --device-enc-pub 91c4… \
      --caps web --days 90 --name "Firefox on the laptop" -o web.bundle
-   hlid link --server https://host --login alice --password-stdin
    ```
 
-   The second line appears when the user has said they mean to link an
-   account (§5.1). Neither line names a key file: they rely on `hlid`
-   having a default directory (§9), because a pre-filled command that
-   guesses `~/.hlid/identity.key` is only exact for someone who followed
-   one particular tutorial.
+   It does not name a key file: it relies on `hlid` having a default
+   directory (§9), because a pre-filled command that guesses
+   `~/.hlid/identity.key` is only exact for someone who followed one
+   particular tutorial.
+
+   **Linking an account is not part of this panel.** It used to print an
+   `hlid link` line beside the certificate command, which meant the two
+   halves of "enroll this browser and use my account" were ceremonies of
+   different shapes — one a code, one a pasted shell command — with
+   nothing tying them together. `identity-enrollment.md` §12 sketches
+   doing both in one trip through the mailbox, and that is where linking
+   should reappear; until it does, `hlid link` is a thing the user runs
+   in a terminal, not a thing this panel pretends to orchestrate.
 3. The user pastes back **one blob**: `hlid cert -o web.bundle` writes
    the certificate and the identity's current card together, base64url,
    and the panel accepts either that or a bare certificate. The card

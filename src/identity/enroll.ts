@@ -48,14 +48,6 @@ export function buildHlidCertCommand(
   return `hlid cert --device-pub ${devicePubHex} --device-enc-pub ${deviceEncPubHex} --caps web --days ${days} --name ${shq(name)} -o cert.bin`;
 }
 
-/** `server` should be the identity HTTP base (`https://host`, per
- *  `docs/identity-keys.md`'s own example) — `hlid` talks to the identity
- *  endpoints, not the ng WebSocket, so callers must convert a `ws(s)://`
- *  connect URL with `wsToHttp()` before this. */
-export function buildHlidLinkCommand(server: string, login: string): string {
-  return `hlid link --server ${shq(server)} --login ${shq(login)} --password-stdin`;
-}
-
 export interface ParsedPaste {
   cert: Uint8Array;
   card: Uint8Array | null;

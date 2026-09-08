@@ -497,14 +497,21 @@ export class App {
     for (const m of [...ok.messages].reverse()) {
       if (seen.has(m.id)) continue;
       const conv = this.store.openPm({ login: m.from.login, nick: m.from.nick });
-      this.push(conv.id, {
-        t: m.at * 1000,
-        kind: 'chat',
-        from: { uid: 0, nick: m.from.nick, login: m.from.login },
-        text: m.text,
-        queued: true,
-        id: m.id,
-      });
+      // The server knows whether this was read, possibly by another
+      // client on the same account. Recovering it must not raise a badge
+      // over mail its owner has already dealt with.
+      this.push(
+        conv.id,
+        {
+          t: m.at * 1000,
+          kind: 'chat',
+          from: { uid: 0, nick: m.from.nick, login: m.from.login },
+          text: m.text,
+          queued: true,
+          id: m.id,
+        },
+        !m.read,
+      );
       added++;
     }
     if (added) {
@@ -515,8 +522,8 @@ export class App {
     this.renderRail();
   }
 
-  private push(id: ConvId, line: Line): void {
-    const conv = this.store.add(id, line);
+  private push(id: ConvId, line: Line, fresh = true): void {
+    const conv = this.store.add(id, line, fresh);
     if (!conv) return;
     if (id === this.store.active) {
       // Appending one line assumes the DOM still matches the array it was

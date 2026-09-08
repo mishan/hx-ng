@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   errorText,
   isEvent,
+  isFingerprint,
   isReply,
   newGuid,
   parseRecvMid,
@@ -106,5 +107,32 @@ describe('video mids', () => {
     for (const mid of ['send', 'cam-send', 'scr-send', 'cam-user-0', 'aud-user-1', '']) {
       expect(parseRecvMid(mid)).toBeNull();
     }
+  });
+});
+
+describe('isFingerprint', () => {
+  const fp = 'a'.repeat(52);
+
+  it('recognises the 52-character displayed form', () => {
+    expect(isFingerprint(fp)).toBe(true);
+  });
+
+  it('recognises one that has been shouted', () => {
+    // The server's parser lowercases before decoding, so an uppercase
+    // fingerprint is a fingerprint. Rejecting it here sent it as a login
+    // and got `no_such_user` for something perfectly valid.
+    expect(isFingerprint(fp.toUpperCase())).toBe(true);
+    expect(isFingerprint('6HTGZ65' + 'b'.repeat(45))).toBe(true);
+  });
+
+  it('does not mistake an account name for one', () => {
+    for (const login of ['alice', 'guest', '', 'a'.repeat(51), 'a'.repeat(53)]) {
+      expect(isFingerprint(login)).toBe(false);
+    }
+  });
+
+  it('rejects 52 characters that could not be base32 at all', () => {
+    expect(isFingerprint('!'.repeat(52))).toBe(false);
+    expect(isFingerprint('a'.repeat(51) + '-')).toBe(false);
   });
 });

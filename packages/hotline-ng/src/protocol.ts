@@ -295,6 +295,28 @@ export interface BlocksOk {
   blocked: BlockEntry[];
 }
 
+/** How long a fingerprint is in its displayed form: 32 bytes of SHA-256
+ *  in Crockford base32, which packs 260 bits into 52 characters. */
+export const FINGERPRINT_CHARS = 52;
+
+/**
+ * Does this look like a fingerprint rather than an account name?
+ *
+ * The question a client asks of `/unblock`'s argument, which may be
+ * either. Length is what discriminates — no login is 52 characters —
+ * and the case is not checked because the server's parser lowercases
+ * before decoding, and folds `O` to `0` and `I` and `L` to `1`. A
+ * fingerprint copied out of something that shouted it is still one.
+ *
+ * Deliberately a *guess*, not validation: the server does the real
+ * parsing and refuses what does not decode. Being slightly generous
+ * here costs a refused request, where being strict costs a fingerprint
+ * silently treated as a login and refused for the wrong reason.
+ */
+export function isFingerprint(s: string): boolean {
+  return s.length === FINGERPRINT_CHARS && /^[0-9a-z]+$/i.test(s);
+}
+
 // --- Voice --------------------------------------------------------------
 
 export interface VoiceParticipant {

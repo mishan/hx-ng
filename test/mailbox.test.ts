@@ -137,6 +137,35 @@ describe('deduplicating what arrives twice', () => {
     expect(s.hasMail(1)).toBe(true);
   });
 
+  it('forgets a closed conversation’s mail even where its lines were trimmed', () => {
+    // `closePm` used to read the ids back off `lines`, so anything past
+    // MAX_LINES kept its id in the seen set for ever and was skipped by
+    // every later page — the thread came back missing exactly the part
+    // that was too old to still be on screen.
+    const s = new Store();
+    const c = s.openPm({ login: 'bob', nick: 'Bob' });
+    for (let i = 1; i <= 2100; i++) s.add(c.id, chat(i, `m${i}`, { id: i }), false);
+    expect(c.lines.some((l) => l.id === 1)).toBe(false); // trimmed off the top
+    expect(s.hasMail(1)).toBe(true);
+
+    s.closePm(c.id);
+    expect(s.hasMail(1)).toBe(false);
+    expect(s.hasMail(2100)).toBe(false);
+  });
+
+  it('carries mail ids through a merge, so closing the survivor forgets both', () => {
+    const s = new Store();
+    const byMail = s.openPm({ login: 'bob', nick: 'Bob' });
+    s.add(byMail.id, chat(1, 'stored', { id: 71 }), false);
+    const byRoster = s.openPm({ uid: 9, nick: 'Bob' });
+    s.add(byRoster.id, chat(2, 'also stored', { id: 72 }), false);
+    const merged = s.openPm({ uid: 9, login: 'bob', nick: 'Bob' });
+
+    s.closePm(merged.id);
+    expect(s.hasMail(71)).toBe(false);
+    expect(s.hasMail(72)).toBe(false);
+  });
+
   it('forgets a closed conversation’s mail, so paging can restore it', () => {
     // Closing is someone saying they are done with a thread; paging mail
     // afterwards should be able to bring it back rather than silently

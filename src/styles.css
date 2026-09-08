@@ -322,6 +322,16 @@ input:focus-visible, textarea:focus-visible, button:focus-visible {
 .rail-item:hover .rail-close { opacity: 1; }
 .rail-close:hover { color: var(--admin); }
 
+/* The mailbox, which is the server's count rather than this client's:
+   `msg_read` is a cursor over the whole mailbox, so there is one number
+   and it belongs in one place. */
+.mail-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+.mail-button.unread { color: var(--accent); border-color: var(--accent); }
+
 .badge {
   background: var(--accent);
   color: var(--bg);
@@ -541,6 +551,12 @@ button.call:disabled { opacity: 0.45; cursor: default; }
   padding-bottom: 0.55rem;
   white-space: nowrap;
 }
+/* Said in the one place and at the one moment it can be acted on: just
+   before a private message goes to somebody on an unencrypted link. */
+.composer-hint.warn {
+  color: var(--warn);
+  white-space: normal;
+}
 
 /* --- roster ----------------------------------------------------------- */
 
@@ -576,6 +592,7 @@ button.call:disabled { opacity: 0.45; cursor: default; }
 .mark.cam::before { content: '\25A3'; color: var(--accent); }
 .mark.screen::before { content: '\25A4'; color: var(--accent); }
 .mark.paused { opacity: 0.45; }
+.mark.cleartext::before { content: '\26A0'; color: var(--warn); }
 
 /* --- connect screen --------------------------------------------------- */
 

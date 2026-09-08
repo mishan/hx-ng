@@ -2,7 +2,7 @@
  *  conversation. No DOM in this file — the UI reads from here, never the
  *  other way round. */
 
-import type { ChatStyle, Sender, ServerInfo, Status, User } from '@hotline-ng/client';
+import type { ChatStyle, InboxCounts, Sender, ServerInfo, Status, User } from '@hotline-ng/client';
 
 export type LineKind =
   /** Public chat, or a private message inside a PM conversation. */
@@ -99,6 +99,29 @@ export class Store {
    *  appended to — today only a merge. A view that draws incrementally
    *  watches this to know its DOM has gone stale underneath it. */
   revision = 0;
+  /**
+   * What the server says is waiting, which is not the same thing as the
+   * per-conversation `unread` counters beside it.
+   *
+   * Those are "you have not looked at this tab since it changed" and
+   * this client owns them. This is read state in the *store*, owned by
+   * the server, shared with every other client on the same account, and
+   * moved only by `msg_read`. `null` means this server keeps no inbox
+   * and nothing about mail should be drawn at all.
+   */
+  mail: InboxCounts | null = null;
+  /**
+   * The lowest stored id this client has pulled, and therefore where the
+   * next page backwards starts. Undefined before the first page, and
+   * after a page that came back empty — there is nothing older.
+   */
+  oldestMailId?: number;
+  /** True once a page has come back holding nothing new to page past. */
+  mailExhausted = false;
+  /** Every stored message id on screen. Mail arrives twice by design —
+   *  the login flush pushes `msg` events for what is unread while
+   *  `inbox` lists the same rows — so both paths check here first. */
+  private seenMail = new Set<number>();
   /** Every name a PM conversation answers to, mapped to its id. One
    *  conversation may sit under two keys — a uid and a login — which is
    *  what stops the same person appearing twice. */
@@ -258,6 +281,11 @@ export class Store {
     if (this.active === id) this.active = LOBBY;
   }
 
+  /** Is this stored message already on screen? */
+  hasMail(id: number): boolean {
+    return this.seenMail.has(id);
+  }
+
   /**
    * `fresh` is whether this line should bump the conversation's unread
    * count, and it is not the same question as whether the conversation
@@ -272,6 +300,7 @@ export class Store {
   add(id: ConvId, line: Line, fresh = true): Conversation | undefined {
     const c = this.conversations.get(id);
     if (!c) return undefined;
+    if (line.id !== undefined) this.seenMail.add(line.id);
     c.lines.push(line);
     if (c.lines.length > MAX_LINES) c.lines.splice(0, c.lines.length - MAX_LINES);
     if (fresh && id !== this.active) c.unread++;

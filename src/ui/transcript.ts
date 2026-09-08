@@ -14,7 +14,7 @@
  * name repeated eleven times.
  */
 
-import type { Conversation, Line } from '../state';
+import { continuesRun, type Conversation, type Line } from '../state';
 import type { Store } from '../state';
 import { clock, fill, h, linkify } from './dom';
 import { icon } from './icons';
@@ -62,12 +62,7 @@ function lineEl(line: Line, prev: Line | undefined, store: Store): HTMLElement {
   if (line.kind !== 'chat') return eventLine(line, prev);
 
   const from = line.from;
-  const sameSpeaker =
-    prev?.kind === 'chat' &&
-    prev.from?.uid === from?.uid &&
-    prev.from?.nick === from?.nick &&
-    !!prev.queued === !!line.queued &&
-    line.t - prev.t < 5 * 60 * 1000;
+  const sameSpeaker = continuesRun(prev, line);
 
   const me = from?.uid === store.self?.uid;
   // A message that waited has no live uid to look a face up by — the

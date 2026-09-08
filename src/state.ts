@@ -283,6 +283,38 @@ export class Store {
   }
 }
 
+/** How long a silence ends a run. Long enough that a back-and-forth
+ *  stays one block, short enough that tomorrow morning does not. */
+const RUN_GAP_MS = 5 * 60 * 1000;
+
+/**
+ * Do these two lines belong to one labelled block?
+ *
+ * The modern convention: a run from one person collapses under a single
+ * name, which costs nothing and reads better than the same name eleven
+ * times. What counts as "one person" has to be every name the line
+ * carries, not just the visible one — a queued message arrives with
+ * `uid: 0` because its sender had no session when it was flushed, so uid
+ * and nick alone would let two senders who happen to share a nick hide
+ * under one heading, and the second one's name would simply not appear.
+ *
+ * Whether the message waited is part of it too: a stored line and a live
+ * one are different enough that running them together misreads the
+ * timestamps.
+ */
+export function continuesRun(prev: Line | undefined, line: Line): boolean {
+  if (prev?.kind !== 'chat' || line.kind !== 'chat') return false;
+  return (
+    prev.from?.uid === line.from?.uid &&
+    prev.from?.nick === line.from?.nick &&
+    prev.from?.login === line.from?.login &&
+    !!prev.local === !!line.local &&
+    !!prev.queued === !!line.queued &&
+    line.t - prev.t < RUN_GAP_MS
+  );
+}
+
+
 export function styleToKind(style: ChatStyle): LineKind {
   return style === 'action' ? 'action' : 'chat';
 }

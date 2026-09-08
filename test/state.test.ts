@@ -2,7 +2,15 @@ import { describe, expect, it } from 'vitest';
 
 import type { User } from '@hotline-ng/client';
 
-import { addressOf, LOBBY, Store, statusLabel, styleToKind, type Line } from '../src/state';
+import {
+  addressOf,
+  continuesRun,
+  LOBBY,
+  Store,
+  statusLabel,
+  styleToKind,
+  type Line,
+} from '../src/state';
 
 const chat = (t: number, text: string, extra: Partial<Line> = {}): Line => ({
   t,
@@ -233,5 +241,57 @@ describe('small translations', () => {
       person(4, 'Adam', { admin: true }),
     ]);
     expect(s.roster().map((u) => u.nick)).toEqual(['Adam', 'Bob', 'alice', 'zoe']);
+  });
+});
+
+describe('collapsing a run of lines', () => {
+  const from = (uid: number, nick: string, login?: string) => ({ uid, nick, login });
+  const at = (t: number, sender: ReturnType<typeof from>, extra: Partial<Line> = {}): Line => ({
+    t,
+    kind: 'chat',
+    text: 'x',
+    from: sender,
+    ...extra,
+  });
+
+  it('collapses consecutive lines from one person', () => {
+    const a = at(0, from(9, 'Alice', 'alice'));
+    const b = at(1000, from(9, 'Alice', 'alice'));
+    expect(continuesRun(a, b)).toBe(true);
+  });
+
+  it('breaks the run after a long silence', () => {
+    const a = at(0, from(9, 'Alice', 'alice'));
+    const b = at(6 * 60 * 1000, from(9, 'Alice', 'alice'));
+    expect(continuesRun(a, b)).toBe(false);
+  });
+
+  it('does not hide one queued sender under another with the same nick', () => {
+    // Mail that waited arrives with `uid: 0`, so uid and nick alone are
+    // not a person: two senders sharing a nick would collapse into one
+    // block and the second one's name would simply not appear.
+    const a = at(0, from(0, 'dave', 'dave@one'), { queued: true });
+    const b = at(1000, from(0, 'dave', 'dave@two'), { queued: true });
+    expect(continuesRun(a, b)).toBe(false);
+  });
+
+  it('separates a stored line from a live one', () => {
+    const a = at(0, from(0, 'Alice', 'alice'), { queued: true });
+    const b = at(1000, from(9, 'Alice', 'alice'));
+    expect(continuesRun(a, b)).toBe(false);
+  });
+
+  it('separates your own half of a conversation from theirs', () => {
+    const a = at(0, from(1, 'Me'), { local: true });
+    const b = at(1000, from(1, 'Me'));
+    expect(continuesRun(a, b)).toBe(false);
+  });
+
+  it('never continues into or out of a non-chat line', () => {
+    const notice: Line = { t: 0, kind: 'notice', text: 'someone joined' };
+    const chatLine = at(1000, from(9, 'Alice', 'alice'));
+    expect(continuesRun(notice, chatLine)).toBe(false);
+    expect(continuesRun(chatLine, notice)).toBe(false);
+    expect(continuesRun(undefined, chatLine)).toBe(false);
   });
 });

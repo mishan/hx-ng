@@ -5,15 +5,20 @@
   "type": "module",
   "description": "A web client for the Hotline-ng wire: chat, the user list, private messages, voice and video.",
   "license": "GPL-2.0-or-later",
+  "workspaces": [
+    "packages/*"
+  ],
   "scripts": {
     "dev": "vite",
-    "build": "tsc --noEmit && vite build",
+    "build": "npm run typecheck && vite build",
     "preview": "vite preview",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.node.json",
+    "build:lib": "npm run build -w @hotline-ng/client",
     "icons": "python3 tools/build-icons.py ../gtkhx/icons.rsrc public"
   },
   "devDependencies": {
     "typescript": "^5.6.3",
-    "vite": "^5.4.10"
+    "vite": "^5.4.10",
+    "@types/node": "^22.9.0"
   }
 }

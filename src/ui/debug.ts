@@ -14,7 +14,8 @@
  * in the list.
  */
 
-import type { TraceEntry } from '../wire/connection';
+import type { TraceEntry } from '@hotline-ng/client';
+
 import { fill, h } from './dom';
 
 /** Frames kept in the ring. Big enough to hold a login plus a long

@@ -8,9 +8,9 @@
  * window*, and whether someone is in voice or publishing video.
  */
 
+import type { User, VoiceSession } from '@hotline-ng/client';
+
 import { statusLabel, type Store } from '../state';
-import type { User } from '../wire/protocol';
-import type { Media } from './media';
 import { fill, h } from './dom';
 import { icon, MAX_ICON_WIDTH } from './icons';
 
@@ -26,7 +26,7 @@ export interface RosterHooks {
   onClose: () => void;
 }
 
-export function renderRoster(el: HTMLElement, store: Store, media: Media, hooks: RosterHooks): void {
+export function renderRoster(el: HTMLElement, store: Store, media: VoiceSession, hooks: RosterHooks): void {
   const users = store.roster();
   const rows = users.map((u) => row(u, store, media, hooks));
   const close = h(
@@ -48,7 +48,7 @@ export function renderRoster(el: HTMLElement, store: Store, media: Media, hooks:
   );
 }
 
-function row(u: User, store: Store, media: Media, hooks: RosterHooks): HTMLElement {
+function row(u: User, store: Store, media: VoiceSession, hooks: RosterHooks): HTMLElement {
   const me = u.uid === store.self?.uid;
   const status = statusLabel(u.status);
   const voice = media.inVoice(u.uid);

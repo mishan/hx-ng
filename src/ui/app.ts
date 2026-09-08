@@ -11,34 +11,47 @@
  * own half of a PM is added locally and marked as such.
  */
 
-import { LOBBY, pmId, type ConvId, type Line, Store, styleToKind } from '../state';
 import {
+  captureBlockedReason,
   Connection,
+  errorText,
   hasSavedSession,
+  screenShareBlockedReason,
+  VoiceSession,
+  WireFailure,
   type ConnState,
   type Credentials,
-  WireFailure,
-} from '../wire/connection';
-import { errorText, type User } from '../wire/protocol';
+  type RemoteVideo,
+  type User,
+  type VideoKind,
+} from '@hotline-ng/client';
+
+import type { AppConfig } from '../config';
+import { LOBBY, pmId, type ConvId, type Line, Store, styleToKind } from '../state';
 import { connectScreen, remembered, type Details } from './connect';
 import { DebugPanel } from './debug';
 import { clock, fill, h } from './dom';
 import { icon } from './icons';
 import { pickIcon } from './iconpicker';
-import { captureBlockedReason, Media, screenShareBlockedReason } from './media';
 import { renderRoster } from './roster';
+import { Tiles } from './tiles';
 import { appendLine, isAtBottom, renderTranscript, scrollToEnd } from './transcript';
 
 const THEME_KEY = 'hxd-ng.theme';
+const SELF_VIEW_KEY = 'hxd-ng.selfview';
 type Theme = 'auto' | 'dark' | 'light';
 
 export class App {
   private store = new Store();
   private conn: Connection | null = null;
-  private media: Media | null = null;
+  private media: VoiceSession | null = null;
   private debug: DebugPanel;
   private pingTimer: number | null = null;
   private url = '';
+  /** Whether one's own camera is shown back to oneself. A preview is the
+   *  only way to find out that a camera is pointed at the ceiling, or
+   *  that it is not sending at all, without asking the room. */
+  private selfView = readSelfView();
 
   // Long-lived DOM.
   private shell = h('div', { class: 'app', hidden: true });
@@ -47,6 +60,7 @@ export class App {
   private pill = h('button', { class: 'pill', title: 'Connection state' });
   private rail = h('nav', { class: 'rail' });
   private callbar = h('div', { class: 'callbar', hidden: true });
+  private tiles = new Tiles();
   private transcript = h('div', { class: 'transcript' });
   private composer = h('textarea', {
     class: 'composer-input',
@@ -64,7 +78,10 @@ export class App {
   );
   private meButton = h('button', { class: 'identity', title: 'Change your icon' });
 
-  constructor(private root: HTMLElement) {
+  constructor(
+    private root: HTMLElement,
+    private config: AppConfig,
+  ) {
     this.debug = new DebugPanel(
       () => this.facts(),
       () => this.media?.stats() ?? Promise.resolve({ media: 'not connected' }),
@@ -84,7 +101,7 @@ export class App {
   }
 
   mount(): void {
-    const screen = connectScreen((d) => this.connect(d));
+    const screen = connectScreen(this.config, (d) => this.connect(d));
     this.root.append(screen, this.shell, this.debug.el);
     // `?debug` opens the drawer before the first frame, which is what you
     // want when the thing you are debugging is the login itself.
@@ -94,7 +111,7 @@ export class App {
     // holds a session for the server it was last on, go straight back
     // into it rather than making someone log in again to reach the room
     // they never left.
-    const saved = remembered();
+    const saved = remembered(this.config);
     if (hasSavedSession(saved.url)) {
       screen.hidden = true;
       const splash = h('div', { class: 'connect' }, h('p', { class: 'muted' }, 'Resuming your session…'));
@@ -110,6 +127,10 @@ export class App {
   // --- connecting -------------------------------------------------------
 
   private async connect(d: Details, opts: { resumeOnly?: boolean } = {}): Promise<void> {
+    // A retry after a failed connect starts a fresh session; anything
+    // the last one left on the strip belongs to a peer connection that
+    // no longer exists.
+    this.tiles.clear();
     const creds: Credentials = { ...d };
     const conn = new Connection(creds, {
       onTrace: (e) => this.debug.push(e),
@@ -148,11 +169,16 @@ export class App {
       },
     });
     this.conn = conn;
-    this.media = new Media(conn, {
+    this.media = new VoiceSession(conn, {
       onLog: (text, bad) => this.say(bad ? `Media error: ${text}` : text),
-      onRoom: () => this.renderRoster(),
+      onRoom: () => {
+        this.renderRoster();
+        this.refreshTileLabels();
+      },
       onControls: () => this.renderCallbar(),
-      nickOf: (uid) => this.store.nickOf(uid),
+      onRemoteVideo: (v) => this.showRemoteTile(v),
+      onRemoteVideoEnded: (mid) => this.tiles.drop(mid),
+      onLocalVideo: (kind, stream) => this.showSelfTile(kind, stream),
     });
     this.bindEvents(conn);
 
@@ -170,7 +196,6 @@ export class App {
     this.shell.hidden = false;
     this.url = d.url;
     this.media.limits = conn.video;
-    this.mountTiles();
     this.renderAll();
     this.composer.focus();
     this.pingTimer = window.setInterval(() => {
@@ -201,6 +226,7 @@ export class App {
       this.renderRoster();
       this.renderRail();
       this.renderMe();
+      this.refreshTileLabels();
     });
 
     conn.on('user_parted', (d) => {
@@ -260,6 +286,39 @@ export class App {
       // their microphone reopened without being asked.
       this.media.teardown();
       this.say('Voice ended with the connection.');
+    }
+  }
+
+  // --- video tiles ------------------------------------------------------
+
+  private tileLabel(uid: number, kind: VideoKind): string {
+    return `${this.store.nickOf(uid)} — ${kind}`;
+  }
+
+  private showRemoteTile(v: RemoteVideo): void {
+    this.tiles.show(v.mid, v.stream, this.tileLabel(v.uid, v.kind));
+  }
+
+  /** One's own capture, shown back to oneself. Mirrored, muted, and at
+   *  the front of the strip — it is a reference, not a participant. */
+  private showSelfTile(kind: VideoKind, stream: MediaStream | null): void {
+    const key = `self:${kind}`;
+    if (!stream || !this.selfView) return this.tiles.drop(key);
+    this.tiles.show(key, stream, `You — ${kind}`, { mirror: kind === 'camera', order: -1 });
+  }
+
+  private applySelfView(): void {
+    const media = this.media;
+    if (!media) return;
+    for (const kind of ['camera', 'screen'] as const) {
+      this.showSelfTile(kind, media.localVideo(kind));
+    }
+  }
+
+  /** Captions carry nicks, and nicks change. */
+  private refreshTileLabels(): void {
+    for (const v of this.media?.remoteVideo() ?? []) {
+      this.tiles.label(v.mid, this.tileLabel(v.uid, v.kind));
     }
   }
 
@@ -402,7 +461,7 @@ export class App {
   }
 
   private renderTopbar(): void {
-    this.serverName.textContent = this.store.server.name || 'Hotline';
+    this.serverName.textContent = this.store.server.name || this.config.title;
     this.subject.textContent = this.store.server.subject || '';
     this.subject.hidden = !this.store.server.subject;
   }
@@ -421,7 +480,9 @@ export class App {
             ? 'connecting'
             : 'offline';
     this.pill.className = `pill ${state}`;
-    this.pill.textContent = label;
+    // The label is hidden on a phone, where the coloured dot is the whole
+    // message and the title bar has no room for the rest of it.
+    fill(this.pill, h('span', { class: 'pill-label' }, label));
     this.pill.title = detail ?? (conn?.grace ? `Grace window: ${conn.grace}s` : 'This account cannot detach');
   }
 
@@ -482,7 +543,7 @@ export class App {
 
   private renderUnreadTitle(): void {
     const total = [...this.store.conversations.values()].reduce((n, c) => n + c.unread, 0);
-    const name = this.store.server.name || 'Hotline';
+    const name = this.store.server.name || this.config.title;
     document.title = total ? `(${total}) ${name}` : name;
   }
 
@@ -538,6 +599,16 @@ export class App {
           media.watching,
           () => media.setWatching(!media.watching),
         );
+        // Only worth a button once there is something of one's own to
+        // look at; before that it is a switch with nothing behind it.
+        if (media.publishing.length) {
+          add('Self view', this.selfView, async () => {
+            this.selfView = !this.selfView;
+            writeSelfView(this.selfView);
+            this.applySelfView();
+            this.renderCallbar();
+          });
+        }
       }
     }
     const detail = media.joined
@@ -621,7 +692,10 @@ export class App {
           'main',
           {},
           this.callbar,
-          h('div', { class: 'tiles-slot' }),
+          // The video strip lives above the transcript and is owned by
+          // the tile renderer, which is the only thing that knows what a
+          // browser needs before it will paint a `<video>`.
+          this.tiles.el,
           this.transcript,
           h('div', { class: 'composer' }, this.composer, this.composerHint),
         ),
@@ -632,14 +706,6 @@ export class App {
         this.rosterEl,
       ),
     );
-  }
-
-  /** The video strip lives inside `main`, above the transcript, and is
-   *  owned by the media layer — mounting it here keeps the two from
-   *  needing to know each other's DOM. */
-  private mountTiles(): void {
-    const slot = this.shell.querySelector('.tiles-slot');
-    if (slot && this.media && !this.media.tiles.isConnected) slot.append(this.media.tiles);
   }
 
   /** Open or close the narrow-layout roster panel.
@@ -706,6 +772,7 @@ export class App {
       subject: this.store.server.subject,
       roster: this.store.users.size,
       conversations: [...this.store.conversations.keys()],
+      viewport: `${Math.round(window.innerWidth)}×${Math.round(window.innerHeight)}`,
     };
   }
 }
@@ -718,4 +785,20 @@ function readTheme(): Theme {
     /* fall through */
   }
   return 'auto';
+}
+
+function readSelfView(): boolean {
+  try {
+    return localStorage.getItem(SELF_VIEW_KEY) !== 'off';
+  } catch {
+    return true;
+  }
+}
+
+function writeSelfView(on: boolean): void {
+  try {
+    localStorage.setItem(SELF_VIEW_KEY, on ? 'on' : 'off');
+  } catch {
+    /* storage disabled; the preference lasts this page load */
+  }
 }

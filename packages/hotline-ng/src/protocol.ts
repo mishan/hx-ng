@@ -137,8 +137,9 @@ export interface VoiceParticipant {
   muted: boolean;
 }
 
+/** The `voice_join` reply. There is no `cid` in it: the client named the
+ *  room in the request and the server answers about that one. */
 export interface VoiceJoinOk {
-  cid: number;
   sdp: string;
   codec: string;
   participants: VoiceParticipant[];
@@ -157,6 +158,36 @@ export interface VideoPublication {
 export interface VideoStreamRef {
   uid: number;
   kind: VideoKind;
+}
+
+export interface VideoStartOk {
+  codec: string;
+}
+
+/**
+ * The `a=mid` grammar the SFU keys every track on, from
+ * `docs/capabilities-video.md` §Track-to-User Mapping. Sections differ
+ * per peer and move as subscriptions change, so a client MUST key on
+ * these and never on `sdpMLineIndex`.
+ */
+export const MIC_SEND_MID = 'send';
+export const CAM_SEND_MID = 'cam-send';
+export const SCR_SEND_MID = 'scr-send';
+
+/** The mid a client's own publication of `kind` is carried on. */
+export function sendMid(kind: VideoKind): string {
+  return kind === 'camera' ? CAM_SEND_MID : SCR_SEND_MID;
+}
+
+const RECV_MID = /^(cam|scr)-user-([1-9]\d*)$/;
+
+/** Read `cam-user-12` or `scr-user-23` back into the publication it
+ *  carries, or `null` for any other mid — the client's own send
+ *  sections, audio, and anything a later revision adds. */
+export function parseRecvMid(mid: string): VideoStreamRef | null {
+  const m = RECV_MID.exec(mid);
+  if (!m) return null;
+  return { uid: Number(m[2]), kind: m[1] === 'cam' ? 'camera' : 'screen' };
 }
 
 // --- Events -------------------------------------------------------------

@@ -82,7 +82,16 @@
    every one of them. */
 [hidden] { display: none !important; }
 
-html, body { height: 100%; }
+html, body {
+  height: 100%;
+  /* The shell is exactly as tall as the visible viewport and scrolls
+     nothing of its own, so anything that scrolls the document is a
+     layout bug showing through — most often a phone's keyboard, or a
+     title bar one button too wide. Clamping it here means such a bug
+     costs a clipped edge instead of a page that will not sit still. */
+  overflow: hidden;
+  overscroll-behavior: none;
+}
 
 body {
   margin: 0;
@@ -90,6 +99,9 @@ body {
   color: var(--text);
   font: 14px/1.5 var(--sans);
   -webkit-font-smoothing: antialiased;
+  /* Rotating a phone must not resize the type under it. */
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
 }
 
 a { color: var(--link); }
@@ -147,10 +159,17 @@ input:focus-visible, textarea:focus-visible, button:focus-visible {
 
 /* --- shell ----------------------------------------------------------- */
 
+/* `--app-height` is the visual viewport, set by `ui/viewport.ts` where
+   the browser reports one. `100dvh` is the fallback and is right up
+   until an on-screen keyboard appears — `dvh` follows the browser's own
+   retracting chrome and knows nothing about the keyboard, so on a phone
+   it leaves the composer underneath it. */
 #root {
   display: flex;
   flex-direction: column;
   height: 100dvh;
+  height: var(--app-height, 100dvh);
+  overflow: hidden;
 }
 
 .app {
@@ -160,16 +179,25 @@ input:focus-visible, textarea:focus-visible, button:focus-visible {
   flex-direction: column;
 }
 
+/* Everything in here but the server name is fixed-width, so the name is
+   the only thing allowed to shrink. Without that the row grows past the
+   viewport on a phone and takes the whole page with it — the classic
+   "does not fit the screen", and the reason for `min-width: 0` and
+   `flex: none` being spelled out rather than left to defaults. */
 .topbar {
   display: flex;
   align-items: center;
   gap: 0.5rem;
-  padding: 0.5rem 0.75rem;
+  padding: 0.5rem max(0.75rem, env(safe-area-inset-right)) 0.5rem max(0.75rem, env(safe-area-inset-left));
   background: var(--surface);
   border-bottom: 1px solid var(--line);
+  flex: none;
+  min-width: 0;
+  overflow: hidden;
 }
+.topbar > * { flex: none; }
 
-.server { display: flex; align-items: baseline; gap: 0.6rem; min-width: 0; overflow: hidden; }
+.server { display: flex; align-items: baseline; gap: 0.6rem; min-width: 0; overflow: hidden; flex: 0 1 auto; }
 .server-name {
   font-weight: 620;
   letter-spacing: -0.01em;
@@ -191,6 +219,7 @@ input:focus-visible, textarea:focus-visible, button:focus-visible {
   border: 1px solid var(--line);
   color: var(--muted);
   font-size: 0.82rem;
+  white-space: nowrap;
 }
 .topbar button.ghost:hover, .debug-bar button.ghost:hover { background: var(--surface-2); color: var(--text); }
 .debug-bar button.ghost.on { border-color: var(--accent); color: var(--accent); }
@@ -236,6 +265,7 @@ input:focus-visible, textarea:focus-visible, button:focus-visible {
 .panes {
   flex: 1;
   min-height: 0;
+  min-width: 0;
   display: grid;
   grid-template-columns: 13rem minmax(0, 1fr) 17rem;
 }
@@ -321,14 +351,18 @@ main {
   border-bottom: 1px solid var(--line);
   background: var(--surface);
   flex-wrap: wrap;
+  flex: none;
+  min-width: 0;
 }
 
 button.call {
-  padding: 0.25rem 0.65rem;
+  padding: 0.3rem 0.7rem;
   border-radius: 999px;
   border: 1px solid var(--line);
   font-size: 0.82rem;
   color: var(--muted);
+  white-space: nowrap;
+  flex: none;
 }
 button.call:hover:not(:disabled) { color: var(--text); background: var(--surface-2); }
 button.call.on { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
@@ -337,27 +371,67 @@ button.call:disabled { opacity: 0.45; cursor: default; }
 .call-detail { font-size: 0.78rem; margin-left: 0.35rem; }
 .call-detail.warn { color: var(--warn); }
 
+/* Tiles reflow rather than scroll sideways. A fixed-width strip on a
+   phone is a row of one-and-a-bit tiles with the rest off the edge —
+   which reads as "video is broken" rather than "swipe me". `auto-fit`
+   with a `min()` floor gives two per row on a phone, four on a laptop,
+   and never a tile wider than the column it is in. The whole strip is
+   capped so a busy room cannot push the transcript off the screen. */
 .tiles {
-  display: flex;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 13rem), 1fr));
   gap: 0.6rem;
   padding: 0.6rem 0.75rem 0;
-  overflow-x: auto;
+  flex: none;
+  min-width: 0;
+  max-height: calc(var(--app-height, 100dvh) * 0.4);
+  overflow-y: auto;
 }
-.tile { margin: 0; }
+.tile { margin: 0; min-width: 0; display: flex; flex-direction: column; }
+.tile-frame {
+  position: relative;
+  display: block;
+  border-radius: 10px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  background: #000;
+}
 .tile video {
-  width: 17rem;
+  width: 100%;
   aspect-ratio: 16 / 9;
   object-fit: cover;
   background: #000;
-  border-radius: 10px;
   display: block;
-  border: 1px solid var(--line);
+}
+/* A self-view is mirrored; a screen share never is, because text in it
+   would come out backwards. */
+.tile video.mirror { transform: scaleX(-1); }
+/* Said out loud, because a tile waiting for its first keyframe and a
+   camera that is genuinely dead look identical otherwise. */
+.tile-note {
+  position: absolute;
+  inset: auto 0 0 0;
+  padding: 0.2rem 0.5rem;
+  font-size: 0.7rem;
+  color: #d8dae2;
+  background: rgb(0 0 0 / 55%);
+  text-align: center;
+}
+.tile-play {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  color: #fff;
+  background: rgb(0 0 0 / 45%);
+  font-size: 0.82rem;
+  font-weight: 600;
+  width: 100%;
 }
 .tile figcaption {
   font-size: 0.72rem;
   color: var(--muted);
   padding-top: 0.25rem;
-  max-width: 17rem;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -368,7 +442,10 @@ button.call:disabled { opacity: 0.45; cursor: default; }
 .transcript {
   flex: 1;
   min-height: 0;
+  min-width: 0;
   overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
   padding: 0.75rem 0.9rem 1rem;
   overflow-wrap: anywhere;
   display: flex;
@@ -425,9 +502,11 @@ button.call:disabled { opacity: 0.45; cursor: default; }
   display: flex;
   align-items: flex-end;
   gap: 0.6rem;
-  padding: 0.6rem 0.9rem 0.75rem;
+  padding: 0.6rem max(0.9rem, env(safe-area-inset-right)) max(0.75rem, env(safe-area-inset-bottom)) max(0.9rem, env(safe-area-inset-left));
   border-top: 1px solid var(--line);
   background: var(--surface);
+  flex: none;
+  min-width: 0;
 }
 .composer-input {
   flex: 1;
@@ -554,8 +633,8 @@ p.error {
 /* --- icon picker ------------------------------------------------------ */
 
 dialog.picker {
-  width: min(46rem, 92vw);
-  max-height: 80vh;
+  width: min(46rem, 100vw - 1.5rem);
+  max-height: min(80dvh, var(--app-height, 100dvh) - 2rem);
   padding: 0;
   border: 1px solid var(--line);
   border-radius: 14px;
@@ -600,7 +679,7 @@ dialog.picker header input { width: 9rem; }
 
 .debug {
   flex: none;
-  height: min(22rem, 45vh);
+  height: min(22rem, 45dvh);
   display: flex;
   flex-direction: column;
   border-top: 1px solid var(--line);
@@ -659,6 +738,7 @@ dialog.picker header input { width: 9rem; }
     display: flex;
     gap: 0.35rem;
     overflow-x: auto;
+    overflow-y: hidden;
     border-right: 0;
     border-bottom: 1px solid var(--line);
     padding: 0.35rem 0.5rem;
@@ -667,7 +747,10 @@ dialog.picker header input { width: 9rem; }
   main { grid-row: 2; }
   .roster { grid-row: 2; }
   .rail-head { display: none; }
-  .rail-item { width: auto; }
+  .rail-item { width: auto; flex: none; }
+  /* A conversation button hovered on a touch screen is a conversation
+     button being tapped, so the close cross has to be there already. */
+  .rail-close { opacity: 1; }
   .line { grid-template-columns: 4.2rem 1.1rem 6rem minmax(0, 1fr); }
 }
 
@@ -677,6 +760,11 @@ dialog.picker header input { width: 9rem; }
    wrapping as one paragraph — and the roster becomes a panel you slide
    in rather than a column that is simply gone. */
 @media (max-width: 44rem) {
+  /* iOS zooms the page in when a field smaller than 16px takes focus,
+     and it does not zoom back out. Every "the layout broke as soon as I
+     tapped the message box" report is this, and 16px is the whole fix. */
+  input, textarea, .composer-input { font-size: 16px; }
+
   /* `position: relative` is what confines the panel and its scrim to the
      pane area. Positioned against the viewport instead, the panel would
      cover the title bar — and with it the People button, which is the
@@ -692,6 +780,8 @@ dialog.picker header input { width: 9rem; }
     box-shadow: var(--shadow);
     transform: translateX(100%);
     transition: transform 0.18s ease;
+    padding-right: max(0.5rem, env(safe-area-inset-right));
+    padding-bottom: max(0.5rem, env(safe-area-inset-bottom));
   }
   body.show-roster .roster { transform: none; }
   .roster-close { display: inline-flex; }
@@ -717,7 +807,62 @@ dialog.picker header input { width: 9rem; }
 
   .topbar { gap: 0.35rem; }
   .identity .nick { display: none; }
+  /* The coloured dot is the whole message at this width; the round-trip
+     time behind it is one tap away in the debug drawer. */
+  .pill { padding: 0.35rem; gap: 0; }
+  .pill .pill-label { display: none; }
   /* The subject would otherwise crowd the server name down to an
      initial; it is still one tap away in the debug drawer. */
   .subject { display: none; }
+
+  /* Wrapped, the call controls can be four rows deep on a phone and the
+     transcript disappears behind them. One row that scrolls keeps the
+     conversation the thing on the screen. */
+  .callbar {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    scrollbar-width: none;
+    padding-left: max(0.75rem, env(safe-area-inset-left));
+    padding-right: max(0.75rem, env(safe-area-inset-right));
+  }
+  .callbar::-webkit-scrollbar { display: none; }
+  button.call { padding: 0.4rem 0.75rem; }
+  .call-detail { white-space: nowrap; }
+
+  .tiles {
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 9.5rem), 1fr));
+    padding-left: max(0.6rem, env(safe-area-inset-left));
+    padding-right: max(0.6rem, env(safe-area-inset-right));
+    max-height: calc(var(--app-height, 100dvh) * 0.38);
+  }
+
+  .transcript {
+    padding-left: max(0.75rem, env(safe-area-inset-left));
+    padding-right: max(0.75rem, env(safe-area-inset-right));
+  }
+
+  /* Two columns of five-and-a-half-rem cells is the connect form on a
+     phone: a label above its field reads better and leaves the field
+     wide enough to see a whole URL in. */
+  .connect { padding: 1rem 0.75rem; }
+  .connect-card { padding: 1.1rem 1rem 1rem; }
+  .row { grid-template-columns: minmax(0, 1fr); gap: 0.2rem; }
+  .row > span { font-size: 0.78rem; }
+
+  .icon-grid { grid-template-columns: repeat(auto-fill, minmax(3.2rem, 1fr)); }
+  dialog.picker header { flex-wrap: wrap; }
+  dialog.picker header input { width: 100%; }
+
+  .debug-bar { flex-wrap: wrap; }
+  .debug-bar .filter { width: 100%; order: 1; }
+  .fact { grid-template-columns: minmax(0, 1fr); gap: 0; }
+  .frame { grid-template-columns: 5rem 1rem minmax(0, 1fr); }
+  .frame .raw { grid-column: 1 / -1; }
+}
+
+/* A phone held in landscape has almost no height. The video strip and
+   the debug drawer are the two things that eat all of it. */
+@media (max-height: 30rem) {
+  .tiles { max-height: calc(var(--app-height, 100dvh) * 0.55); }
+  .debug { height: 60dvh; }
 }

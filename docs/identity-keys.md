@@ -6,7 +6,7 @@ Who holds which key, where it is kept, and what a page can do with it.
 *identity key* that certifies devices and signs the user card, and a
 per-device key that signs login proofs. It does not say what a *browser*
 is in that scheme, and that is the decision this document makes, because
-every other piece of client work depends on it: what enrolment looks
+every other piece of client work depends on it: what enrollment looks
 like, what the storage schema holds, whether a Worker is needed, and
 whether hx-ng can link a classic account at all.
 
@@ -101,7 +101,7 @@ passphrase, which means a KDF, a Worker, an unwrap ceremony, an export
 format, and the trust problem of §1.
 
 **B — the browser is a device.** The identity key lives in `hlid` or a
-native client. Enrolment is: the browser shows its device public keys,
+native client. Enrollment is: the browser shows its device public keys,
 the user mints a certificate for them elsewhere and pastes it back. No
 identity key handling in the browser at all.
 
@@ -121,7 +121,7 @@ rather than a migration.
 The cost of B, said plainly: it needs `hlid` (or another identity
 holder), and the certificate expires. §7 is about making that ceremony
 tolerable rather than pretending it isn't there — and, since the user is
-at a terminal for enrolment anyway, about doing everything that needs the
+at a terminal for enrollment anyway, about doing everything that needs the
 identity key in that one trip (§5).
 
 ---
@@ -137,7 +137,7 @@ interface StoredDevice {
   devicePub: string;          // 32 bytes hex; the record key, known at generation
   deviceSign: CryptoKey;      // Ed25519 private, non-extractable
   deviceEnc: CryptoKey;       // X25519 private, non-extractable
-  deviceEncPub: Uint8Array;   // 32 bytes, kept beside it so enrolment can show it
+  deviceEncPub: Uint8Array;   // 32 bytes, kept beside it so enrollment can show it
   // Absent until a certificate has been pasted (§7.1):
   fingerprint?: string;       // 52-char Crockford base32, the display form; indexed
   cert?: Uint8Array;          // signed CBOR, as pasted or minted
@@ -223,7 +223,7 @@ hlid link --server https://host --login alice --password-stdin
 
 The identity panel pre-fills this exactly as it pre-fills the cert
 command (§7.1), and shows it on the line after `hlid cert`, so that
-"enrol this browser and link my account" is one terminal trip. If the
+"enroll this browser and link my account" is one terminal trip. If the
 browser already holds a guest session on that server, it reconnects to
 pick up the link; the panel says so.
 
@@ -292,11 +292,11 @@ characters with no leading/trailing space and no invisible characters,
 `profile` ≤ 2048 bytes, ≤ 8 attestations, ≤ 16 KiB encoded. NFC-normalise
 `name` before signing — the verifier deliberately does not. (Phase B
 never signs a card; this is for phase C and for the constraints the
-enrolment check in §7.1 can report.)
+enrollment check in §7.1 can report.)
 
 ---
 
-## 7. Enrolment, renewal, and the ceremony
+## 7. Enrollment, renewal, and the ceremony
 
 ### 7.1 Enrolling a browser as a device (phase B)
 
@@ -344,7 +344,7 @@ Step 2 needs changes to `hlid` — see §9.
 
 A 90-day certificate means step 7.1 again, four times a year. The client
 should make that a nag rather than a surprise: parse `expires` at
-enrolment, store it, and from one-third remaining (§3.3's own advice)
+enrollment, store it, and from one-third remaining (§3.3's own advice)
 show the renewal command in the identity panel. The device keys do not
 change, so renewal is one command and one paste, and the fingerprint,
 card, and every server-side link survive it untouched.

@@ -1,5 +1,5 @@
 /**
- * Identity, end to end, against a real server: enrol a real browser
+ * Identity, end to end, against a real server: enroll a real browser
  * device key with a real `hlid`, then log in with it.
  *
  * This is the test that first caught the bug fixed alongside it —
@@ -25,7 +25,7 @@ import { buildHxdNg, hlid, hxdNgAvailable, startServer, type RunningServer } fro
 
 const NG_PORT = 5700;
 
-test.describe('identity: enrolment and login against a real hxd-ng server', () => {
+test.describe('identity: enrollment and login against a real hxd-ng server', () => {
   test.skip(!hxdNgAvailable(), 'requires a sibling hxd-ng checkout (with cargo) at ../hxd-ng');
 
   let server: RunningServer;
@@ -39,7 +39,7 @@ test.describe('identity: enrolment and login against a real hxd-ng server', () =
     server?.stop();
   });
 
-  test('enrol a real device key with hlid, then log in with it', async ({ page }) => {
+  test('enroll a real device key with hlid, then log in with it', async ({ page }) => {
     await page.goto('/');
 
     // --- 1. Generate this browser's device keys, via the panel -----------
@@ -81,9 +81,9 @@ test.describe('identity: enrolment and login against a real hxd-ng server', () =
     const certB64 = readFileSync(join(hlidDir, 'cert.bin')).toString('base64url');
     const cardB64 = readFileSync(join(hlidDir, 'card.bin')).toString('base64url');
 
-    // --- 3. Paste it back and enrol ---------------------------------------
+    // --- 3. Paste it back and enroll ---------------------------------------
     await page.locator('.identity-body textarea.paste').fill(`${certB64} ${cardB64}`);
-    await page.getByRole('button', { name: 'Enrol' }).click();
+    await page.getByRole('button', { name: 'Enroll' }).click();
     await expect(page.locator('.identity-body')).toContainText('Enrolled as Playwright');
     await expect(page.locator('.identity-body')).toContainText(fingerprint!);
     await page.getByRole('button', { name: 'Close' }).click();

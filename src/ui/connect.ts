@@ -201,7 +201,7 @@ export function connectScreen(
   // Always shown rather than hidden pending an async `getActiveDevice()`
   // check: enrolling happens from the Identity panel this same screen
   // can open, so a check made once at mount would go stale the moment
-  // someone enrols without a reload. The click handler below re-checks
+  // someone enrolls without a reload. The click handler below re-checks
   // fresh every time and reports "not enrolled yet" as the ordinary
   // error it is.
   identityBtn.onclick = () => {

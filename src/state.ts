@@ -72,6 +72,11 @@ export interface Conversation {
   title: string;
   lines: Line[];
   unread: number;
+  /** Every stored-message id this conversation has held, including ones
+   *  whose lines have since been trimmed off the top. Kept so closing
+   *  can hand them all back — `lines` alone would forget the trimmed
+   *  ones and leave them permanently skipped by later paging. */
+  mailIds: Set<number>;
 }
 
 export const LOBBY: ConvId = 'lobby';
@@ -177,7 +182,9 @@ export class Store {
    * not re-append them under whatever is on screen now. Closing a
    * conversation does the opposite and forgets them, because closing is
    * someone saying they are done with it, and paging mail afterwards
-   * should be able to bring it back.
+   * should be able to bring it back — all of it, which is why each
+   * conversation keeps its own `mailIds` rather than letting `closePm`
+   * read the ids back off lines that trimming may have removed.
    */
   private seenMail = new Set<number>();
   /** Every name a PM conversation answers to, mapped to its id. One
@@ -199,6 +206,7 @@ export class Store {
       title: 'Lobby',
       lines: [],
       unread: 0,
+      mailIds: new Set(),
     });
   }
 
@@ -302,7 +310,7 @@ export class Store {
     let c = byLogin ?? byUid ?? byNick;
     if (!c) {
       const id = `pm:${++this.pmSeq}`;
-      c = { id, kind: 'pm', peer: {}, title: who.nick, lines: [], unread: 0 };
+      c = { id, kind: 'pm', peer: {}, title: who.nick, lines: [], unread: 0, mailIds: new Set() };
       this.conversations.set(id, c);
       if (nameless) this.pmIndex.set(nickKey(who.nick), id);
     }
@@ -323,6 +331,7 @@ export class Store {
     into.lines = [...into.lines, ...from.lines].sort((a, b) => a.t - b.t);
     if (into.lines.length > MAX_LINES) into.lines.splice(0, into.lines.length - MAX_LINES);
     into.unread += from.unread;
+    for (const id of from.mailIds) into.mailIds.add(id);
     into.peer = { uid: into.peer.uid ?? from.peer.uid, login: into.peer.login ?? from.peer.login };
     for (const [k, v] of this.pmIndex) if (v === from.id) this.pmIndex.set(k, into.id);
     this.conversations.delete(from.id);
@@ -336,10 +345,10 @@ export class Store {
     // would miss the nick one, which is deliberately not stored there.
     for (const [k, v] of [...this.pmIndex]) if (v === id) this.pmIndex.delete(k);
     // Forget its mail too, so a later page can bring the thread back
-    // rather than silently skipping every message it used to hold.
-    for (const l of this.conversations.get(id)?.lines ?? []) {
-      if (l.id !== undefined) this.seenMail.delete(l.id);
-    }
+    // rather than silently skipping every message it used to hold —
+    // `mailIds` rather than `lines`, because trimming removes lines and
+    // the ids behind them would otherwise be skipped for ever.
+    for (const mid of this.conversations.get(id)?.mailIds ?? []) this.seenMail.delete(mid);
     this.conversations.delete(id);
     if (this.active === id) this.active = LOBBY;
   }
@@ -388,7 +397,10 @@ export class Store {
   add(id: ConvId, line: Line, fresh = true): Conversation | undefined {
     const c = this.conversations.get(id);
     if (!c) return undefined;
-    if (line.id !== undefined) this.seenMail.add(line.id);
+    if (line.id !== undefined) {
+      this.seenMail.add(line.id);
+      c.mailIds.add(line.id);
+    }
     c.lines.push(line);
     if (c.lines.length > MAX_LINES) c.lines.splice(0, c.lines.length - MAX_LINES);
     if (fresh && id !== this.active) c.unread++;

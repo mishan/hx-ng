@@ -21,6 +21,7 @@ import {
   VoiceSession,
   WireFailure,
   CAP_INBOX,
+  isFingerprint,
   type BlockParams,
   type ConnState,
   type Credentials,
@@ -158,9 +159,11 @@ export class App {
       onState: (s, detail) => this.onState(s, detail),
       onLogin: (ok) => {
         this.store.server = ok.server;
-        // Absent means this server stores no mail at all, which is a
-        // different thing from an empty mailbox and is drawn differently:
-        // not at all.
+        // Present whenever the *server* keeps mail — which is not the
+        // same as this account having a mailbox. A guest on a server with
+        // an inbox is told `{0, 0}` here and then refused `no_inbox` when
+        // it asks, so this is a provisional yes that the first `inbox`
+        // call confirms or withdraws.
         this.store.mail = ok.inbox ?? null;
         if (this.media) this.media.limits = ok.video ?? null;
         if (ok.server.agreement) {
@@ -458,9 +461,9 @@ export class App {
         const target = this.findUser(arg);
         const who: BlockParams = target
           ? { uid: target.uid }
-          : // 52 Crockford characters is a fingerprint, and only `unblock`
-            // takes one: it names a block, not a person.
-            !on && /^[0-9a-z]{52}$/.test(arg)
+          : // A fingerprint names a block rather than a person, so only
+            // `unblock` takes one.
+            !on && isFingerprint(arg)
             ? { fingerprint: arg }
             : { login: arg };
         await (on ? conn.block(who) : conn.unblock(who));
@@ -639,9 +642,16 @@ export class App {
         this.say('Nothing new in that page; ask again to go further back.');
       }
     } catch (e) {
-      // `no_inbox` is the ordinary answer for a guest, and at login it is
-      // not worth interrupting anyone over.
-      if (opts.initial && e instanceof WireFailure && e.wire.code === 'no_inbox') return;
+      // `no_inbox` is the ordinary answer for a guest: the server keeps
+      // mail, this account has nowhere to keep any. Not worth
+      // interrupting anyone over at login — but the badge the login
+      // reply invited us to draw is now known to be meaningless, so take
+      // it down rather than leaving a control that only ever errors.
+      if (e instanceof WireFailure && e.wire.code === 'no_inbox') {
+        this.store.mail = null;
+        this.renderMail();
+        if (opts.initial) return;
+      }
       throw e;
     }
   }

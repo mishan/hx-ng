@@ -184,6 +184,9 @@ Typed into the composer:
 |---|---|
 | `/me <text>` | chat with `style: "action"` |
 | `/msg <nick\|uid\|account> <text>` | open a PM conversation and send. An account name reaches somebody who is not here |
+| `/mail` | load earlier stored messages, a page at a time |
+| `/block <who>`, `/unblock <who>` | a nick, an account, or (to unblock) a fingerprint |
+| `/blocks` | who you have blocked |
 | `/nick <name>` | needs `use_any_name` |
 | `/icon <n>` | or click your own icon in the title bar |
 | `/drop` | close the socket without logging out — exercises resume |
@@ -217,6 +220,21 @@ Typed into the composer:
   flushed — so threads are keyed on the account where there is one, and
   fall back to the uid. That is also what stops a reissued uid from
   delivering into the previous holder's thread.
+- **The mailbox is a place, not a screen.** There is no mail view: a
+  stored message belongs in the conversation it is part of, so the first
+  page is pulled at login and folded into threads, and a reload lands you
+  in conversations that still have their history. It is also the only way
+  to see all of it — the login flush is capped by `deliver_at_flush`, and
+  everything past that cap exists only through `inbox`.
+- **One unread count, and it is the server's.** `msg_read` is a cursor
+  over the whole mailbox rather than a per-thread mark, so a per-thread
+  badge would drift the moment you opened the newest thread first. The
+  count in the title bar is what the server last said; selecting a
+  conversation moves the cursor and takes the new count from the reply.
+- **A private message to an unencrypted session says so** before it is
+  sent, in the composer, with a mark on the roster row to match. That is
+  what `transport` is for, and it is present whether or not the server
+  runs the identity endpoints.
 - **Video is opt-in in both directions.** Nothing is published until you
   ask and nothing is received until you subscribe, and the subscription
   is declared as a complete set so turning it all off is one request.

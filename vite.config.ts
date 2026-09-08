@@ -29,5 +29,16 @@ export default defineConfig({
     // A phone on the LAN is the whole point of the ng wire, and it
     // cannot reach a dev server bound to loopback.
     host: true,
+    // Identity's HTTP endpoints (`docs/identity-keys.md` §9) live on the
+    // ng listener, :5700, not this dev server's :5701 — proxying them
+    // makes every request same-origin in development with no server
+    // change at all, for the ordinary case of hxd-ng running on the same
+    // machine. A custom server elsewhere still needs its own CORS; this
+    // proxy only covers the default.
+    proxy: {
+      '/identity': 'http://127.0.0.1:5700',
+      '/.well-known': 'http://127.0.0.1:5700',
+      '/ng': { target: 'ws://127.0.0.1:5700', ws: true },
+    },
   },
 });

@@ -62,6 +62,18 @@ export interface Credentials {
   password: string;
   nick: string;
   icon: number;
+  /**
+   * Present for an identity login (`hotline-ng-identity.md` §5–§8).
+   * Deliberately just a token-minting callback rather than a device key
+   * or any CBOR — this package stays free of the crypto/CBOR dependency
+   * that producing a token needs; the caller (built from
+   * `src/identity/`) closes over the device key and the challenge/auth
+   * round trip.
+   *
+   * When set, `login`/`password` are ignored by the server (§6.2) and
+   * should be sent empty; the token, not a password, is the credential.
+   */
+  identity?: { getToken: () => Promise<string> };
 }
 
 /** What a resumed session is allowed to remember between page loads. The
@@ -213,9 +225,11 @@ export class Connection {
     this.ws?.close();
   }
 
-  private async attach(): Promise<void> {
-    this.setState(this.session ? 'reconnecting' : 'connecting');
-    const ws = new WebSocket(this.creds.url);
+  /** Open `url` and wire it up as `this.ws`. Every fresh connection goes
+   *  through here, whether it turns out to carry a resume, a classic
+   *  login, or (see `openTokenedSocket`) an identity login. */
+  private async openSocket(url: string): Promise<WebSocket> {
+    const ws = new WebSocket(url);
     this.ws = ws;
 
     await new Promise<void>((resolve, reject) => {
@@ -224,7 +238,7 @@ export class Connection {
         // it in `this.ws` would let the next `request()` believe it had
         // one.
         if (this.ws === ws) this.ws = null;
-        reject(new Error(`Could not reach ${this.creds.url}`));
+        reject(new Error(`Could not reach ${url}`));
       };
       ws.onopen = () => resolve();
       ws.onerror = fail;
@@ -234,8 +248,24 @@ export class Connection {
     ws.onmessage = (e) => this.onMessage(String(e.data));
     ws.onerror = null;
     ws.onclose = (e) => this.onClose(e);
+    return ws;
+  }
+
+  /** Mint a fresh transport token and open a socket carrying it
+   *  (`hotline-ng-identity.md` §6.1's `?token=`). The token is single-use
+   *  and 60 seconds, so this is only ever called immediately before the
+   *  socket it's for. */
+  private async openTokenedSocket(): Promise<WebSocket> {
+    const token = await this.creds.identity!.getToken();
+    const sep = this.creds.url.includes('?') ? '&' : '?';
+    return this.openSocket(`${this.creds.url}${sep}token=${encodeURIComponent(token)}`);
+  }
+
+  private async attach(): Promise<void> {
+    this.setState(this.session ? 'reconnecting' : 'connecting');
 
     if (this.session && this.token) {
+      const ws = await this.openSocket(this.creds.url);
       const ok = await this.tryResume();
       if (ok) return;
       if (this.resumeOnly) {
@@ -243,16 +273,36 @@ export class Connection {
         ws.close();
         throw new Error('session expired');
       }
+      if (this.creds.identity) {
+        // The token has to exist *before* the socket that redeems it
+        // opens (`hotline-ng-identity.md` §8), so a resume that failed
+        // cannot fall through to `doLogin()` on this same, tokenless
+        // socket the way a classic login would. Close it and start over
+        // with one that carries a token.
+        ws.onclose = null;
+        ws.onmessage = null;
+        ws.close();
+        await this.openTokenedSocket();
+      }
+      // else: today's behaviour — `doLogin()` runs on this same socket.
+    } else if (this.creds.identity) {
+      await this.openTokenedSocket();
+    } else {
+      await this.openSocket(this.creds.url);
     }
+
     await this.doLogin();
   }
 
   private async doLogin(): Promise<void> {
-    const params: LoginParams = {
-      login: this.creds.login,
-      password: this.creds.password,
-      icon: this.creds.icon,
-    };
+    const params: LoginParams = { icon: this.creds.icon };
+    // An identity socket ignores `login`/`password` — the token already
+    // said who this is (§6.2) — and sending them would only invite the
+    // question of why a password is being typed at all for this path.
+    if (!this.creds.identity) {
+      params.login = this.creds.login;
+      params.password = this.creds.password;
+    }
     if (this.creds.nick) params.nick = this.creds.nick;
 
     const ok = await this.request<LoginOk>('login', params);

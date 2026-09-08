@@ -10,8 +10,12 @@
  * next to the built client rather than a constant compiled into it.
  */
 
+import { fetchDiscovery, wsToHttp, type Credentials } from '@hotline-ng/client';
+
 import type { AppConfig } from '../config';
 import { serverFromUrl } from '../config';
+import { getActiveDevice } from '../identity/storage';
+import { planIdentityLogin } from '../identity/login';
 import { h, type Props } from './dom';
 import { icon, DEFAULT_ICON } from './icons';
 import { pickIcon } from './iconpicker';
@@ -22,9 +26,15 @@ export interface Details {
   password: string;
   nick: string;
   icon: number;
+  /** Set instead of `login`/`password` for an identity login. */
+  identity?: Credentials['identity'];
 }
 
 const KEY = 'hxd-ng.connect';
+/** Per-server answers to the §5.1 question, kept separate from `KEY`
+ *  because it survives independently of "what this browser last typed"
+ *  and is keyed by server rather than being the one remembered form. */
+const IDENTITY_CREATE_KEY = 'hxd-ng.connect.identity-create';
 
 export function remembered(config: AppConfig): Details {
   const fallback: Details = {
@@ -54,16 +64,74 @@ export function remembered(config: AppConfig): Details {
 
 function remember(d: Details): void {
   try {
-    const { password: _password, ...rest } = d;
+    // `identity` carries a function (`getToken`) and `JSON.stringify`
+    // simply drops function-valued properties, so leaving it in costs
+    // nothing — but naming it out is what the `password` precedent here
+    // is for, and it reads better than relying on that.
+    const { password: _password, identity: _identity, ...rest } = d;
     localStorage.setItem(KEY, JSON.stringify(rest));
   } catch {
     /* storage disabled; the form simply starts from its defaults */
   }
 }
 
+function identityCreateChoices(): Record<string, boolean> {
+  try {
+    const raw = localStorage.getItem(IDENTITY_CREATE_KEY);
+    return raw ? (JSON.parse(raw) as Record<string, boolean>) : {};
+  } catch {
+    return {};
+  }
+}
+
+function rememberIdentityCreateChoice(url: string, makeAccount: boolean): void {
+  try {
+    const all = identityCreateChoices();
+    all[url] = makeAccount;
+    localStorage.setItem(IDENTITY_CREATE_KEY, JSON.stringify(all));
+  } catch {
+    /* storage disabled; the question is simply asked again next time */
+  }
+}
+
+/**
+ * §5.1's question, asked inline and only where discovery says it
+ * matters: a never-seen identity on a `new_accounts = create` server
+ * either gets a guest session or an invented account, and the client
+ * must not send its first auth without knowing which. Linking an
+ * existing account is deliberately not offered here — it happens with
+ * `hlid link` (the identity panel's second command), because a
+ * web-capability certificate cannot write a link itself
+ * (`docs/hotline-ng-identity.md` §8.2).
+ */
+function askCreateChoice(container: HTMLElement): Promise<boolean> {
+  return new Promise((resolve) => {
+    const makeBtn = h('button', { class: 'ghost', type: 'button' }, 'Create an account for me');
+    const guestBtn = h('button', { class: 'ghost', type: 'button' }, 'Stay a guest');
+    const box = h(
+      'div',
+      { class: 'identity-create-choice' },
+      h(
+        'p',
+        { class: 'muted' },
+        'This server will make a new account for your identity unless you say otherwise. Already linked an existing account with hlid link? That takes effect either way.',
+      ),
+      h('div', { class: 'button-row' }, makeBtn, guestBtn),
+    );
+    container.append(box);
+    const finish = (v: boolean) => {
+      box.remove();
+      resolve(v);
+    };
+    makeBtn.onclick = () => finish(true);
+    guestBtn.onclick = () => finish(false);
+  });
+}
+
 export function connectScreen(
   config: AppConfig,
   onConnect: (d: Details) => Promise<void>,
+  onIdentityKeys: () => void,
 ): HTMLElement {
   const saved = remembered(config);
   let chosenIcon = saved.icon;
@@ -93,6 +161,10 @@ export function connectScreen(
 
   const error = h('p', { class: 'error', hidden: true });
   const submit = h('button', { class: 'primary', type: 'submit' }, 'Connect');
+  const identityKeysLink = h('button', { class: 'ghost', type: 'button' }, 'Identity keys…');
+  identityKeysLink.onclick = onIdentityKeys;
+  const identityBtn = h('button', { class: 'ghost', type: 'button', hidden: true }, 'Log in with identity');
+  const identityChooser = h('div', {});
 
   const form = h(
     'form',
@@ -106,8 +178,62 @@ export function connectScreen(
     nick.row,
     h('label', { class: 'row' }, h('span', {}, 'Icon'), iconBtn),
     error,
-    submit,
+    h('div', { class: 'button-row' }, submit, identityBtn),
+    identityChooser,
+    h('p', {}, identityKeysLink),
   );
+
+  // The button only makes sense once this browser actually holds an
+  // enrolled device — checked once, asynchronously, same as the
+  // password-vs-login focus decision below.
+  void getActiveDevice().then((device) => {
+    identityBtn.hidden = !device?.cert;
+  });
+
+  identityBtn.onclick = () => {
+    void (async () => {
+      const targetUrl = url.input.value.trim() || config.defaultServer;
+      if (!targetUrl) return;
+      error.hidden = true;
+      identityBtn.disabled = true;
+      identityBtn.textContent = 'Connecting…';
+      try {
+        const device = await getActiveDevice();
+        if (!device?.cert || !device.card) throw new Error('This browser has no enrolled device yet.');
+
+        const discovery = await fetchDiscovery(wsToHttp(targetUrl));
+        const remembered = identityCreateChoices()[targetUrl];
+        let create: boolean | undefined;
+        if (discovery.identity.enabled && discovery.identity.newAccounts === 'create' && remembered === undefined) {
+          const makeAccount = await askCreateChoice(identityChooser);
+          rememberIdentityCreateChoice(targetUrl, makeAccount);
+          create = makeAccount ? undefined : false;
+        } else if (remembered !== undefined) {
+          create = remembered ? undefined : false;
+        } else {
+          create = false;
+        }
+
+        const plan = await planIdentityLogin(targetUrl, device, create);
+        const details: Details = {
+          url: targetUrl,
+          login: '',
+          password: '',
+          nick: nick.input.value.trim(),
+          icon: chosenIcon,
+          identity: plan.identity,
+        };
+        remember(details);
+        await onConnect(details);
+      } catch (err) {
+        error.textContent = err instanceof Error ? err.message : String(err);
+        error.hidden = false;
+      } finally {
+        identityBtn.disabled = false;
+        identityBtn.textContent = 'Log in with identity';
+      }
+    })();
+  };
 
   form.onsubmit = (e) => {
     e.preventDefault();

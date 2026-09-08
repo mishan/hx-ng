@@ -11,6 +11,12 @@
     "types": [
       "vite/client"
     ],
+    // Only for the identity test-vector fixture (`resolveJsonModule`),
+    // not `node`'s: this project keeps Node globals out of code that
+    // also has to typecheck as browser code, so a test that needs the
+    // filesystem uses `node:fs` behind an `any`-typed dynamic import
+    // instead of widening `types` here.
+    "resolveJsonModule": true,
     "strict": true,
     "noUncheckedIndexedAccess": true,
     "noImplicitOverride": true,

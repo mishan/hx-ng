@@ -128,7 +128,7 @@ export class IdentityPanel {
       h(
         'p',
         { class: 'note' },
-        "hlid doesn't write the certificate and card together yet (docs/identity-keys.md §9), so this writes just the certificate — paste it below, and this identity's card too if you have it separately (a second browser can skip the card; the server already has it cached).",
+        "This writes just the certificate — paste it below, and this identity's card too if you have it separately (a second browser can skip the card; the server already has it cached). hlid can write both as one blob with --bundle; this panel does not read that format yet (docs/identity-keys.md §9).",
       ),
       h('h3', {}, '2. Paste it back'),
       paste,

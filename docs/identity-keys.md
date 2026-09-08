@@ -437,46 +437,39 @@ in the routine path.
 
 ## 9. What this needs that does not exist yet
 
-**`hlid cert` can now certify a key it did not generate** (hxd-ng#62):
-`--device-pub HEX --device-enc-pub HEX` is an alternative to `--device
-SEEDFILE`, built on a new `DeviceCert::for_keys` that takes the two
-public keys directly instead of reading them off a `DeviceKey`. §7.1
-step 2's command is exact as written and runnable as-is.
+Three of the four things this section used to ask for have landed on the
+server side, so what is left here is this client's half of them.
 
-What that fix didn't include: a combined bundle output. `hlid cert` and
-`hlid card` still write two separate files, so §7.1 step 3's "the user
-pastes back one blob" is still two — the identity panel accepts either.
-`-o FILE.bundle` (or a `--with-card FILE` flag) that writes cert and
-card together as one base64url blob would still be worth doing, so that
-paste collapses to one.
+**`hlid` does what §7.1's command needs it to.** It can certify a key it
+did not generate (`--device-pub HEX --device-enc-pub HEX`, hxd-ng#62);
+`--identity`, `--device`, `--cert` and `--card` fall back to fixed names
+in `$HLID_HOME`, default `~/.hlid`, so a pre-filled command that names no
+key file is exact rather than a guess; `hlid init --name S` writes an
+identity key, a device key, a certificate and a card in one step; and
+`hlid cert --bundle` writes the certificate and the card as a single
+object.
 
-**`hlid` has no default paths.** Every subcommand takes `--identity`,
-`--device`, `--card`, `--cert` explicitly, and nothing in it knows about
-a home directory. A pre-filled command is only "exact" if those flags
-can be omitted, which means: a default directory (`$HLID_HOME`, else
-`~/.hlid`) with fixed filenames that every flag falls back to, and an
-`hlid init --name S` that does `keygen identity`, `keygen device`, an
-unrestricted `cert`, and `card` in one step, so that a person who has
-never used `hlid` can get from nothing to "paste this into the browser"
-in two commands. This is additive; the explicit flags keep working.
+**What this client has not caught up with is the bundle.** `hlid cert
+--bundle` writes `identity-enrollment.md` §5.4 — an unsigned CBOR map of
+a `cert` and a `card`, verified by checking both signatures and that the
+card belongs to the identity the certificate names. The panel still asks
+for "one or two base64url blobs, told apart by shape", which is what
+`hlid cert` plus `hlid card` produce. Teaching it the bundle collapses
+§7.1 step 3's paste to one blob and, more to the point, gives it the
+*same* verifier the mailbox path will use — so the paste stops being a
+second code path to audit. That is the next thing to do here.
 
-**CORS on the identity endpoints — a dev-loop problem, not a blocker.**
-Nothing in `crates/` emits an `Access-Control-Allow-Origin` header, and
-every endpoint above is a `fetch()`. Same-origin deployments, which are
-the usual case, are fine. `npm run dev` on :5701 against :5700 is not —
-but Vite's dev server proxies, and `server.proxy` in `vite.config.ts`
-forwarding `/identity`, `/.well-known` and `/ng` (with `ws: true`) to
-:5700 makes every request same-origin in development with no server
-change at all. That is the first thing to do.
+**CORS is answered by the server now.** The identity endpoints and
+discovery send `Access-Control-Allow-Origin: *` with an `OPTIONS`
+handler for the preflight `PUT /identity/card` triggers, and expose
+`ETag` so the card fetch can still be revalidated. The `allowCustomServer`
+case therefore works, and so will a device reaching a mailbox on a server
+other than the one that served the page.
 
-Server-side CORS is still wanted for the `allowCustomServer` case, where
-the page points at a server other than the one that served it, and it is
-small rather than hard: these endpoints are authenticated by a token in
-the body or URL and never by a cookie, so `Access-Control-Allow-Origin: *`
-on the identity routes gives nothing away. `PUT /identity/card` with
-`application/cbor` triggers a preflight, so an `OPTIONS` handler goes
-with it. Until that lands, the identity panel is same-origin only and
-says so when the server field is pointed elsewhere.
+The Vite proxy in `vite.config.ts` stays regardless: it forwards
+`/identity`, `/.well-known` and `/ng` to :5700 so that `npm run dev` on
+:5701 is same-origin, which is still the right shape for the dev loop and
+does not depend on the server being a recent build.
 
 **A CBOR codec in the client.** hx-ng has no runtime dependencies and
 this should not be the reason it grows one. The login proof (§3.6) is

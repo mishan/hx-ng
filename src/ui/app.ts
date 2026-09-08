@@ -20,6 +20,8 @@ import {
   screenShareBlockedReason,
   VoiceSession,
   WireFailure,
+  CAP_INBOX,
+  type BlockParams,
   type ConnState,
   type Credentials,
   type InboxOk,
@@ -30,7 +32,7 @@ import {
 } from '@hotline-ng/client';
 
 import type { AppConfig } from '../config';
-import { addressOf, LOBBY, type ConvId, type Line, Store, styleToKind } from '../state';
+import { addressOf, LOBBY, type Conversation, type ConvId, type Line, Store, styleToKind } from '../state';
 import { connectScreen, remembered, type Details } from './connect';
 import { DebugPanel } from './debug';
 import { clock, fill, h } from './dom';
@@ -81,6 +83,10 @@ export class App {
     { class: 'ghost people-toggle', title: 'Show the user list' },
     'People',
   );
+  private mailBtn = h('button', { class: 'ghost mail-button', hidden: true }, 'Mail');
+  /** The highest id already handed to `msg_read`, so selecting the same
+   *  conversation twice does not ask again. */
+  private markedRead = 0;
   private meButton = h('button', { class: 'identity', title: 'Change your icon' });
 
   constructor(
@@ -142,6 +148,10 @@ export class App {
       onState: (s, detail) => this.onState(s, detail),
       onLogin: (ok) => {
         this.store.server = ok.server;
+        // Absent means this server stores no mail at all, which is a
+        // different thing from an empty mailbox and is drawn differently:
+        // not at all.
+        this.store.mail = ok.inbox ?? null;
         if (this.media) this.media.limits = ok.video ?? null;
         if (ok.server.agreement) {
           this.store.add(LOBBY, {
@@ -164,7 +174,14 @@ export class App {
             : 'Reconnected.',
         );
       },
-      onMissedMail: (ok) => this.mergeStoredMail(ok),
+      onMissedMail: (ok) => {
+        const n = this.mergeStoredMail(ok);
+        if (n) {
+          this.say(
+            `Recovered ${n} private ${n === 1 ? 'message' : 'messages'} that arrived while this client was behind.`,
+          );
+        }
+      },
       onEnded: (reason) => {
         this.say(reason);
         this.media?.teardown();
@@ -204,6 +221,11 @@ export class App {
     this.media.limits = conn.video;
     this.renderAll();
     this.composer.focus();
+    // Conversations live in memory and die with the page; the mailbox
+    // does not. Pulling the first page back means a reload lands you in
+    // threads that still have their history, and it is also the only way
+    // to see mail past `deliver_at_flush`, which the login flush caps.
+    if (conn.hasCap(CAP_INBOX)) void this.loadMail({ initial: true });
     this.pingTimer = window.setInterval(() => {
       if (conn.state === 'online') void conn.ping().then(() => this.renderPill());
     }, 15000);
@@ -258,7 +280,11 @@ export class App {
       // `at` rather than now: a message that waited in the store was
       // *sent* whenever it was sent, and stamping the flush time on it
       // would make a week-old message read as having just arrived.
+      // The login flush and an `inbox` page carry the same rows, and
+      // which arrives first is a race. Whichever loses is dropped here.
+      if (d.id !== undefined && this.store.hasMail(d.id)) return;
       const conv = this.store.openPm({ uid: d.from.uid, login: d.from.login, nick: d.from.nick });
+      if (d.id !== undefined && this.store.mail) this.store.mail.unread++;
       this.push(conv.id, {
         t: d.at * 1000,
         kind: 'chat',
@@ -268,6 +294,7 @@ export class App {
         id: d.id,
       });
       this.renderRail();
+      this.renderMail();
     });
 
     conn.on('notice', (d) => {
@@ -402,6 +429,45 @@ export class App {
         if (words.length) await this.send(words.join(' '));
         return;
       }
+      case 'mail':
+        return this.loadMail();
+
+      // Blocking is account-level and outlives any session, which is why
+      // it is worth doing from here rather than leaving it to an
+      // operator: it is how you stop someone putting mail in your queue.
+      case 'block':
+      case 'unblock': {
+        if (!arg) return this.say(`Usage: /${word} <nick, account or fingerprint>`);
+        const on = word === 'block';
+        // A nick on the roster names a uid, which is the only way to
+        // block an identity admitted as a guest — they have a
+        // fingerprint to hold it against but no login of their own.
+        const target = this.findUser(arg);
+        const who: BlockParams = target
+          ? { uid: target.uid }
+          : // 52 Crockford characters is a fingerprint, and only `unblock`
+            // takes one: it names a block, not a person.
+            !on && /^[0-9a-z]{52}$/.test(arg)
+            ? { fingerprint: arg }
+            : { login: arg };
+        await (on ? conn.block(who) : conn.unblock(who));
+        return this.say(
+          on
+            ? `Blocked ${target?.nick ?? arg}. They can no longer send you private messages.`
+            : `Unblocked ${target?.nick ?? arg}.`,
+        );
+      }
+
+      case 'blocks': {
+        const { blocked } = await conn.blocks();
+        if (!blocked.length) return this.say('You have not blocked anyone.');
+        return this.say(
+          `Blocked: ${blocked
+            .map((b) => (b.fingerprint ? `${b.login} (${b.fingerprint.slice(0, 8)}…)` : b.login))
+            .join(', ')}`,
+        );
+      }
+
       case 'nick':
         if (!arg) return this.say('Usage: /nick <name>');
         await conn.request('nick', { nick: arg });
@@ -436,7 +502,8 @@ export class App {
         return;
       case 'help':
         return this.say(
-          '/me · /msg <nick or account> <text> · /nick <name> · /icon <n> · /clear · /close · /drop · /debug · /logout',
+          '/me · /msg <nick or account> <text> · /mail · /block <who> · /unblock <who> · /blocks · ' +
+            '/nick <name> · /icon <n> · /clear · /close · /drop · /debug · /logout',
         );
       default:
         return this.say(`Unknown command: /${word}`);
@@ -462,6 +529,11 @@ export class App {
     this.renderTranscript();
     this.renderComposerHint();
     this.composer.focus();
+    // Reading is a thing the server keeps for us, so tell it. Failure is
+    // worth a line but not worth interrupting the selection over.
+    this.markRead(conv).catch((e: Error) =>
+      this.say(e instanceof WireFailure ? errorText(e.wire) : e.message),
+    );
   }
 
   private closeConversation(id: ConvId): void {
@@ -472,30 +544,28 @@ export class App {
     this.renderComposerHint();
   }
 
+  // --- mail -------------------------------------------------------------
+
   /**
-   * Private messages recovered from the store after a resync.
+   * Fold a page of stored messages into the conversations they belong
+   * to, and report how many were new.
    *
-   * The gap the outbox dropped is unrecoverable as *events*, and any
-   * `msg` in it was already marked delivered — so this is the only copy
-   * that will ever arrive. Deduplicated on the store's id, because the
-   * page may already be showing some of these: the session went live
-   * again the moment `resume` answered `resync_required`, so mail
-   * delivered between then and the `inbox` reply arrives both ways.
+   * Deduplicated on the store's id, because mail reaches this client two
+   * ways by design: the login flush pushes `msg` events for what is
+   * unread, and `inbox` lists the same rows. Neither is redundant — the
+   * flush is capped by `deliver_at_flush` and the list is not — so both
+   * run and this is where they meet.
    *
    * Appended rather than merged by timestamp. These are older than what
-   * is on screen and it shows, which is why they are marked `queued` —
-   * a line whose stamp is Tuesday sitting under one from just now is
-   * better than a client that quietly reorders a transcript.
+   * is on screen and it shows, which is why they are marked `queued`: a
+   * line stamped Tuesday sitting under one from just now is better than
+   * a client that quietly reorders a transcript.
    */
-  private mergeStoredMail(ok: InboxOk): void {
-    const seen = new Set<number>();
-    for (const c of this.store.conversations.values()) {
-      for (const l of c.lines) if (l.id !== undefined) seen.add(l.id);
-    }
-    // `inbox` lists newest first; put them back in the order they were sent.
+  private mergeStoredMail(ok: InboxOk): number {
     let added = 0;
+    // `inbox` lists newest first; put them back in the order they were sent.
     for (const m of [...ok.messages].reverse()) {
-      if (seen.has(m.id)) continue;
+      if (this.store.hasMail(m.id)) continue;
       const conv = this.store.openPm({ login: m.from.login, nick: m.from.nick });
       // The server knows whether this was read, possibly by another
       // client on the same account. Recovering it must not raise a badge
@@ -514,12 +584,102 @@ export class App {
       );
       added++;
     }
-    if (added) {
-      this.say(
-        `Recovered ${added} private ${added === 1 ? 'message' : 'messages'} that arrived while this client was behind.`,
-      );
+    // The oldest id on this page is where the next one starts.
+    for (const m of ok.messages) {
+      if (this.store.oldestMailId === undefined || m.id < this.store.oldestMailId) {
+        this.store.oldestMailId = m.id;
+      }
     }
+    this.store.mail = { unread: ok.unread, total: ok.total };
     this.renderRail();
+    this.renderMail();
+    return added;
+  }
+
+  /**
+   * Pull a page of the mailbox: the newest on the first call, then
+   * backwards from the oldest already held.
+   *
+   * `initial` is the quiet one that runs at login — it says nothing when
+   * there was nothing, because "no mail" is not news. Every other call
+   * came from someone asking, and a request that produces no visible
+   * change has to say why.
+   */
+  private async loadMail(opts: { initial?: boolean } = {}): Promise<void> {
+    const conn = this.conn;
+    if (!conn) return;
+    if (!conn.hasCap(CAP_INBOX)) return this.say('This server does not keep private messages.');
+    const before = opts.initial ? undefined : this.store.oldestMailId;
+    if (!opts.initial && this.store.mailExhausted) {
+      return this.say('That is the whole mailbox — there is nothing older.');
+    }
+    try {
+      const page = await conn.inbox(before === undefined ? {} : { before });
+      const added = this.mergeStoredMail(page);
+      // Exhaustion is a page with no rows, never a page with no *new*
+      // rows. The login flush pushes the oldest unread mail as events, so
+      // a page backwards can land entirely on messages already on screen
+      // while older ones still sit below it — stopping there would hide
+      // them for good. `oldestMailId` moved either way, so asking again
+      // goes further back.
+      if (page.messages.length === 0) this.store.mailExhausted = true;
+      if (opts.initial) {
+        if (added) {
+          this.say(
+            `${added} stored ${added === 1 ? 'message' : 'messages'} loaded from your mailbox.`,
+          );
+        }
+      } else if (added) {
+        this.say(`Loaded ${added} earlier ${added === 1 ? 'message' : 'messages'}.`);
+      } else if (this.store.mailExhausted) {
+        this.say('That is the whole mailbox — there is nothing older.');
+      } else {
+        this.say('Nothing new in that page; ask again to go further back.');
+      }
+    } catch (e) {
+      // `no_inbox` is the ordinary answer for a guest, and at login it is
+      // not worth interrupting anyone over.
+      if (opts.initial && e instanceof WireFailure && e.wire.code === 'no_inbox') return;
+      throw e;
+    }
+  }
+
+  /**
+   * Tell the server we have read this conversation.
+   *
+   * `msg_read` is a cursor across the whole mailbox rather than a
+   * per-conversation mark: `up_to` marks everything of ours below that
+   * id, whoever sent it. That is the wire's design and it is why the
+   * unread count this client shows is the server's one number and not a
+   * per-thread tally — a per-thread badge would drift the moment you
+   * opened the newest thread first.
+   */
+  private async markRead(conv: Conversation): Promise<void> {
+    const conn = this.conn;
+    if (!conn || conv.kind !== 'pm' || !this.store.mail) return;
+    let top = 0;
+    // Only mail we received has an id worth marking; our own half of the
+    // conversation is local and never had one.
+    for (const l of conv.lines) if (l.id !== undefined && !l.local && l.id > top) top = l.id;
+    if (top === 0 || top <= this.markedRead) return;
+    this.markedRead = top;
+    this.store.mail = await conn.msgRead(top);
+    this.renderMail();
+  }
+
+  private renderMail(): void {
+    const mail = this.store.mail;
+    this.mailBtn.hidden = mail === null;
+    if (!mail) return;
+    fill(
+      this.mailBtn,
+      h('span', {}, 'Mail'),
+      mail.unread ? h('span', { class: 'badge' }, String(mail.unread)) : null,
+    );
+    this.mailBtn.classList.toggle('unread', mail.unread > 0);
+    this.mailBtn.title = this.store.mailExhausted
+      ? `${mail.unread} unread of ${mail.total} stored — all of it is loaded`
+      : `${mail.unread} unread of ${mail.total} stored. Click to load earlier messages.`;
   }
 
   private push(id: ConvId, line: Line, fresh = true): void {
@@ -549,6 +709,7 @@ export class App {
     this.renderCallbar();
     this.renderPill();
     this.renderMe();
+    this.renderMail();
     this.renderComposerHint();
   }
 
@@ -635,7 +796,19 @@ export class App {
     const conv = this.store.conversation(this.store.active);
     const pm = conv?.kind === 'pm';
     this.composer.placeholder = pm ? `Message ${conv.title}…` : 'Say something…';
-    this.composerHint.textContent = pm ? 'private message' : 'public chat';
+    // `transport` is on every roster row whether or not the server runs
+    // the identity endpoints, and this is what it is for: a private
+    // message to a session on a plain TCP legacy socket crosses the
+    // network in the clear, and the only moment that is worth saying is
+    // the moment before it is sent.
+    const peer = pm && conv.peer.uid !== undefined ? this.store.user(conv.peer.uid) : undefined;
+    const cleartext = peer?.transport === 'cleartext';
+    this.composerHint.textContent = !pm
+      ? 'public chat'
+      : cleartext
+        ? `private message — ${peer.nick} is on an unencrypted connection`
+        : 'private message';
+    this.composerHint.classList.toggle('warn', cleartext);
   }
 
   private renderUnreadTitle(): void {
@@ -746,6 +919,10 @@ export class App {
 
     this.pill.onclick = () => this.debug.toggle(true);
     this.meButton.onclick = () => void this.editSelf();
+    this.mailBtn.onclick = () =>
+      this.loadMail().catch((e: Error) =>
+        this.say(e instanceof WireFailure ? errorText(e.wire) : e.message),
+      );
 
     this.composer.onkeydown = (e) => {
       if (e.key === 'Enter' && !e.shiftKey) {
@@ -777,6 +954,7 @@ export class App {
         h('div', { class: 'spacer' }),
         this.meButton,
         this.pill,
+        this.mailBtn,
         this.peopleBtn,
         themeBtn,
         debugBtn,

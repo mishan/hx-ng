@@ -95,9 +95,32 @@ describe('signLoginProof', () => {
 });
 
 describe('wsToHttp', () => {
-  it('swaps the scheme and drops the path', () => {
+  it('swaps the scheme and drops the path when there is no page origin to be relative to', () => {
+    // Node has no `location` global, so this exercises the "outside a
+    // browser" branch — the same one a bot or a bridge gets.
     expect(wsToHttp('ws://localhost:5700/ng')).toBe('http://localhost:5700');
     expect(wsToHttp('wss://hotline.example.org/ng')).toBe('https://hotline.example.org');
+  });
+
+  describe('in a browser', () => {
+    afterEach(() => {
+      vi.unstubAllGlobals();
+    });
+
+    it('is page-relative when the target shares this page\'s hostname', () => {
+      // The identity endpoints and the ng WebSocket are almost never on
+      // the page's own origin (a different port) — a same-hostname
+      // target is "the client sitting in front of its own server", and
+      // an absolute cross-origin URL there would just be refused by
+      // the browser, since nothing in hxd-ng sends CORS headers.
+      vi.stubGlobal('location', { hostname: 'localhost' });
+      expect(wsToHttp('ws://localhost:5700/ng')).toBe('');
+    });
+
+    it('is absolute for a genuinely different server', () => {
+      vi.stubGlobal('location', { hostname: 'localhost' });
+      expect(wsToHttp('wss://hotline.example.org/ng')).toBe('https://hotline.example.org');
+    });
   });
 });
 

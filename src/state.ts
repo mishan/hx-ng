@@ -2,7 +2,15 @@
  *  conversation. No DOM in this file — the UI reads from here, never the
  *  other way round. */
 
-import type { ChatStyle, InboxCounts, Sender, ServerInfo, Status, User } from '@hotline-ng/client';
+import type {
+  ChatStyle,
+  InboxCounts,
+  InboxOk,
+  Sender,
+  ServerInfo,
+  Status,
+  User,
+} from '@hotline-ng/client';
 
 export type LineKind =
   /** Public chat, or a private message inside a PM conversation. */
@@ -83,6 +91,41 @@ const uidKey = (uid: number): string => `uid:${uid}`;
 const loginKey = (login: string): string => `login:${login.toLowerCase()}`;
 /** The last-resort key, for a sender the wire gave no name at all. */
 const nickKey = (nick: string): string => `nick:${nick}`;
+
+/**
+ * A position that only moves forward, whose updates may be in flight at
+ * once.
+ *
+ * `msg_read` is the case: selecting one conversation and then another
+ * before the first answers puts two marks on the wire, and the reply
+ * that lands second is not necessarily the one that went second. The
+ * spec has the server answering in order, but a cursor is cheaper than
+ * depending on that, and it also answers the other question — a mark
+ * that *failed* marked nothing and must not be remembered as done.
+ */
+export class Cursor {
+  private at = 0;
+
+  get value(): number {
+    return this.at;
+  }
+
+  /** Move to `to`, or `null` when that is not ahead of here. The claim
+   *  knows whether it is still the newest, and can put the cursor back
+   *  where it found it. */
+  claim(to: number): { to: number; owns: () => boolean; release: () => void } | null {
+    if (to <= this.at) return null;
+    const previous = this.at;
+    this.at = to;
+    return {
+      to,
+      owns: () => this.at === to,
+      release: () => {
+        if (this.at === to) this.at = previous;
+      },
+    };
+  }
+}
 
 /** How many lines a transcript keeps. Long enough that scrolling back
  *  through an evening works, short enough that a room left open
@@ -304,6 +347,31 @@ export class Store {
   /** Is this stored message already on screen? */
   hasMail(id: number): boolean {
     return this.seenMail.has(id);
+  }
+
+  /**
+   * Record what a page of `inbox` said about the mailbox.
+   *
+   * Exhaustion is a page with **no rows**, never a page with no rows we
+   * had yet to see. Those are different: the login flush pushes the
+   * oldest unread mail as events, so a page backwards can land entirely
+   * on messages already on screen while older ones still sit beneath it,
+   * and stopping there would hide them for good.
+   */
+  notePage(page: InboxOk): void {
+    for (const m of page.messages) {
+      if (this.oldestMailId === undefined || m.id < this.oldestMailId) this.oldestMailId = m.id;
+    }
+    if (page.messages.length === 0) this.mailExhausted = true;
+    this.mail = { unread: page.unread, total: page.total };
+  }
+
+  /** A stored message arrived on the wire rather than out of a page.
+   *  Both counters move: an `id` means the server kept it, and moving
+   *  only `unread` renders "1 unread of 0 stored". */
+  noteStoredMessage(): void {
+    if (!this.mail) return;
+    this.mail = { unread: this.mail.unread + 1, total: this.mail.total + 1 };
   }
 
   /**

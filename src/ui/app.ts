@@ -32,7 +32,16 @@ import {
 } from '@hotline-ng/client';
 
 import type { AppConfig } from '../config';
-import { addressOf, LOBBY, type Conversation, type ConvId, type Line, Store, styleToKind } from '../state';
+import {
+  addressOf,
+  Cursor,
+  LOBBY,
+  type Conversation,
+  type ConvId,
+  type Line,
+  Store,
+  styleToKind,
+} from '../state';
 import { connectScreen, remembered, type Details } from './connect';
 import { DebugPanel } from './debug';
 import { clock, fill, h } from './dom';
@@ -84,9 +93,10 @@ export class App {
     'People',
   );
   private mailBtn = h('button', { class: 'ghost mail-button', hidden: true }, 'Mail');
-  /** The highest id already handed to `msg_read`, so selecting the same
-   *  conversation twice does not ask again. */
-  private markedRead = 0;
+  /** How far `msg_read` has been told we have got. Selecting the same
+   *  conversation twice does not ask again, and two marks in flight
+   *  cannot write each other's answers. */
+  private readCursor = new Cursor();
   private meButton = h('button', { class: 'identity', title: 'Change your icon' });
 
   constructor(
@@ -287,12 +297,7 @@ export class App {
       // An `id` means the server stored it, so both counters move. Moving
       // only `unread` was enough to render "1 unread of 0 stored" until
       // the next reply corrected it.
-      if (d.id !== undefined && this.store.mail) {
-        this.store.mail = {
-          unread: this.store.mail.unread + 1,
-          total: this.store.mail.total + 1,
-        };
-      }
+      if (d.id !== undefined) this.store.noteStoredMessage();
       this.push(conv.id, {
         t: d.at * 1000,
         kind: 'chat',
@@ -592,13 +597,7 @@ export class App {
       );
       added++;
     }
-    // The oldest id on this page is where the next one starts.
-    for (const m of ok.messages) {
-      if (this.store.oldestMailId === undefined || m.id < this.store.oldestMailId) {
-        this.store.oldestMailId = m.id;
-      }
-    }
-    this.store.mail = { unread: ok.unread, total: ok.total };
+    this.store.notePage(ok);
     this.renderRail();
     this.renderMail();
     return added;
@@ -623,14 +622,9 @@ export class App {
     }
     try {
       const page = await conn.inbox(before === undefined ? {} : { before });
+      // `mergeStoredMail` records the page — the cursor moved either way,
+      // so asking again goes further back even when nothing here was new.
       const added = this.mergeStoredMail(page);
-      // Exhaustion is a page with no rows, never a page with no *new*
-      // rows. The login flush pushes the oldest unread mail as events, so
-      // a page backwards can land entirely on messages already on screen
-      // while older ones still sit below it — stopping there would hide
-      // them for good. `oldestMailId` moved either way, so asking again
-      // goes further back.
-      if (page.messages.length === 0) this.store.mailExhausted = true;
       if (opts.initial) {
         if (added) {
           this.say(
@@ -669,25 +663,20 @@ export class App {
     // Only mail we received has an id worth marking; our own half of the
     // conversation is local and never had one.
     for (const l of conv.lines) if (l.id !== undefined && !l.local && l.id > top) top = l.id;
-    if (top === 0 || top <= this.markedRead) return;
 
-    // Two marks can be in flight at once — select one conversation, then
-    // another before the first answers. The spec has the server answering
-    // in order, but the counts here are worth more than that promise is:
-    // claim the cursor, and let only the reply that still owns it write
-    // the result. An older reply arriving late says nothing true about
-    // where the mailbox now stands.
-    const previous = this.markedRead;
-    const cursor = (this.markedRead = top);
+    const claim = this.readCursor.claim(top);
+    if (!claim) return;
     try {
-      const counts = await conn.msgRead(top);
-      if (cursor !== this.markedRead) return;
+      const counts = await conn.msgRead(claim.to);
+      // Only the newest mark may write the answer: an older reply
+      // arriving late says nothing true about where the mailbox stands.
+      if (!claim.owns()) return;
       this.store.mail = counts;
       this.renderMail();
     } catch (e) {
       // Nothing was marked, so stop claiming it was — otherwise one
       // failure silently retires every id below it for the session.
-      if (this.markedRead === cursor) this.markedRead = previous;
+      claim.release();
       throw e;
     }
   }

@@ -1,14 +1,18 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { CborError, decodeCanonical } from '../src/cbor';
 import {
   CAPS,
+  AuthError,
   IdentityError,
+  base64urlToBytes,
+  bytesToBase64url,
   bytesToHex,
   decodeCard,
   decodeDeviceCert,
   fingerprintOf,
   hexToBytes,
+  postAuth,
   signLoginProof,
   verifyEnvelope,
   wsToHttp,
@@ -94,6 +98,76 @@ describe('wsToHttp', () => {
   it('swaps the scheme and drops the path', () => {
     expect(wsToHttp('ws://localhost:5700/ng')).toBe('http://localhost:5700');
     expect(wsToHttp('wss://hotline.example.org/ng')).toBe('https://hotline.example.org');
+  });
+});
+
+describe('base64url codec', () => {
+  it('round-trips through all three byte-length remainders', () => {
+    for (const n of [0, 1, 2, 3, 4, 5, 6, 31, 32]) {
+      const bytes = Uint8Array.from({ length: n }, (_, i) => (i * 37 + 11) & 0xff);
+      expect(base64urlToBytes(bytesToBase64url(bytes))).toEqual(bytes);
+    }
+  });
+
+  it('matches a known vector and uses no padding', () => {
+    // "any carnal pleas" -> RFC 4648 §10's own base64 test vector, minus
+    // the trailing "=" padding base64url omits.
+    const text = new TextEncoder().encode('any carnal pleas');
+    expect(bytesToBase64url(text)).toBe('YW55IGNhcm5hbCBwbGVhcw');
+    expect(base64urlToBytes('YW55IGNhcm5hbCBwbGVhcw')).toEqual(text);
+  });
+
+  it('tolerates standard base64 characters and trailing padding on decode', () => {
+    const bytes = Uint8Array.of(0xfb, 0xff, 0xbf);
+    const url = bytesToBase64url(bytes);
+    const standard = url.replace(/-/g, '+').replace(/_/g, '/');
+    expect(base64urlToBytes(standard)).toEqual(bytes);
+    expect(base64urlToBytes(`${standard}==`)).toEqual(bytes);
+  });
+
+  it('rejects a character outside the alphabet', () => {
+    expect(() => base64urlToBytes('not valid base64url!')).toThrow(IdentityError);
+  });
+});
+
+describe('postAuth', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  const req = { card: Uint8Array.of(1), deviceCert: Uint8Array.of(2), proof: Uint8Array.of(3) };
+
+  it('parses a successful response', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({ token: 'tok', expires_in: 60, fingerprint: 'fp', outcome: 'guest' }),
+            { status: 200 },
+          ),
+      ),
+    );
+    const success = await postAuth('https://host/identity/auth', req);
+    expect(success).toMatchObject({ token: 'tok', outcome: 'guest', handle: null, account: null });
+  });
+
+  it('reports the server error code and text on a well-formed refusal', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(JSON.stringify({ error: 'bad_cert', text: 'nope' }), { status: 401 })),
+    );
+    await expect(postAuth('https://host/identity/auth', req)).rejects.toMatchObject({
+      code: 'bad_cert',
+      message: 'nope',
+    });
+  });
+
+  it('reports a non-JSON error body as an AuthError naming the status, not a bare SyntaxError', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('<html>502 Bad Gateway</html>', { status: 502 })));
+    const failure = await postAuth('https://host/identity/auth', req).catch((e: unknown) => e);
+    expect(failure).toBeInstanceOf(AuthError);
+    expect((failure as AuthError).message).toContain('502');
   });
 });
 

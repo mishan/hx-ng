@@ -1,9 +1,10 @@
 /**
  * Turning an already-enrolled device into an identity login (this
- * repo's own `docs/identity-keys.md` §5, §8): fetch discovery, then
- * hand back a token-minting closure `Connection` can call whenever it
- * needs a fresh one — on the first attach, and again if a resume fails
- * and a new socket has to open (`packages/hotline-ng/src/connection.ts`).
+ * repo's own `docs/identity-keys.md` §5, §8): given discovery the
+ * caller already fetched, hand back a token-minting closure
+ * `Connection` can call whenever it needs a fresh one — on the first
+ * attach, and again if a resume fails and a new socket has to open
+ * (`packages/hotline-ng/src/connection.ts`).
  *
  * Linking an existing classic account is deliberately not something
  * this module can do: every path that writes a link requires the
@@ -18,7 +19,6 @@
 
 import {
   fetchChallenge,
-  fetchDiscovery,
   hexToBytes,
   postAuth,
   signLoginProof,
@@ -46,18 +46,25 @@ export interface IdentityLoginPlan {
   lastOutcome: () => AuthSuccess | null;
 }
 
-export async function planIdentityLogin(
+/**
+ * Takes `discovery` as already fetched rather than fetching it itself:
+ * a caller deciding the §5.3 create-account question (this repo's
+ * `src/ui/connect.ts`) needs discovery *before* it knows `create`, so
+ * fetching it again in here would cost the first identity login an
+ * extra round trip for a document the caller is already holding.
+ */
+export function planIdentityLogin(
   wsUrl: string,
+  discovery: Discovery,
   device: StoredDevice,
   create: boolean | undefined,
-): Promise<IdentityLoginPlan> {
+): IdentityLoginPlan {
   if (!device.cert || !device.card) throw new Error('This browser has no enrolled device yet.');
   const cert = device.cert;
   const card = device.card;
   const devicePub = hexToBytes(device.devicePub);
 
   const httpBase = wsToHttp(wsUrl);
-  const discovery = await fetchDiscovery(httpBase);
   const di = discovery.identity;
   if (!di.enabled) throw new Error('This server does not run the identity endpoints.');
 

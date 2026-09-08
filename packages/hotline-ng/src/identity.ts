@@ -96,18 +96,54 @@ function concatBytes(...parts: Uint8Array[]): Uint8Array {
   return out;
 }
 
+// Hand-rolled rather than built on `atob`/`btoa`: this module's own
+// header says a bot or a bridge — not just a browser — can consume it,
+// and `atob`/`btoa` are DOM legacy globals, not part of any JS or
+// server-runtime standard; not every non-browser environment has them.
+// A lookup table costs less than feature-detecting and falling back.
+const BASE64URL = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
+
+function base64Value(ch: string): number | undefined {
+  const i = BASE64URL.indexOf(ch);
+  if (i !== -1) return i;
+  // Accept standard base64's two different characters too — a paste
+  // (`parseEnrolmentPaste`) is more likely to have come from a tool
+  // that used them than to have collided with them by chance.
+  if (ch === '+') return 62;
+  if (ch === '/') return 63;
+  return undefined;
+}
+
 export function base64urlToBytes(s: string): Uint8Array {
-  const pad = s.length % 4 === 0 ? '' : '='.repeat(4 - (s.length % 4));
-  const bin = atob(s.replace(/-/g, '+').replace(/_/g, '/') + pad);
-  const out = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
-  return out;
+  const bytes: number[] = [];
+  let buffer = 0;
+  let bits = 0;
+  for (const ch of s.trim()) {
+    if (ch === '=') break; // padding, standard or not; nothing after it matters
+    const value = base64Value(ch);
+    if (value === undefined) throw new IdentityError('bad-field', `not base64url: ${JSON.stringify(ch)}`);
+    buffer = (buffer << 6) | value;
+    bits += 6;
+    if (bits >= 8) {
+      bits -= 8;
+      bytes.push((buffer >> bits) & 0xff);
+    }
+  }
+  return Uint8Array.from(bytes);
 }
 
 export function bytesToBase64url(b: Uint8Array): string {
-  let bin = '';
-  for (const byte of b) bin += String.fromCharCode(byte);
-  return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  let out = '';
+  for (let i = 0; i < b.length; i += 3) {
+    const b0 = b[i]!;
+    const b1 = b[i + 1];
+    const b2 = b[i + 2];
+    out += BASE64URL[b0 >> 2];
+    out += BASE64URL[((b0 & 0x03) << 4) | (b1 === undefined ? 0 : b1 >> 4)];
+    if (b1 !== undefined) out += BASE64URL[((b1 & 0x0f) << 2) | (b2 === undefined ? 0 : b2 >> 6)];
+    if (b2 !== undefined) out += BASE64URL[b2 & 0x3f];
+  }
+  return out;
 }
 
 // --- fingerprint ----------------------------------------------------------
@@ -448,7 +484,18 @@ export async function postAuth(endpoint: string, req: AuthRequest): Promise<Auth
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(body),
   });
-  const raw = (await res.json()) as any;
+  // Parsed by hand rather than `res.json()`: a failure here is exactly
+  // the case a proxy or an unhandled path answers with an HTML error
+  // page, or nothing at all, and that has to reach the caller as an
+  // `AuthError` naming the HTTP status — not a bare `SyntaxError`
+  // pointing at a JSON parser several frames from the actual problem.
+  const text = await res.text();
+  let raw: any;
+  try {
+    raw = text ? JSON.parse(text) : {};
+  } catch {
+    throw new AuthError('server_error', `HTTP ${res.status}: ${text.slice(0, 200) || '(empty body)'}`);
+  }
   if (!res.ok || raw.error) {
     throw new AuthError(raw.error ?? 'server_error', raw.text || raw.error || `HTTP ${res.status}`);
   }

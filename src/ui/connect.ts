@@ -228,7 +228,7 @@ export function connectScreen(
           create = false;
         }
 
-        const plan = await planIdentityLogin(targetUrl, device, create);
+        const plan = planIdentityLogin(targetUrl, discovery, device, create);
         const details: Details = {
           url: targetUrl,
           login: '',

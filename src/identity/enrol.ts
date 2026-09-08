@@ -4,13 +4,14 @@
  * and check it before it's ever trusted.
  *
  * `docs/identity-keys.md` §7.1 step 3 describes `hlid cert -o web.bundle`
- * writing the certificate and card together as one pasteable blob, and
- * §9 says plainly that `hlid` can't do either of those things yet — it
- * has no `--device-pub`/`--device-enc-pub` (it can only certify a device
- * seed it already holds) and no combined bundle output. So this module
- * accepts what today's `hlid cert` and `hlid card` actually produce:
- * one or two base64url blobs, in either order, told apart by shape
- * rather than position.
+ * writing the certificate and card together as one pasteable blob.
+ * `hlid` can certify a browser's key directly now (`--device-pub`
+ * `--device-enc-pub`, mirroring `hlid attest`'s `--identity-pub`,
+ * hxd-ng#62), but it still has no combined bundle output — `cert` and
+ * `card` remain two separate files. So this module accepts what
+ * today's `hlid cert` and `hlid card` actually produce: one or two
+ * base64url blobs, in either order, told apart by shape rather than
+ * position.
  */
 
 import {
@@ -44,7 +45,7 @@ export function buildHlidCertCommand(
 ): string {
   const days = opts.days ?? 90;
   const name = opts.name ?? 'browser';
-  return `hlid cert --device-pub ${devicePubHex} --device-enc-pub ${deviceEncPubHex} --caps web --days ${days} --name ${shq(name)} -o web.bundle`;
+  return `hlid cert --device-pub ${devicePubHex} --device-enc-pub ${deviceEncPubHex} --caps web --days ${days} --name ${shq(name)} -o cert.bin`;
 }
 
 /** `server` should be the identity HTTP base (`https://host`, per

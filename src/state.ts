@@ -2,7 +2,7 @@
  *  conversation. No DOM in this file — the UI reads from here, never the
  *  other way round. */
 
-import type { ChatStyle, Sender, ServerInfo, Status, User } from './wire/protocol';
+import type { ChatStyle, Sender, ServerInfo, Status, User } from '@hotline-ng/client';
 
 export type LineKind =
   /** Public chat, or a private message inside a PM conversation. */

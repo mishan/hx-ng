@@ -12,12 +12,11 @@ Against a server on this machine:
 
 ```sh
 cargo run --bin hxd            # [ng] bind = "127.0.0.1:5700"
-cd client && npm install && npm run dev
+cd hx-ng && npm install && npm run dev
 ```
 
-`npm run dev` serves on <http://localhost:5701> with hot reload. The
-default server URL in the connect form is `ws://127.0.0.1:5700`, which
-is where `hxd` puts the ng listener.
+`npm run dev` serves on <http://localhost:5701> with hot reload, bound to
+every interface so a phone on the LAN can reach it.
 
 A production build lands in `dist/` and is a directory of static files —
 no server-side anything:
@@ -31,6 +30,37 @@ cd dist && python3 -m http.server 8080
 every change. `public/icons.png` and `public/icons.json` are, because
 they change only when `icons.rsrc` does, and committing them means
 running the client needs no Python.
+
+## Where the server address comes from
+
+Not from the code. `public/config.json` — which lands in `dist/` beside
+`index.html`, unbundled — is what a deployment edits, and it takes
+effect on a refresh rather than a rebuild:
+
+```jsonc
+{
+  "defaultServer": "wss://hotline.example.org/ng",
+  "servers": ["wss://elsewhere.example.net/ng"],
+  "title": "Hotline",
+  "allowCustomServer": true
+}
+```
+
+Every key is optional. With `defaultServer` empty or missing the client
+derives `ws://<the host that served this page>:5700` — the ng listener's
+port on its own host, which is right for the ordinary case of the client
+sitting in front of its own server, and which follows the page onto
+`wss://` when the page itself is on https. `allowCustomServer: false`
+hides the field entirely: one deployment, one server.
+
+Precedence, most specific first:
+
+| | |
+|---|---|
+| `?server=wss://…` | one page load, for trying something |
+| the connect form | what this browser last used (`localStorage`) |
+| `config.json` | what this deployment is for |
+| the page's origin | `ws://<this host>:5700` |
 
 ### Serving it to a phone, and why voice needs https
 
@@ -134,18 +164,33 @@ Typed into the composer:
 - **Video is opt-in in both directions.** Nothing is published until you
   ask and nothing is received until you subscribe, and the subscription
   is declared as a complete set so turning it all off is one request.
+  Your own camera is shown back to you as a mirrored tile — the only way
+  to find out that it is pointed at the ceiling, or not sending at all,
+  without asking the room. **Self view** in the call bar turns it off.
+- **Negotiation is serialised, and inbound video is read from the
+  transceivers.** Both are the difference between a picture and a black
+  rectangle; `packages/hotline-ng/README.md` says why.
 
 Passwords are never stored. The session token is a bearer credential for
 one session and lives in `sessionStorage`, so it dies with the tab.
 
 ## Layout of the source
 
+The protocol half is a separate package, [`@hotline-ng/client`](packages/hotline-ng/),
+so that a second client — a different UI, a bot, a bridge — does not have
+to reimplement resume accounting and SFU negotiation to get to the
+interesting part. It has no DOM in it and no dependencies, and this
+client consumes it by its published name like anybody else would.
+
 | | |
 |---|---|
-| `src/wire/protocol.ts` | the wire's shapes — the twin of `crates/hxd-ng-session/src/proto.rs` |
-| `src/wire/connection.ts` | one session across however many sockets: handshake, resume, backoff, the trace hook |
+| `packages/hotline-ng/src/protocol.ts` | the wire's shapes — the twin of `crates/hxd-ng-session/src/proto.rs` |
+| `packages/hotline-ng/src/connection.ts` | one session across however many sockets: handshake, resume, backoff, the trace hook |
+| `packages/hotline-ng/src/voice.ts` | the SFU: join, publish, subscribe, and the mid grammar that tells streams apart |
+| `src/config.ts` | `config.json`, and where the server address comes from |
 | `src/state.ts` | roster and transcripts; no DOM |
-| `src/ui/` | the shell, roster, transcript, composer, icon picker, media, debug drawer |
+| `src/ui/` | the shell, roster, transcript, composer, icon picker, video tiles, debug drawer |
+| `src/ui/tiles.ts` | the video strip, and everything a browser needs before it will paint a `<video>` |
 | `tools/build-icons.py` | `icons.rsrc` → sprite sheet |
 
 There is no UI framework, on purpose: this client doubles as a readable

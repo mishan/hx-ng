@@ -213,7 +213,7 @@ input:focus-visible, textarea:focus-visible, button:focus-visible {
   text-overflow: ellipsis;
 }
 
-.topbar button.ghost, .debug-bar button.ghost {
+.topbar button.ghost, .debug-bar button.ghost, .identity-bar button.ghost, .identity-body button.ghost, .connect-card button.ghost {
   padding: 0.3rem 0.6rem;
   border-radius: 7px;
   border: 1px solid var(--line);
@@ -221,8 +221,16 @@ input:focus-visible, textarea:focus-visible, button:focus-visible {
   font-size: 0.82rem;
   white-space: nowrap;
 }
-.topbar button.ghost:hover, .debug-bar button.ghost:hover { background: var(--surface-2); color: var(--text); }
-.debug-bar button.ghost.on { border-color: var(--accent); color: var(--accent); }
+.topbar button.ghost:hover,
+.debug-bar button.ghost:hover,
+.identity-bar button.ghost:hover,
+.identity-body button.ghost:hover,
+.connect-card button.ghost:hover {
+  background: var(--surface-2);
+  color: var(--text);
+}
+.debug-bar button.ghost.on, .identity-body button.ghost.on { border-color: var(--accent); color: var(--accent); }
+button.ghost.danger { color: var(--admin); border-color: var(--admin); }
 
 .identity {
   display: flex;
@@ -633,6 +641,9 @@ button.call:disabled { opacity: 0.45; cursor: default; }
 .row { display: grid; grid-template-columns: 5.5rem 1fr; align-items: center; gap: 0.6rem; }
 .row > span { color: var(--muted); font-size: 0.82rem; }
 
+.button-row { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
+.identity-create-choice { display: flex; flex-direction: column; gap: 0.5rem; }
+
 .icon-button {
   display: flex;
   align-items: center;
@@ -762,6 +773,60 @@ dialog.picker header input { width: 9rem; }
 .fact { display: grid; grid-template-columns: 11rem minmax(0, 1fr); gap: 0.75rem; }
 .fact .k { color: var(--muted); }
 .fact .v { overflow-wrap: anywhere; }
+
+/* --- identity panel ----------------------------------------------------- */
+
+.identity-panel {
+  flex: none;
+  height: min(28rem, 55dvh);
+  display: flex;
+  flex-direction: column;
+  border-top: 1px solid var(--line);
+  background: var(--surface);
+}
+.identity-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.4rem 0.6rem;
+  border-bottom: 1px solid var(--line);
+}
+.identity-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 0.75rem 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  font-size: 0.9rem;
+}
+.identity-body h3 { margin: 0.5rem 0 0; font-size: 0.92em; }
+.identity-body .cmd-row { display: flex; align-items: flex-start; gap: 0.4rem; }
+.identity-body .cmd {
+  flex: 1;
+  margin: 0;
+  font: 11.5px/1.5 var(--mono);
+  background: var(--surface-2);
+  border-radius: 7px;
+  padding: 0.5rem 0.6rem;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.identity-body .field-row { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
+.identity-body .field-row .k { color: var(--muted); min-width: 11rem; }
+.identity-body .field-row code { font: 12px/1.4 var(--mono); overflow-wrap: anywhere; }
+.identity-body .note { font-size: 0.85em; color: var(--muted); }
+.identity-body .paste { width: 100%; min-height: 4.5rem; font: 12px/1.4 var(--mono); box-sizing: border-box; }
+.identity-body .renewal-nag {
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  padding: 0.6rem 0.75rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
 
 /* --- narrow ----------------------------------------------------------- */
 

@@ -266,3 +266,57 @@ describe('the message requests', () => {
     expect(conn.hasCap('voice')).toBe(false);
   });
 });
+
+describe('identity login', () => {
+  const identityCreds = (getToken: () => Promise<string>): Credentials => ({
+    ...CREDS,
+    identity: { getToken },
+  });
+
+  it('mints a token before opening a socket, and sends no login/password', async () => {
+    let calls = 0;
+    server.on('login', (params) => {
+      expect(params.login).toBeUndefined();
+      expect(params.password).toBeUndefined();
+      return { ok: loginOk() };
+    });
+    const conn = new Connection(
+      identityCreds(async () => {
+        calls++;
+        return 'tok-1';
+      }),
+      {},
+    );
+    await conn.start();
+    expect(calls).toBe(1);
+    expect(conn.state).toBe('online');
+    // No wasted tokenless socket: with nothing to resume, the very first
+    // socket already carries the token.
+    expect(server.sockets).toHaveLength(1);
+    expect(server.sockets[0]?.url).toContain('?token=tok-1');
+  });
+
+  it('closes a failed resume and opens a fresh tokened socket, rather than logging in on the old one', async () => {
+    let calls = 0;
+    const getToken = async () => {
+      calls++;
+      return `tok-${calls}`;
+    };
+    server.on('login', () => ({ ok: loginOk() }));
+    const first = new Connection(identityCreds(getToken), {});
+    await first.start();
+    expect(calls).toBe(1);
+
+    server.on('resume', () => ({ error: { code: 'session_expired', text: 'gone' } }));
+    const second = new Connection(identityCreds(getToken), {});
+    await second.start();
+
+    expect(calls).toBe(2); // a fresh token for the fresh socket
+    expect(second.state).toBe('online');
+    // first's socket, second's failed-resume socket, second's tokened socket
+    expect(server.sockets).toHaveLength(3);
+    expect(server.sockets[2]?.url).toContain('?token=tok-2');
+    expect(server.sent('resume')).toHaveLength(1);
+    expect(server.sent('login')).toHaveLength(2);
+  });
+});

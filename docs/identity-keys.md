@@ -428,19 +428,18 @@ in the routine path.
 
 ## 9. What this needs that does not exist yet
 
-**`hlid cert` cannot certify a key it did not generate.** `make_cert`
-takes `--device` as a *seed file* and calls `DeviceCert::for_device`,
-which reads the private key. A browser's device key is non-extractable
-by design, so there is no seed to hand over, and §7.1 step 2 is
-impossible as things stand.
+**`hlid cert` can now certify a key it did not generate** (hxd-ng#62):
+`--device-pub HEX --device-enc-pub HEX` is an alternative to `--device
+SEEDFILE`, built on a new `DeviceCert::for_keys` that takes the two
+public keys directly instead of reading them off a `DeviceKey`. §7.1
+step 2's command is exact as written and runnable as-is.
 
-The fix is small and has a precedent in the same file: `hlid attest`
-already accepts `--identity-pub HEX` beside `--identity K`. `hlid cert`
-wants the same shape — `--device-pub HEX --device-enc-pub HEX` — and
-`DeviceCert`'s fields are all public, so it is constructing the struct
-by hand instead of calling `for_device`. Perhaps thirty lines. While in
-there: `-o FILE.bundle` (or a `--with-card FILE` flag) that writes cert
-and card together as one base64url blob, so §7.1 step 3 is one paste.
+What that fix didn't include: a combined bundle output. `hlid cert` and
+`hlid card` still write two separate files, so §7.1 step 3's "the user
+pastes back one blob" is still two — the identity panel accepts either.
+`-o FILE.bundle` (or a `--with-card FILE` flag) that writes cert and
+card together as one base64url blob would still be worth doing, so that
+paste collapses to one.
 
 **`hlid` has no default paths.** Every subcommand takes `--identity`,
 `--device`, `--card`, `--cert` explicitly, and nothing in it knows about

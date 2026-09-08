@@ -5,13 +5,16 @@
  * surface for `src/identity/storage.ts` to run against in Vitest's
  * `node` environment, which has no IndexedDB at all.
  *
- * The one subtlety worth writing down: `storage.ts` always awaits a
- * request before issuing the next one in the same transaction, so by the
- * time it calls `txDone()` (after its own `fn(tx)` has resolved), every
- * request that transaction will ever issue has already fired its
- * `onsuccess`. `FakeTransaction` leans on exactly that: it remembers
- * "pending reached zero" and fires `oncomplete` the moment a listener is
- * attached to it, rather than trying to simulate IndexedDB's real
+ * The one subtlety worth writing down: `storage.ts` never issues a new
+ * request on a transaction after `fn(tx)`'s own promise has resolved —
+ * some callers await each request in turn, others (`ensureActiveDevice`)
+ * fire two `put()`s back to back without awaiting either, but none
+ * issue one *after* `fn` returns. So by the time `withDb` calls
+ * `txDone()`, every request that transaction will ever issue has
+ * already been created, whether or not it has fired `onsuccess` yet.
+ * `FakeTransaction` leans on exactly that: `oncomplete` fires once
+ * pending reaches zero *and* a listener has been attached, in whichever
+ * order those two happen — not by trying to simulate IndexedDB's real
  * auto-commit timing.
  */
 

@@ -153,7 +153,7 @@ export class IdentityPanel {
       h(
         'p',
         { class: 'note' },
-        "hlid cert doesn't accept --device-pub/--device-enc-pub yet, or write the certificate and card together (docs/identity-keys.md §9) — until that lands, this is the target command, not one you can run as-is. Mint the certificate by hand from these two keys in the meantime, and paste the certificate and this identity's card separately below.",
+        "hlid doesn't write the certificate and card together yet (docs/identity-keys.md §9), so this writes just the certificate — paste it below, and this identity's card too if you have it separately (a second browser can skip the card; the server already has it cached).",
       ),
       h('h3', {}, '2. Link an existing account here (optional)'),
       loginInput,

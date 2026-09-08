@@ -374,13 +374,34 @@ export async function signLoginProof(deviceSignKey: CryptoKey, fields: LoginProo
 // §5 discovery, §6.2 challenge binding; docs/hotline-ng-identity.md §4
 // layers the profile's own discovery fields on top) ----------------------
 
-/** `ws(s)://host:port/...` → `http(s)://host:port` — every identity HTTP
- *  call is addressed from the connect URL, not the page's own origin, so
- *  a custom server (not just the vite-proxied default) is reached
- *  directly. Cross-origin, that needs server-side CORS (this repo's own
- *  `docs/identity-keys.md` §9); this client does not add any. */
+/**
+ * `ws(s)://host:port/...` → the base every identity HTTP call is built
+ * on. Two different answers, and the difference matters:
+ *
+ * - Same hostname as the page: `''`, so `${base}/identity/challenge`
+ *   is a *page-relative* path. That's deliberate, not an oversight —
+ *   the identity endpoints are served by the same listener as the ng
+ *   WebSocket (`hotline-ng-auth.md` §2), which is almost never the
+ *   page's own origin (it's a different port, `config.ts`'s
+ *   `fromOrigin()`), so a same-hostname target is "the ordinary case
+ *   of the client sitting in front of its own server" (README.md) —
+ *   reached in production through the same reverse proxy that serves
+ *   the page, and in `npm run dev` through `vite.config.ts`'s
+ *   `server.proxy`, which exists for exactly this. An absolute
+ *   cross-origin URL here would just be refused by the browser, since
+ *   nothing in `crates/` sends CORS headers.
+ * - A different hostname: the ws-derived absolute origin, for a
+ *   genuinely different server (`allowCustomServer`) — cross-origin,
+ *   and it needs the server's own CORS headers
+ *   (`docs/identity-keys.md` §9); this client does not add any.
+ *
+ * Outside a browser (no `location` — a bot or a bridge), always
+ * absolute: there is no page origin to be relative to, and no proxy
+ * to lean on.
+ */
 export function wsToHttp(wsUrl: string): string {
   const u = new URL(wsUrl);
+  if (typeof location !== 'undefined' && location.hostname === u.hostname) return '';
   u.protocol = u.protocol === 'wss:' ? 'https:' : 'http:';
   return `${u.protocol}//${u.host}`;
 }

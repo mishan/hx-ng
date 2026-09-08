@@ -107,7 +107,7 @@ function base64Value(ch: string): number | undefined {
   const i = BASE64URL.indexOf(ch);
   if (i !== -1) return i;
   // Accept standard base64's two different characters too — a paste
-  // (`parseEnrolmentPaste`) is more likely to have come from a tool
+  // (`parseEnrollmentPaste`) is more likely to have come from a tool
   // that used them than to have collided with them by chance.
   if (ch === '+') return 62;
   if (ch === '/') return 63;
@@ -254,7 +254,7 @@ function openEnvelope(bytes: Uint8Array): Envelope {
 
 /** Verify a signed object's envelope against `publicKey` under `domain`.
  *  Returns the decoded map on success. The server re-verifies everything
- *  it is handed; this exists for the enrolment paste (this repo's own
+ *  it is handed; this exists for the enrollment paste (this repo's own
  *  `docs/identity-keys.md` §7.1 step 4) so a bad paste is caught locally
  *  rather than at `/identity/auth`. */
 export async function verifyEnvelope(bytes: Uint8Array, publicKey: Uint8Array, domain: string): Promise<CborValue> {
@@ -312,7 +312,7 @@ export function decodeDeviceCert(bytes: Uint8Array): DeviceCert {
 // A Phase B client never signs a card, never inspects its attestations
 // (the server tells the client the resulting `handle` at auth time — see
 // `AuthSuccess`), and only ever forwards the exact bytes it was given.
-// So only the fields enrolment actually reads (this repo's own
+// So only the fields enrollment actually reads (this repo's own
 // `docs/identity-keys.md` §7.1 step 4: does this card name the same
 // identity as the pasted certificate?) are decoded; everything else is
 // unknown-and-ignored, same as the spec allows any reader to treat it.

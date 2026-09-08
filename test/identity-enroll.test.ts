@@ -6,9 +6,9 @@ import {
   buildHlidCertCommand,
   buildHlidLinkCommand,
   needsRenewal,
-  parseEnrolmentPaste,
-  validateEnrolment,
-} from '../src/identity/enrol';
+  parseEnrollmentPaste,
+  validateEnrollment,
+} from '../src/identity/enroll';
 import vectors from '../packages/hotline-ng/test/identity-vectors.json';
 
 const certBytes = () => hexToBytes(vectors.device_cert.signed_hex);
@@ -44,51 +44,51 @@ describe('buildHlidCertCommand / buildHlidLinkCommand', () => {
   });
 });
 
-describe('parseEnrolmentPaste', () => {
+describe('parseEnrollmentPaste', () => {
   it('accepts the certificate and card as two blobs, in either order', () => {
     const certB64 = bytesToBase64url(certBytes());
     const cardB64 = bytesToBase64url(cardBytes());
 
-    const a = parseEnrolmentPaste(`${certB64} ${cardB64}`);
+    const a = parseEnrollmentPaste(`${certB64} ${cardB64}`);
     expect(a.cert).toEqual(certBytes());
     expect(a.card).toEqual(cardBytes());
 
-    const b = parseEnrolmentPaste(`${cardB64}\n${certB64}`);
+    const b = parseEnrollmentPaste(`${cardB64}\n${certB64}`);
     expect(b.cert).toEqual(certBytes());
     expect(b.card).toEqual(cardBytes());
   });
 
   it('accepts the certificate alone, leaving the card to a later step', () => {
-    const parsed = parseEnrolmentPaste(bytesToBase64url(certBytes()));
+    const parsed = parseEnrollmentPaste(bytesToBase64url(certBytes()));
     expect(parsed.cert).toEqual(certBytes());
     expect(parsed.card).toBeNull();
   });
 
   it('rejects nothing, garbage, or two of the same kind', () => {
-    expect(() => parseEnrolmentPaste('   ')).toThrow();
-    expect(() => parseEnrolmentPaste('not-base64url-cbor')).toThrow();
+    expect(() => parseEnrollmentPaste('   ')).toThrow();
+    expect(() => parseEnrollmentPaste('not-base64url-cbor')).toThrow();
     const certB64 = bytesToBase64url(certBytes());
-    expect(() => parseEnrolmentPaste(`${certB64} ${certB64}`)).toThrow();
+    expect(() => parseEnrollmentPaste(`${certB64} ${certB64}`)).toThrow();
   });
 });
 
-describe('validateEnrolment', () => {
+describe('validateEnrollment', () => {
   const issued = vectors.device_cert.fields.issued as number;
   const expires = vectors.device_cert.fields.expires as number;
 
   it('accepts a cert+card pair that matches this browser and each other', async () => {
-    const result = await validateEnrolment(certBytes(), cardBytes(), devicePubHex, deviceEncPubHex, issued + 10);
+    const result = await validateEnrollment(certBytes(), cardBytes(), devicePubHex, deviceEncPubHex, issued + 10);
     expect(result.fingerprint).toBe(vectors.keys.identity.fingerprint);
     expect(result.cert.name).toBe('browser');
     expect(result.card.name).toBe('Alice');
   });
 
   it('refuses a certificate for a different device key', async () => {
-    await expect(validateEnrolment(certBytes(), cardBytes(), 'ff'.repeat(32), deviceEncPubHex, issued + 10)).rejects.toThrow();
+    await expect(validateEnrollment(certBytes(), cardBytes(), 'ff'.repeat(32), deviceEncPubHex, issued + 10)).rejects.toThrow();
   });
 
   it('refuses a certificate that has already expired', async () => {
-    await expect(validateEnrolment(certBytes(), cardBytes(), devicePubHex, deviceEncPubHex, expires + 1)).rejects.toThrow();
+    await expect(validateEnrollment(certBytes(), cardBytes(), devicePubHex, deviceEncPubHex, expires + 1)).rejects.toThrow();
   });
 });
 

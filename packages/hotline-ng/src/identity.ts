@@ -24,7 +24,7 @@
  * the docs' prose.
  */
 
-import { cBytes, cMap, cUint, decodeCanonical, encode, mapGet, mapWithout, type CborValue } from './cbor';
+import { cBytes, cMap, cOptMap, cText, cUint, decodeCanonical, encode, mapGet, mapWithout, type CborValue } from './cbor';
 import { hasDeceptiveChar } from './names';
 
 const textEncoder = new TextEncoder();
@@ -208,6 +208,13 @@ function reqBytesN(v: CborValue, key: string, n: number): Uint8Array {
   return f.v;
 }
 
+function reqBytes(v: CborValue, key: string): Uint8Array {
+  const f = mapGet(v, key);
+  if (f === undefined) throw new IdentityError('missing-field', key);
+  if (f.t !== 'bytes') throw new IdentityError('bad-field', key);
+  return f.v;
+}
+
 function reqText(v: CborValue, key: string): string {
   const f = mapGet(v, key);
   if (f === undefined) throw new IdentityError('missing-field', key);
@@ -370,6 +377,147 @@ export async function signLoginProof(deviceSignKey: CryptoKey, fields: LoginProo
   return encode(cMap([...unsigned, ['sig', cBytes(sig)]]));
 }
 
+// --- enrollment (hxd-ng's docs/identity-enrollment.md §4, §5.4) ----------
+//
+// The two objects a browser being enrolled through a mailbox handles: it
+// signs a request saying which keys it wants certified, and it opens a
+// bundle saying what it got. Both are also what the paste path carries
+// once `hlid cert --bundle` writes one, which is the point of them
+// living here rather than in the mailbox client — the browser has one
+// verifier for "a certificate arrived", however it arrived.
+
+export const ENROLL_REQUEST_DOMAIN = 'hl-identity/enroll-request/v1';
+export const ENROLL_REQUEST_MAX_BYTES = 8 * 1024;
+export const BUNDLE_MAX_BYTES = DEVICE_CERT_MAX_BYTES + CARD_MAX_BYTES + 256;
+
+/** The holder's QR-code secret (§5.6), 16 bytes. Not a key: it is read
+ *  off a screen by a camera, folded into the request as `pair`, and
+ *  never sent to the mailbox. */
+export const PAIRING_SECRET_BYTES = 16;
+
+export interface EnrollRequestFields {
+  /** This browser's Ed25519 public key — the key that signs the request. */
+  device: Uint8Array;
+  /** This browser's X25519 public key. */
+  deviceEnc: Uint8Array;
+  /** A label for this device. The holder may edit it. */
+  name?: string;
+  /** Capability bits asked for; omit to leave it to the holder. */
+  caps?: number;
+  /** Lifetime in days asked for; omit to leave it to the holder. */
+  days?: number;
+  /** Unix seconds. A holder outside its skew tolerance calls it a replay. */
+  time: number;
+  /** The current certificate, for a renewal (§8). */
+  prev?: Uint8Array;
+  /** `pairTag(...)`, when this browser was opened by scanning a QR code. */
+  pair?: Uint8Array;
+}
+
+/**
+ * Build and sign an enrollment request with the device's
+ * non-extractable signing key.
+ *
+ * Nothing here decides anything. `caps`, `days` and `name` are requests
+ * in the ordinary English sense: what a device gets is the holder's
+ * policy intersected with what it asked for (§6), and no field in this
+ * object can widen that. Asking for `MANAGE` gets a prompt that shows
+ * the ask and shows it refused.
+ */
+export async function signEnrollRequest(
+  deviceSignKey: CryptoKey,
+  fields: EnrollRequestFields,
+): Promise<Uint8Array> {
+  if (fields.name !== undefined && invalidDisplayName(fields.name, DEVICE_CERT_NAME_MAX_CHARS)) {
+    throw new IdentityError('bad-field', 'name');
+  }
+  // The encoder sorts map keys, so this order is for reading, not for
+  // the wire.
+  const unsigned: [string, CborValue | undefined][] = [
+    ['v', cUint(1)],
+    ['device', cBytes(fields.device)],
+    ['device_enc', cBytes(fields.deviceEnc)],
+    ['name', fields.name === undefined ? undefined : cText(fields.name)],
+    ['caps', fields.caps === undefined ? undefined : cUint(fields.caps)],
+    ['days', fields.days === undefined ? undefined : cUint(fields.days)],
+    ['time', cUint(fields.time)],
+    ['prev', fields.prev === undefined ? undefined : cBytes(fields.prev)],
+    ['pair', fields.pair === undefined ? undefined : cBytes(fields.pair)],
+  ];
+  const body = encode(cOptMap(unsigned));
+  const message = concatBytes(textEncoder.encode(ENROLL_REQUEST_DOMAIN), Uint8Array.of(0), body);
+  const sig = new Uint8Array(await crypto.subtle.sign({ name: 'Ed25519' }, deviceSignKey, bufferSource(message)));
+  const signed = encode(cOptMap([...unsigned, ['sig', cBytes(sig)]]));
+  if (signed.length > ENROLL_REQUEST_MAX_BYTES) throw new IdentityError('too-large', 'enrollment request');
+  return signed;
+}
+
+/**
+ * `HMAC-SHA-256(pairing secret, device public key)` — §4's `pair`.
+ *
+ * Keyed by the secret from the QR code and computed over this device's
+ * key, so it binds one device to one scan. This side only ever
+ * *produces* it; the holder is what checks it, and a mailbox that never
+ * saw the secret cannot mint one for a key of its own — which is what
+ * makes the scanned path safe without asking a human to compare
+ * fingerprints (§5.6).
+ */
+export async function pairTag(secret: Uint8Array, device: Uint8Array): Promise<Uint8Array> {
+  if (secret.length !== PAIRING_SECRET_BYTES) throw new IdentityError('bad-field', 'pairing secret');
+  const key = await crypto.subtle.importKey('raw', bufferSource(secret), { name: 'HMAC', hash: 'SHA-256' }, false, [
+    'sign',
+  ]);
+  return new Uint8Array(await crypto.subtle.sign('HMAC', key, bufferSource(device)));
+}
+
+/** A certificate and the card of the identity that signed it (§5.4).
+ *  The raw encodings, because what a bundle is for is being checked and
+ *  stored, and re-encoding either half to keep it would be a chance to
+ *  change it. */
+export interface Bundle {
+  cert: Uint8Array;
+  card: Uint8Array;
+}
+
+/** Structure only: canonical CBOR, `v === 1`, two byte strings. Neither
+ *  member is decoded — `openBundle` is what does that. */
+export function decodeBundle(bytes: Uint8Array): Bundle {
+  if (bytes.length > BUNDLE_MAX_BYTES) throw new IdentityError('too-large', 'bundle');
+  const value = decodeCanonical(bytes);
+  if (value.t !== 'map') throw new IdentityError('not-a-map', 'not a CBOR map');
+  const v = mapGet(value, 'v');
+  if (v === undefined) throw new IdentityError('missing-field', 'v');
+  if (v.t !== 'uint') throw new IdentityError('bad-field', 'v');
+  if (v.v !== VERSION) throw new IdentityError('unsupported-version', String(v.v));
+  return { cert: reqBytes(value, 'cert'), card: reqBytes(value, 'card') };
+}
+
+/**
+ * Decode both members, verify both signatures, and check the one thing
+ * that makes them a bundle rather than two files: that the card belongs
+ * to the identity the certificate names.
+ *
+ * That check is not a formality. A hostile mailbox can hand back a real
+ * certificate and somebody else's real card, so that every signature
+ * verifies and the name shown next to the fingerprint is a lie (§9,
+ * "substitute the answer").
+ *
+ * What is deliberately not checked here is the device: only the caller
+ * knows which keys this browser holds. Nor is expiry, which needs a
+ * clock the caller has.
+ */
+export async function openBundle(bytes: Uint8Array): Promise<{ cert: DeviceCert; card: Card }> {
+  const b = decodeBundle(bytes);
+  const cert = decodeDeviceCert(b.cert);
+  const card = decodeCard(b.card);
+  await verifyEnvelope(b.cert, cert.identity, DEVICE_CERT_DOMAIN);
+  await verifyEnvelope(b.card, card.identity, CARD_DOMAIN);
+  if (bytesToHex(cert.identity) !== bytesToHex(card.identity)) {
+    throw new IdentityError('bad-field', 'the certificate and the card name different identities');
+  }
+  return { cert, card };
+}
+
 // --- HTTP: discovery, challenge, auth (hxd-ng's docs/hotline-ng-auth.md
 // §5 discovery, §6.2 challenge binding; docs/hotline-ng-identity.md §4
 // layers the profile's own discovery fields on top) ----------------------
@@ -413,7 +561,20 @@ export interface DiscoveryIdentityEnabled {
   association: string;
   minAttestationAge: number;
   trustedRegistrars: string[];
-  endpoints: { challenge: string; auth: string; card: string; link: string; unlink: string };
+  endpoints: {
+    challenge: string;
+    auth: string;
+    card: string;
+    link: string;
+    unlink: string;
+    /** Absent when this server hosts no enrollment mailbox
+     *  (`identity-enrollment.md` §3). */
+    enroll?: string;
+  };
+  /** Where a web client for this server lives, if the operator said
+   *  (§3). The holder puts it in the QR code so a phone camera opens the
+   *  right client with the code already filled in (§5.6). */
+  web?: string;
 }
 
 export type DiscoveryIdentity = DiscoveryIdentityEnabled | { enabled: false };
@@ -440,6 +601,7 @@ export async function fetchDiscovery(httpBase: string): Promise<Discovery> {
         minAttestationAge: ri.min_attestation_age ?? 0,
         trustedRegistrars: ri.trusted_registrars ?? [],
         endpoints: ri.endpoints,
+        web: ri.web ?? undefined,
       }
     : { enabled: false };
   return { v: raw.v, name: raw.name, serverKey: raw.server_key ?? null, ng: raw.ng, identity };

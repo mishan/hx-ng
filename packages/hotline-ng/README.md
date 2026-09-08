@@ -5,8 +5,8 @@ protocol served by [hxd-ng](https://github.com/mishan/hxd-ng), specified
 in `docs/hotline-ng.md` with the voice and video bindings in
 `docs/voice.md` §8 and `docs/capabilities-video.md` §16.
 
-No DOM, no UI framework, no dependencies. It is the whole client half of
-the protocol and nothing else, extracted from the web client in this
+No UI framework and no dependencies. It is the whole client half of the
+protocol and nothing else, extracted from the web client in this
 repository so that a second client does not have to reimplement resume
 accounting and SFU negotiation to get to the interesting part.
 
@@ -18,6 +18,27 @@ neighbours of a package that had taken the protocol's whole name.
 ```sh
 npm install @hotline-ng/client
 ```
+
+## What it needs
+
+A browser — but not equally, and the difference matters if you are
+writing a bot or a bridge rather than a page:
+
+| | Needs | Notes |
+|---|---|---|
+| `protocol` | nothing | Plain data and pure functions. Runs anywhere. |
+| `Connection` | `WebSocket`, `window` | `window.setTimeout` for the reconnect backoff is the only hard browser tie. `sessionStorage` is reached for behind a try/catch, so resume-across-reloads switches itself off where there is none rather than failing. |
+| `VoiceSession` | WebRTC, `getUserMedia`, `document` | `RTCPeerConnection`, `navigator.mediaDevices`, `window.isSecureContext`, and **one hidden `<audio>` element per inbound audio mid, appended to `document.body`**. |
+
+That last one is the only DOM this package touches, and it is worth
+being explicit about since nothing else here goes near a document.
+Remote audio needs a sink; an `<audio>` element is never laid out, every
+caller would build the same one, and Safari is markedly happier starting
+an element the page actually contains. `playAudio` in `voice.ts` is the
+single place to change if you would rather own that sink yourself.
+
+Video is a different matter: `VoiceSession` does not draw it and has no
+opinion about where it goes. See below.
 
 ## Three layers
 
@@ -121,12 +142,13 @@ The rules it keeps for you:
   `setParameters`, since `getUserMedia` constrains resolution and frame
   rate but never bitrate.
 
-It hands you a `MediaStream` and stops. Where a camera goes on the page
-is not a protocol question — and the two ways browsers most often refuse
-to show one (autoplay policy, and an element attached inside a
-`display: none` subtree) are properties of the element, not the track.
-Remote *audio* is the exception it does handle: it needs a sink, never
-needs laying out, and every caller would build the same one.
+For **video** it hands you a `MediaStream` and stops. Where a camera goes
+on the page is not a protocol question — and the two ways browsers most
+often refuse to show one (autoplay policy, and an element attached inside
+a `display: none` subtree) are properties of the element, not the track.
+
+For **audio** it does not stop: it builds the sink, as described in
+[What it needs](#what-it-needs).
 
 `voice.stats()` flattens the peer connection, the transceiver mids and
 per-SSRC packet and frame counts into something you can print.

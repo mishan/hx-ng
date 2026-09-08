@@ -16,13 +16,22 @@
  *   index: sections differ per peer and move as subscriptions change.
  *   `user-{uid}` is audio, `cam-user-{uid}` and `scr-user-{uid}` video.
  *
- * There is no DOM in this file. It hands the embedder a `MediaStream`
- * and the mid it arrived on and stops there, because where a camera
- * belongs on the page is not a protocol question — and because the two
- * places browsers most often refuse to show a video (autoplay policy and
- * a hidden container) are both problems of the element, not the track.
- * Remote audio is the exception: it needs a sink, never needs laying
- * out, and a caller that had to build one would build the same one.
+ * This file draws nothing. It hands the embedder a `MediaStream` and the
+ * mid it arrived on and stops there, because where a camera belongs on
+ * the page is not a protocol question — and because the two places
+ * browsers most often refuse to show a video (autoplay policy, and an
+ * element attached inside a hidden container) are both problems of the
+ * element rather than of the track.
+ *
+ * It is not DOM-free, though, and the exception is worth stating plainly
+ * rather than leaving to be discovered: remote audio needs a sink, so
+ * `playAudio` creates one hidden `<audio>` per inbound audio mid and
+ * appends it to `document.body`. That is a real dependency on there
+ * being a document. It is deliberate — an audio element is never laid
+ * out, every caller would build the same one, and Safari is markedly
+ * happier starting an element the page actually contains — but it is
+ * the one thing here an embedder might want to own, and `playAudio` is
+ * the one place to change if so.
  */
 
 import type { Connection } from './connection';

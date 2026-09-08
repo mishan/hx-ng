@@ -179,8 +179,10 @@ one session and lives in `sessionStorage`, so it dies with the tab.
 The protocol half is a separate package, [`@hotline-ng/client`](packages/hotline-ng/),
 so that a second client — a different UI, a bot, a bridge — does not have
 to reimplement resume accounting and SFU negotiation to get to the
-interesting part. It has no DOM in it and no dependencies, and this
-client consumes it by its published name like anybody else would.
+interesting part. It has no dependencies and draws nothing — the one
+document it touches is a hidden `<audio>` per inbound voice mid, which
+its own README is explicit about. This client consumes it by its
+published name like anybody else would.
 
 | | |
 |---|---|

@@ -175,10 +175,44 @@ describe('resume', () => {
       onMissedHistory: (page) => recovered.push(...page.lines.map((line) => line.id)),
     });
     await second.start();
+    await settle();
 
     expect(server.sent('history')[0]?.params).toEqual({ after: 10, limit: 200 });
     expect(recovered).toEqual([11]);
     expect(second.lastHistoryId).toBe(11);
+  });
+
+  it('backs off and retries a catch-up the server rate-limits', async () => {
+    server.on('login', () => ({ ok: loginOk({ caps: ['history'] }) }));
+    const first = await connect();
+    server.event('chat', {
+      from: { uid: 2, nick: 'Bob' },
+      text: 'last seen',
+      style: 'normal',
+      id: 10,
+      at: 1_700_000_010,
+    });
+    await settle();
+    expect(first.lastHistoryId).toBe(10);
+
+    server.on('resume', () => ({ error: { code: 'session_expired', text: 'gone' } }));
+    let asked = 0;
+    server.on('history', () =>
+      ++asked === 1
+        ? { error: { code: 'rate_limited', text: 'slow down' } }
+        : { ok: { lines: [historyLine(11)], has_more: false } },
+    );
+
+    const recovered: number[] = [];
+    const second = new Connection(CREDS, {
+      onMissedHistory: (page) => recovered.push(...page.lines.map((line) => line.id)),
+    });
+    await second.start();
+    // "Slow down" is not "there is no more": the gap must still close.
+    await new Promise((resolve) => setTimeout(resolve, 400));
+
+    expect(asked).toBe(2);
+    expect(recovered).toEqual([11]);
   });
 });
 
@@ -306,6 +340,7 @@ describe('resync recovery', () => {
       onMissedHistory: (page) => recovered.push(...page.lines.map((line) => line.id)),
     });
     await second.start();
+    await settle();
 
     expect(server.sent('history').map((frame) => frame.params)).toEqual([
       { after: 10, limit: 200 },

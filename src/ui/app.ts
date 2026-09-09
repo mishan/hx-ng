@@ -55,6 +55,11 @@ import { renderRoster } from './roster';
 import { Tiles } from './tiles';
 import { appendLine, isAtBottom, renderTranscript, scrollToEnd } from './transcript';
 
+/** Codes that mean "not for you, not now, not ever on this session":
+ *  no log configured, no privilege, or a request this server will not
+ *  parse. Asking again would only produce the same answer. */
+const HISTORY_REFUSALS = new Set(['not_available', 'access_denied', 'bad_request']);
+
 const THEME_KEY = 'hxd-ng.theme';
 const SELF_VIEW_KEY = 'hxd-ng.selfview';
 type Theme = 'auto' | 'dark' | 'light';
@@ -67,6 +72,12 @@ export class App {
   private identityPanel: IdentityPanel;
   private pingTimer: number | null = null;
   private historyLoading = false;
+  /** A server that refuses `history` refuses it for the whole session.
+   *  The cap is echoed whether or not this account may read the log
+   *  (hxd-ng's `docs/chat-history.md` §5), so an account without the
+   *  privilege would otherwise be told so again on every scroll to the
+   *  top, forever. */
+  private historyRefused = false;
   private url = '';
   /** The store revision the transcript element was last drawn from. */
   private drawnRevision = 0;
@@ -262,6 +273,7 @@ export class App {
     // to see mail past `deliver_at_flush`, which the login flush caps.
     if (conn.hasCap(CAP_INBOX)) void this.loadMail({ initial: true });
     if (conn.hasCap(CAP_HISTORY)) {
+      this.historyRefused = false;
       void this.loadHistory({ initial: true }).catch((e: Error) =>
         this.say(e instanceof WireFailure ? errorText(e.wire) : e.message),
       );
@@ -481,6 +493,7 @@ export class App {
         return this.loadMail();
       case 'history':
         if (!conn.hasCap(CAP_HISTORY)) return this.say('This server does not keep chat history.');
+        if (this.historyRefused) return this.say('This server will not show you its chat history.');
         if (this.store.active !== LOBBY) return this.say('Chat history belongs to the lobby.');
         if (this.store.historyExhausted) return this.say('That is the beginning of the conversation.');
         await this.loadHistory();
@@ -624,15 +637,22 @@ export class App {
    *  than making the line under their eyes jump. */
   private async loadHistory(opts: { initial?: boolean } = {}): Promise<void> {
     const conn = this.conn;
-    if (!conn || this.historyLoading || !conn.hasCap(CAP_HISTORY)) return;
+    if (!conn || this.historyLoading || this.historyRefused || !conn.hasCap(CAP_HISTORY)) return;
+    // Asking a socket that is down only ever answers "not connected",
+    // and the scroll handler would ask again on the next scroll.
+    if (conn.state !== 'online') return;
     if (!opts.initial && this.store.historyExhausted) return;
 
     this.historyLoading = true;
-    const oldHeight = this.transcript.scrollHeight;
-    const oldTop = this.transcript.scrollTop;
     try {
       const before = opts.initial ? undefined : this.store.oldestHistoryId;
       const page = await conn.history(before === undefined ? {} : { before });
+      // Measured here rather than before the request: a live line
+      // arriving while it was in flight has already changed the height,
+      // and counting that as part of the prepend is the jump this
+      // arithmetic exists to prevent.
+      const oldHeight = this.transcript.scrollHeight;
+      const oldTop = this.transcript.scrollTop;
       const added = this.mergeHistory(page, 'older');
       if (added && this.store.active === LOBBY) {
         this.renderTranscript();
@@ -640,6 +660,16 @@ export class App {
           this.transcript.scrollTop = oldTop + this.transcript.scrollHeight - oldHeight;
         }
       }
+    } catch (e) {
+      // A refusal is about this account and this server, not about this
+      // request: remember it rather than rediscovering it every time
+      // the reader reaches the top. At login it is not worth
+      // interrupting anyone over — the transcript simply starts empty.
+      if (e instanceof WireFailure && HISTORY_REFUSALS.has(e.wire.code)) {
+        this.historyRefused = true;
+        if (opts.initial) return;
+      }
+      throw e;
     } finally {
       this.historyLoading = false;
     }

@@ -15,6 +15,7 @@
 import {
   isEvent,
   isReply,
+  RATE_LIMITED,
   RESYNC_REQUIRED,
   type BlocksOk,
   type BlockParams,
@@ -105,6 +106,18 @@ interface Saved {
 }
 
 const SAVED_KEY = 'hxd-ng.session';
+
+/** How long the history catch-up waits after `rate_limited`, doubling
+ *  with each refusal. */
+const HISTORY_BACKOFF_MS = 250;
+const HISTORY_BACKOFF_TRIES = 3;
+/** Pages the catch-up will fetch before it stops. At the wire's largest
+ *  page this covers far more scrollback than any client keeps, and it
+ *  means a server that answers `has_more` forever cannot hold the loop
+ *  open for the life of the session. */
+const HISTORY_CATCHUP_PAGES = 20;
+
+const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
 /** Does this tab hold a session for `url` that a `resume` could pick up?
  *  The client asks before showing a login form, so a reload goes
@@ -341,7 +354,11 @@ export class Connection {
     this.setState('online');
     this.hooks.onLogin?.(ok);
     this.hooks.onSnapshot?.({ self: ok.self, users: ok.users, server: ok.server });
-    await this.pullMissedHistory(historyAfter);
+    // Not awaited: the session is up and the room is drawable, and a
+    // catch-up that is paging — or backing off a rate limit — would
+    // otherwise hold the connect screen open behind it. Failures are
+    // traced and swallowed inside.
+    void this.pullMissedHistory(historyAfter);
   }
 
   /** Returns true when the session was recovered (with or without a
@@ -389,7 +406,7 @@ export class Connection {
       this.retry = 0;
       this.setState('online');
       await this.pullMissedMail();
-      await this.pullMissedHistory(historyAfter);
+      void this.pullMissedHistory(historyAfter);
       return true;
     }
   }
@@ -433,18 +450,32 @@ export class Connection {
    *  highest id would skip the missing range. */
   private async pullMissedHistory(after: number): Promise<void> {
     if (!this.hooks.onMissedHistory || after === 0) return;
-    try {
-      let cursor = after;
-      for (;;) {
-        const page = await this.history({ after: cursor, limit: 200 });
-        this.hooks.onMissedHistory(page);
-        const next = page.lines.at(-1)?.id;
-        if (!page.has_more || next === undefined || next <= cursor) return;
-        cursor = next;
+    let cursor = after;
+    let refusals = 0;
+    for (let fetched = 0; fetched < HISTORY_CATCHUP_PAGES; ) {
+      let page: HistoryOk;
+      try {
+        page = await this.history({ after: cursor, limit: 200 });
+      } catch (e) {
+        // `rate_limited` is the server pacing this loop, not the end of
+        // the log — the spec says back off and ask again, and taking it
+        // for an answer would leave a gap in the transcript that nothing
+        // ever fills. Every other refusal is an answer.
+        if (e instanceof WireFailure && e.wire.code === RATE_LIMITED && refusals < HISTORY_BACKOFF_TRIES) {
+          await sleep(HISTORY_BACKOFF_MS * 2 ** refusals++);
+          continue;
+        }
+        this.trace('in', 'missed-history-failed', String(e instanceof Error ? e.message : e), true);
+        return;
       }
-    } catch (e) {
-      this.trace('in', 'missed-history-failed', String(e instanceof Error ? e.message : e), true);
+      refusals = 0;
+      fetched++;
+      this.hooks.onMissedHistory(page);
+      const next = page.lines.at(-1)?.id;
+      if (!page.has_more || next === undefined || next <= cursor) return;
+      cursor = next;
     }
+    this.trace('in', 'missed-history-stopped', `gap still open at ${cursor}`, true);
   }
 
   /** `sync`: the roster and server info, without disturbing the session. */

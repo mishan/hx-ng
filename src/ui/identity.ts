@@ -547,7 +547,7 @@ export class IdentityPanel {
       h('p', {}, 'Enrolled as ', h('strong', {}, device.label || '(unnamed device)')),
       h('div', { class: 'field-row' }, h('span', { class: 'k' }, 'Fingerprint'), h('code', {}, device.fingerprint ?? '')),
       h('p', { class: 'muted' }, `Certificate expires ${new Date(cert.expires * 1000).toLocaleString()}.`),
-      needsRenewal(cert, now) ? this.renewalBanner(device) : null,
+      needsRenewal(cert, now) ? this.renewalBanner(device, cert) : null,
       h(
         'p',
         { class: 'muted' },
@@ -624,7 +624,13 @@ export class IdentityPanel {
     );
   }
 
-  private renewalBanner(device: StoredDevice): HTMLElement {
+  private renewalBanner(device: StoredDevice, cert: { issued: number; expires: number }): HTMLElement {
+    // §8: a renewal is "the same device asking for the same or less", so
+    // the day buttons can shorten this certificate but never lengthen
+    // it. The holder refuses an ask that is longer than what it is
+    // renewing; a longer life is a fresh certification, which is the
+    // command below.
+    const lifetime = certLifetimeDays(cert);
     const dayBtns = RENEWAL_DAYS.map((d) => {
       const b = h('button', { class: `ghost ${d === this.certDays ? 'on' : ''}` }, `${d} days`);
       b.onclick = () => {
@@ -659,6 +665,13 @@ export class IdentityPanel {
               h('code', {}, 'hlid agent'),
               ' is running, this needs no code — it will ask there.',
             ),
+            this.certDays > lifetime
+              ? h(
+                  'p',
+                  { class: 'note' },
+                  `Renewing keeps this certificate's ${lifetime}-day life — a longer one is a new certificate, from the command below.`,
+                )
+              : null,
             renewBtn,
             status,
             error,
@@ -693,7 +706,12 @@ export class IdentityPanel {
         device,
         prev: device.cert,
         name: device.label,
-        days: this.certDays,
+        // Never more than this certificate already has (§8). Asking for
+        // the panel's default — 90, which is what `certDays` is before
+        // anyone touches it — would shorten a longer certificate and be
+        // refused outright by a holder renewing a shorter one.
+        // `tryAutoRenewal` has always got this right; the button did not.
+        days: Math.min(this.certDays, certLifetimeDays(decodeDeviceCert(device.cert))),
         pinned: device.fingerprint,
         signal: this.waiting.signal,
       });

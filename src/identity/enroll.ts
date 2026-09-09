@@ -3,16 +3,21 @@
  * commands the identity panel shows, parse what the user pastes back,
  * and check it before it's ever trusted.
  *
- * `docs/identity-keys.md` §7.1 step 3 describes `hlid cert -o web.bundle`
- * writing the certificate and card together as one pasteable blob.
- * `hlid` can certify a browser's key directly now (`--device-pub`
- * `--device-enc-pub`, mirroring `hlid attest`'s `--identity-pub`,
- * hxd-ng#62), but it still has no combined bundle output — `cert` and
- * `card` remain two separate files. So this module accepts what
- * today's `hlid cert` and `hlid card` actually produce: one or two
- * base64url blobs, in either order, told apart by shape rather than
- * position.
+ * The paste is now the fallback rather than the ceremony — a pairing
+ * code and a mailbox (`identity-enrollment.md`) is the ordinary path,
+ * and this is what a device does when the server hosts no mailbox or
+ * nothing is listening. It still has to work, and it accepts everything
+ * `hlid` can write: one blob from `hlid cert --bundle`, or the
+ * certificate and card as separate blobs in either order, told apart by
+ * shape rather than by position.
+ *
+ * Whichever way a certificate arrives, `validateEnrollment` is what
+ * decides whether to keep it. That is the point of the bundle sharing a
+ * format with the mailbox's answer: one verifier, not one per route.
  */
+
+import type { StoredDevice } from './storage';
+import { awaitAnswer, MailboxError, postEnrollRequest, type Mailbox } from './mailbox';
 
 import {
   CARD_DOMAIN,
@@ -20,9 +25,13 @@ import {
   IdentityError,
   base64urlToBytes,
   bytesToHex,
+  decodeBundle,
   decodeCard,
   decodeDeviceCert,
   fingerprintOf,
+  hexToBytes,
+  pairTag,
+  signEnrollRequest,
   verifyEnvelope,
   type Card,
   type DeviceCert,
@@ -45,15 +54,11 @@ export function buildHlidCertCommand(
 ): string {
   const days = opts.days ?? 90;
   const name = opts.name ?? 'browser';
-  return `hlid cert --device-pub ${devicePubHex} --device-enc-pub ${deviceEncPubHex} --caps web --days ${days} --name ${shq(name)} -o cert.bin`;
-}
-
-/** `server` should be the identity HTTP base (`https://host`, per
- *  `docs/identity-keys.md`'s own example) — `hlid` talks to the identity
- *  endpoints, not the ng WebSocket, so callers must convert a `ws(s)://`
- *  connect URL with `wsToHttp()` before this. */
-export function buildHlidLinkCommand(server: string, login: string): string {
-  return `hlid link --server ${shq(server)} --login ${shq(login)} --password-stdin`;
+  // `--bundle` writes the certificate and this identity's card as one
+  // object, which is one blob to paste instead of two and — the part
+  // that matters — the same object the mailbox path carries, so both
+  // routes end at the same verifier.
+  return `hlid cert --device-pub ${devicePubHex} --device-enc-pub ${deviceEncPubHex} --caps web --days ${days} --name ${shq(name)} --bundle -o web.bundle`;
 }
 
 export interface ParsedPaste {
@@ -61,9 +66,19 @@ export interface ParsedPaste {
   card: Uint8Array | null;
 }
 
-/** Which of `hlid`'s two output shapes a decoded blob is — told apart by
+/** Which of `hlid`'s output shapes a decoded blob is — told apart by
  *  which required fields decode successfully, not by position. */
-function classify(bytes: Uint8Array): 'cert' | 'card' {
+function classify(bytes: Uint8Array): 'bundle' | 'cert' | 'card' {
+  // Bundle first: it is the only one of the three that is unsigned, so
+  // it fails the other two parsers immediately and they fail it, but
+  // trying it first means one blob is recognised as a whole rather than
+  // as a certificate that happens not to verify.
+  try {
+    decodeBundle(bytes);
+    return 'bundle';
+  } catch {
+    /* not a bundle; try the two halves below */
+  }
   try {
     decodeDeviceCert(bytes);
     return 'cert';
@@ -74,13 +89,16 @@ function classify(bytes: Uint8Array): 'cert' | 'card' {
     decodeCard(bytes);
     return 'card';
   } catch {
-    throw new IdentityError('bad-field', 'this does not decode as either a device certificate or a card');
+    throw new IdentityError(
+      'bad-field',
+      'this does not decode as a bundle, a device certificate, or a card',
+    );
   }
 }
 
-/** One or two whitespace-separated base64url blobs — what pasting the
- *  output of `hlid cert -o cert.bin` and, optionally, `hlid card -o
- *  card.bin` on the same line or across two lines actually looks like. */
+/** What a paste can be: one blob from `hlid cert --bundle`, or the
+ *  certificate and (optionally) the card that `hlid cert` and `hlid
+ *  card` write separately, on one line or across two. */
 export function parseEnrollmentPaste(input: string): ParsedPaste {
   const tokens = input.trim().split(/\s+/).filter(Boolean);
   if (tokens.length === 0) throw new IdentityError('bad-field', 'nothing pasted');
@@ -95,10 +113,21 @@ export function parseEnrollmentPaste(input: string): ParsedPaste {
     }
   });
 
+  // A bundle is the whole paste; pairing it with anything else is a
+  // contradiction rather than something to reconcile.
+  if (decoded.length === 1 && classify(decoded[0]!) === 'bundle') {
+    const b = decodeBundle(decoded[0]!);
+    return { cert: b.cert, card: b.card };
+  }
+
   let cert: Uint8Array | null = null;
   let card: Uint8Array | null = null;
   for (const bytes of decoded) {
-    if (classify(bytes) === 'cert') {
+    const kind = classify(bytes);
+    if (kind === 'bundle') {
+      throw new IdentityError('bad-field', 'a bundle already carries the card — paste it on its own');
+    }
+    if (kind === 'cert') {
       if (cert) throw new IdentityError('bad-field', 'pasted two certificates and no card');
       cert = bytes;
     } else {
@@ -173,4 +202,167 @@ export async function fetchCardFallback(httpBase: string, fingerprint: string): 
   if (res.status === 404) return null;
   if (!res.ok) throw new IdentityError('server-error', `GET /identity/card: HTTP ${res.status}`);
   return new Uint8Array(await res.arrayBuffer());
+}
+
+export interface CodeEnrollment {
+  mailbox: Mailbox;
+  code: string;
+  /** This browser's record; its private keys never leave WebCrypto. */
+  device: StoredDevice;
+  /** A label for the holder's prompt. It may edit or ignore it. */
+  name?: string;
+  /** What to ask for. The holder grants this or less, never more. */
+  caps?: number;
+  days?: number;
+  /** The identity this browser has enrolled with before, if any. */
+  pinned: string | null;
+  /**
+   * The pairing secret from a scanned QR code (§5.6). Present, the
+   * request carries a keyed tag proving it came from whoever scanned
+   * the holder's screen, and `pinned` will have been set from the same
+   * scan — so the answer is checked against an identity this browser
+   * knew *before* it asked, rather than one it learned from the answer.
+   */
+  pairingSecret?: Uint8Array;
+  signal?: AbortSignal;
+}
+
+export type CodeOutcome =
+  | { kind: 'enrolled'; result: EnrollmentResult; cert: Uint8Array; card: Uint8Array }
+  | { kind: 'denied'; reason: string }
+  | { kind: 'gone' }
+  /** The answer is for an identity this browser has not seen before, and
+   *  it has seen one. Nothing is stored until the user confirms. */
+  | { kind: 'identity-changed'; was: string; now: string; result: EnrollmentResult; cert: Uint8Array; card: Uint8Array };
+
+/**
+ * The enrollee's half of the flow: sign a request for this browser's
+ * keys, post it under the code the user typed, wait, and check what
+ * comes back exactly as the paste path checks a paste.
+ *
+ * The check is not weaker for having come through a mailbox — it is the
+ * same `validateEnrollment`, on the same bundle format `hlid cert
+ * --bundle` writes. What the mailbox route adds is one thing the paste
+ * did not need: the user typed a code rather than their identity's own
+ * command, so *who this browser has become* is something to show them
+ * and, after the first time, to check (`identity-enrollment.md` §5.5).
+ */
+export async function enrollWithCode(opts: CodeEnrollment): Promise<CodeOutcome> {
+  const deviceEncPubHex = bytesToHex(opts.device.deviceEncPub);
+  const device = hexToBytes(opts.device.devicePub);
+  const request = await signEnrollRequest(opts.device.deviceSign, {
+    device,
+    deviceEnc: opts.device.deviceEncPub,
+    name: opts.name,
+    caps: opts.caps,
+    days: opts.days,
+    time: Math.floor(Date.now() / 1000),
+    pair: opts.pairingSecret ? await pairTag(opts.pairingSecret, device) : undefined,
+  });
+
+  const secret = await postEnrollRequest(opts.mailbox, request, opts.code);
+  const answer = await awaitAnswer(opts.mailbox, secret, opts.signal);
+  if (answer.kind === 'denied') return { kind: 'denied', reason: answer.reason };
+  if (answer.kind === 'gone') return { kind: 'gone' };
+
+  const { cert, card } = decodeBundle(answer.bundle);
+  const result = await validateEnrollment(
+    cert,
+    card,
+    opts.device.devicePub,
+    deviceEncPubHex,
+    Math.floor(Date.now() / 1000),
+  );
+  if (opts.pinned !== null && opts.pinned !== result.fingerprint) {
+    return { kind: 'identity-changed', was: opts.pinned, now: result.fingerprint, result, cert, card };
+  }
+  return { kind: 'enrolled', result, cert, card };
+}
+
+export type RenewalOutcome =
+  | { kind: 'renewed'; result: EnrollmentResult; cert: Uint8Array; card: Uint8Array }
+  /** Nothing is standing by for this identity: `hlid agent` is not
+   *  running, or is running with `--renew deny`. The user has to do
+   *  something, so say so rather than retrying forever. */
+  | { kind: 'no-holder' }
+  | { kind: 'denied'; reason: string }
+  | { kind: 'gone' };
+
+/**
+ * Renew this browser's certificate without anybody typing a code
+ * (`identity-enrollment.md` §8).
+ *
+ * The request carries `prev`, so the mailbox routes it by the identity
+ * that certificate names rather than by a code — straight to whoever is
+ * running `hlid agent`. That is the whole reason a browser can renew on
+ * its own from one-third of its lifetime remaining: there is nothing for
+ * the user to do unless nobody is listening.
+ *
+ * It is still not silent at the other end. The holder prompts, and the
+ * argument for that is worth knowing here too: what the ninety-day
+ * lifetime bounds is how long a *copied* browser profile keeps logging
+ * in as you, and a renewal for a browser its owner was not using is the
+ * one signal that copy gives. This side should not paper over a denial.
+ */
+export async function renewWithoutCode(opts: {
+  mailbox: Mailbox;
+  device: StoredDevice;
+  /** The certificate being renewed; it names this device. */
+  prev: Uint8Array;
+  name?: string;
+  days?: number;
+  /** The identity this browser belongs to, which must not change. */
+  pinned: string;
+  signal?: AbortSignal;
+}): Promise<RenewalOutcome> {
+  const device = hexToBytes(opts.device.devicePub);
+  const request = await signEnrollRequest(opts.device.deviceSign, {
+    device,
+    deviceEnc: opts.device.deviceEncPub,
+    name: opts.name,
+    // No `caps`: absent means "whatever your policy gives" (§4), and a
+    // renewal is narrowed by the certificate it replaces anyway. Naming
+    // them here would only be a way to ask for less by accident.
+    days: opts.days,
+    time: Math.floor(Date.now() / 1000),
+    prev: opts.prev,
+  });
+
+  let secret: string;
+  try {
+    secret = await postEnrollRequest(opts.mailbox, request, null);
+  } catch (e) {
+    // `no_holder` is the expected outcome when no agent is running, not
+    // a failure to report as one. Branched on the wire code rather than
+    // the sentence: the sentence is for a person, and rewording it
+    // should not change what the program does.
+    if (e instanceof MailboxError && e.code === 'no_holder') {
+      return { kind: 'no-holder' };
+    }
+    throw e;
+  }
+
+  const answer = await awaitAnswer(opts.mailbox, secret, opts.signal);
+  if (answer.kind === 'denied') return { kind: 'denied', reason: answer.reason };
+  if (answer.kind === 'gone') return { kind: 'gone' };
+
+  const { cert, card } = decodeBundle(answer.bundle);
+  const result = await validateEnrollment(
+    cert,
+    card,
+    opts.device.devicePub,
+    bytesToHex(opts.device.deviceEncPub),
+    Math.floor(Date.now() / 1000),
+  );
+  if (result.fingerprint !== opts.pinned) {
+    // A renewal cannot legitimately change identity: this browser is
+    // already somebody's device and asked that identity for a new
+    // certificate. An answer from anywhere else is the substituted
+    // answer of §9, and there is nothing to ask the user about.
+    throw new IdentityError(
+      'bad-field',
+      `this renewal came back from identity ${result.fingerprint}, not ${opts.pinned}`,
+    );
+  }
+  return { kind: 'renewed', result, cert, card };
 }

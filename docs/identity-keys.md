@@ -2,6 +2,11 @@
 
 Who holds which key, where it is kept, and what a page can do with it.
 
+> Every `*.md` named here without a path is a **hxd-ng** document —
+> `hotline-ng-identity.md`, `hotline-ng-auth.md`, `identity-enrollment.md`
+> and the identity threat model all live in that repository's `docs/`,
+> not this one. This is the only file in hx-ng's `docs/`.
+
 `hotline-ng-identity.md` defines two keys per person — a long-lived
 *identity key* that certifies devices and signs the user card, and a
 per-device key that signs login proofs. It does not say what a *browser*
@@ -300,27 +305,43 @@ enrollment check in §7.1 can report.)
 
 ### 7.1 Enrolling a browser as a device (phase B)
 
+> Since **§7.4**, this is the *fallback*. A server that advertises an
+> enrollment mailbox gets a pairing code instead, and nothing below is
+> copied by hand. The steps here are what still happens when there is no
+> mailbox, or nothing listening at the other end of one.
+
 1. The client generates both device keypairs, non-extractable, and
    stores them with no certificate (§4). This costs nothing and can
    happen the first time the user opens the identity panel.
 2. It shows the two public keys as hex, and — the part that makes this
-   bearable — **the exact commands to run**, pre-filled, with a copy
+   bearable — **the exact command to run**, pre-filled, with a copy
    button:
 
    ```
    hlid cert --device-pub 3f2a… --device-enc-pub 91c4… \
-     --caps web --days 90 --name "Firefox on the laptop" -o web.bundle
-   hlid link --server https://host --login alice --password-stdin
+     --caps web --days 90 --name 'Firefox on the laptop' --bundle -o web.bundle
    ```
 
-   The second line appears when the user has said they mean to link an
-   account (§5.1). Neither line names a key file: they rely on `hlid`
-   having a default directory (§9), because a pre-filled command that
-   guesses `~/.hlid/identity.key` is only exact for someone who followed
-   one particular tutorial.
-3. The user pastes back **one blob**: `hlid cert -o web.bundle` writes
-   the certificate and the identity's current card together, base64url,
-   and the panel accepts either that or a bare certificate. The card
+   Exact means exact, so this is what `buildHlidCertCommand` actually
+   emits, down to the POSIX single-quoting a device name with an
+   apostrophe in it needs. It does not name a key file: it relies on
+   `hlid` having a default directory (§9), because a pre-filled command
+   that guesses `~/.hlid/identity.key` is only exact for someone who
+   followed one particular tutorial.
+
+   **Linking an account is not part of this panel.** It used to print an
+   `hlid link` line beside the certificate command, which meant the two
+   halves of "enroll this browser and use my account" were ceremonies of
+   different shapes — one a code, one a pasted shell command — with
+   nothing tying them together. hxd-ng's `identity-enrollment.md`
+   §12 sketches
+   doing both in one trip through the mailbox, and that is where linking
+   should reappear; until it does, `hlid link` is a thing the user runs
+   in a terminal, not a thing this panel pretends to orchestrate.
+3. The user pastes back **one blob**: `--bundle` writes the certificate
+   and the identity's current card together, and the panel also accepts
+   a bare certificate, or a certificate and a card as two blobs. The
+   card
    cannot be fetched from the server on a first visit — `GET
    /identity/card/<fingerprint>` serves what `/identity/auth` has cached,
    and this identity has never authed there — so the paste is the common
@@ -387,6 +408,87 @@ to do it. Constraining the Worker's API to `mintCert` and `signCard`
 rather than `sign(bytes)` is worth doing too, but it is defence in
 depth, not a boundary.
 
+### 7.4 Enrolling with a pairing code
+
+The paste above is now the fallback. When discovery advertises
+`identity.endpoints.enroll`, the panel draws a code box instead, and the
+ceremony is hxd-ng's `identity-enrollment.md`: the user runs `hlid
+enroll --server …` wherever their identity key is, types the code it
+shows, and the certificate arrives without anything being copied.
+
+What this client is responsible for, and why:
+
+1. **Its own device fingerprint, beside the code box.** `hlid`'s prompt
+   shows the same eight characters. A hostile mailbox can feed the
+   holder a request for a device key of its own, and the *only* thing
+   that catches it is a human seeing that the two screens disagree
+   (`identity-enrollment.md` §9). A fingerprint shown in the terminal
+   alone would be nothing to compare against.
+2. **The same verifier as the paste.** What comes back is checked by
+   `validateEnrollment`: the certificate names this browser's two keys,
+   the card names the certificate's identity, nothing has expired, both
+   signatures verify.
+3. **Who this browser has become.** The paste path never needed to say
+   it — the user had just run their own identity's command. Having typed
+   a code, they have not, so the panel shows the identity's name and
+   fingerprint after enrolling.
+4. **A pinned identity.** The fingerprint is remembered across
+   enrollments, and one that changes needs a confirmation. This is the
+   check for a mailbox substituting an *answer*: every signature in a
+   bundle for the wrong identity verifies, so nothing in the codec
+   objects, and "this browser was Alice's device yesterday" is what
+   objects instead. It is kept in `meta`, not on the device record, so
+   that "forget this device" does not quietly clear it.
+
+**And when the code was scanned rather than typed** (§5.6), two of those
+four change. A QR code carries the pairing code, the mailbox, the
+identity fingerprint and a 16-byte pairing secret, all in the URL's
+*fragment* — which browsers do not send to the server, so none of it
+reaches an access log. This client reads it once at startup and clears
+it from the address bar, because a URL that stays there gets copied,
+bookmarked and restored.
+
+What that buys is the two checks becoming software's job rather than a
+human's. The identity is pinned from the code itself, so it is checked
+*before* this browser asks rather than against whatever it was enrolled
+with last time — which on a first enrollment is nothing. And the pairing
+secret becomes a keyed tag on the request, which the holder verifies
+under the secret it drew and the mailbox never saw. So the panel drops
+the fingerprint comparison and the terminal drops the line asking for
+it.
+
+A scanned answer from the wrong identity is therefore not a question but
+a refusal: with a typed code, a changed fingerprint might be a user
+changing identities, and it asks. With a scan, the pin came off the
+screen they photographed, and an answer from somewhere else is simply
+wrong.
+
+**Renewal needs no code either** (§8). From one-third of the
+certificate's lifetime remaining, this client posts the *old*
+certificate as `prev` and no code at all: the mailbox routes it by the
+identity that certificate names, straight to whoever is running `hlid
+agent`. It happens at startup, fire-and-forget — with nothing listening
+it is one 404 and the renewal banner goes on nagging, which is the
+fallback to a code and then to the paste.
+
+It asks for the lifetime the certificate already has, not the panel's
+ninety-day default: the holder grants the shorter of what was asked and
+its own policy, so a renewal nobody asked for would otherwise quietly
+shorten a longer certificate every time it ran. A renewal changes the
+expiry date and nothing else.
+
+Three things it does not do. It does not paper over a denial: what the
+ninety-day lifetime bounds is how long a *copied* browser profile keeps
+logging in as you, and a renewal prompt for a browser its owner was not
+using is the one signal that copy gives, so a "no" is worth surfacing.
+It does not ask about a renewal that comes back from a different
+identity — unlike a first enrollment, where a changed fingerprint might
+be a user changing identities, a renewal was addressed to somebody
+specific, and an answer from anywhere else is simply wrong. And it does
+not announce itself as a first enrollment: with the panel open it says
+the certificate was renewed, which is what just happened, rather than
+repeating whose device this became months ago.
+
 ---
 
 ## 8. What the wire actually needs, per connection
@@ -426,48 +528,39 @@ in the routine path.
 
 ---
 
-## 9. What this needs that does not exist yet
+## 9. What is still missing here
 
-**`hlid cert` can now certify a key it did not generate** (hxd-ng#62):
-`--device-pub HEX --device-enc-pub HEX` is an alternative to `--device
-SEEDFILE`, built on a new `DeviceCert::for_keys` that takes the two
-public keys directly instead of reading them off a `DeviceKey`. §7.1
-step 2's command is exact as written and runnable as-is.
+Three of the four things this section used to ask for have landed on the
+server side, so what is left here is this client's half of them.
 
-What that fix didn't include: a combined bundle output. `hlid cert` and
-`hlid card` still write two separate files, so §7.1 step 3's "the user
-pastes back one blob" is still two — the identity panel accepts either.
-`-o FILE.bundle` (or a `--with-card FILE` flag) that writes cert and
-card together as one base64url blob would still be worth doing, so that
-paste collapses to one.
+**`hlid` does what §7.1's command needs it to.** It can certify a key it
+did not generate (`--device-pub HEX --device-enc-pub HEX`, hxd-ng#62);
+`--identity`, `--device`, `--cert` and `--card` fall back to fixed names
+in `$HLID_HOME`, default `~/.hlid`, so a pre-filled command that names no
+key file is exact rather than a guess; `hlid init --name S` writes an
+identity key, a device key, a certificate and a card in one step; and
+`hlid cert --bundle` writes the certificate and the card as a single
+object.
 
-**`hlid` has no default paths.** Every subcommand takes `--identity`,
-`--device`, `--card`, `--cert` explicitly, and nothing in it knows about
-a home directory. A pre-filled command is only "exact" if those flags
-can be omitted, which means: a default directory (`$HLID_HOME`, else
-`~/.hlid`) with fixed filenames that every flag falls back to, and an
-`hlid init --name S` that does `keygen identity`, `keygen device`, an
-unrestricted `cert`, and `card` in one step, so that a person who has
-never used `hlid` can get from nothing to "paste this into the browser"
-in two commands. This is additive; the explicit flags keep working.
+**The bundle and the code box have landed.** The panel reads hxd-ng's
+`identity-enrollment.md` §5.4 bundle, so `hlid cert --bundle` collapses
+§7.1 step 3's paste to one blob; and when the server advertises a
+mailbox, the ordinary route is not a paste at all but a pairing code
+(§7.4 below). Both end at the same `validateEnrollment`, which is the
+point of the two routes carrying the same object: the fallback is not a
+second code path to audit.
 
-**CORS on the identity endpoints — a dev-loop problem, not a blocker.**
-Nothing in `crates/` emits an `Access-Control-Allow-Origin` header, and
-every endpoint above is a `fetch()`. Same-origin deployments, which are
-the usual case, are fine. `npm run dev` on :5701 against :5700 is not —
-but Vite's dev server proxies, and `server.proxy` in `vite.config.ts`
-forwarding `/identity`, `/.well-known` and `/ng` (with `ws: true`) to
-:5700 makes every request same-origin in development with no server
-change at all. That is the first thing to do.
+**CORS is answered by the server now.** The identity endpoints and
+discovery send `Access-Control-Allow-Origin: *` with an `OPTIONS`
+handler for the preflight `PUT /identity/card` triggers, and expose
+`ETag` so the card fetch can still be revalidated. The `allowCustomServer`
+case therefore works, and so will a device reaching a mailbox on a server
+other than the one that served the page.
 
-Server-side CORS is still wanted for the `allowCustomServer` case, where
-the page points at a server other than the one that served it, and it is
-small rather than hard: these endpoints are authenticated by a token in
-the body or URL and never by a cookie, so `Access-Control-Allow-Origin: *`
-on the identity routes gives nothing away. `PUT /identity/card` with
-`application/cbor` triggers a preflight, so an `OPTIONS` handler goes
-with it. Until that lands, the identity panel is same-origin only and
-says so when the server field is pointed elsewhere.
+The Vite proxy in `vite.config.ts` stays regardless: it forwards
+`/identity`, `/.well-known` and `/ng` to :5700 so that `npm run dev` on
+:5701 is same-origin, which is still the right shape for the dev loop and
+does not depend on the server being a recent build.
 
 **A CBOR codec in the client.** hx-ng has no runtime dependencies and
 this should not be the reason it grows one. The login proof (§3.6) is

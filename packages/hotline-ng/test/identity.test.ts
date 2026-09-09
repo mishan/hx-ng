@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { CborError, decodeCanonical } from '../src/cbor';
+import { CborError, cBytes, cMap, cText, cUint, decodeCanonical, encode, mapGet } from '../src/cbor';
 import {
   CAPS,
   AuthError,
@@ -13,11 +13,17 @@ import {
   fingerprintOf,
   hexToBytes,
   postAuth,
+  decodeBundle,
+  fetchDiscovery,
+  openBundle,
+  pairTag,
+  signEnrollRequest,
   signLoginProof,
   verifyEnvelope,
   wsToHttp,
   DEVICE_CERT_DOMAIN,
   CARD_DOMAIN,
+  PAIRING_SECRET_BYTES,
 } from '../src/identity';
 
 import vectors from './identity-vectors.json';
@@ -36,6 +42,27 @@ async function importSeed(seedHex: string): Promise<CryptoKey> {
   pkcs8.set(PKCS8_ED25519_PREFIX, 0);
   pkcs8.set(seed, PKCS8_ED25519_PREFIX.length);
   return crypto.subtle.importKey('pkcs8', pkcs8, { name: 'Ed25519' }, false, ['sign']);
+}
+
+/** A minimally-populated card signed by an arbitrary key — for building
+ *  the one case the vectors cannot hold, a bundle whose two halves name
+ *  different identities. Production code never signs a card. */
+async function signCardAs(seedHex: string, publicHex: string, name: string): Promise<Uint8Array> {
+  const key = await importSeed(seedHex);
+  const unsigned: [string, ReturnType<typeof cUint>][] = [
+    ['v', cUint(1)],
+    ['identity', cBytes(hexToBytes(publicHex))],
+    ['name', cText(name)],
+    ['updated', cUint(1757116860)],
+  ];
+  const body = encode(cMap(unsigned));
+  const message = new Uint8Array([...new TextEncoder().encode(CARD_DOMAIN), 0, ...body]);
+  const sig = new Uint8Array(await crypto.subtle.sign({ name: 'Ed25519' }, key, message));
+  return encode(cMap([...unsigned, ['sig', cBytes(sig)]]));
+}
+
+function encodeBundle(cert: Uint8Array, card: Uint8Array): Uint8Array {
+  return encode(cMap([['v', cUint(1)], ['card', cBytes(card)], ['cert', cBytes(cert)]]));
 }
 
 describe('fingerprintOf', () => {
@@ -91,6 +118,158 @@ describe('signLoginProof', () => {
       time: f.time,
     });
     expect(bytesToHex(sealed)).toBe(vectors.login_proof.object.signed_hex);
+  });
+});
+
+describe('signEnrollRequest', () => {
+  it('produces the exact bytes hxd-ng does, every field populated', async () => {
+    // The vector is a renewal that also carries a scanned `pair`, so one
+    // case covers every optional field at once. Ed25519 is
+    // deterministic, so "the same bytes" is a meaningful assertion
+    // rather than "a valid signature".
+    const deviceKey = await importSeed(vectors.keys.device.seed_hex);
+    const f = vectors.enroll_request.fields;
+    const signed = await signEnrollRequest(deviceKey, {
+      device: hexToBytes(f.device),
+      deviceEnc: hexToBytes(f.device_enc),
+      name: f.name,
+      caps: f.caps,
+      days: f.days,
+      time: f.time,
+      // `prev` is the device certificate the file publishes above, not a
+      // second invented one — a renewal is about a certificate that
+      // already exists.
+      prev: hexToBytes(vectors.device_cert.signed_hex),
+      pair: hexToBytes(f.pair),
+    });
+    expect(bytesToHex(signed)).toBe(vectors.enroll_request.signed_hex);
+  });
+
+  it('omits what was not asked for rather than sending a default', async () => {
+    // A request with no `caps` means "whatever your policy gives a
+    // device of this kind" (§4). Encoding a zero there would mean "no
+    // capabilities", which is a different and much worse thing to ask
+    // for.
+    const deviceKey = await importSeed(vectors.keys.device.seed_hex);
+    const signed = await signEnrollRequest(deviceKey, {
+      device: hexToBytes(vectors.keys.device.public_hex),
+      deviceEnc: hexToBytes(vectors.keys.device.public_enc_hex),
+      time: 1757116860,
+    });
+    const decoded = decodeCanonical(signed);
+    for (const absent of ['caps', 'days', 'name', 'prev', 'pair']) {
+      expect(mapGet(decoded, absent), absent).toBeUndefined();
+    }
+  });
+
+  it('refuses a device name a certificate could not carry', async () => {
+    const deviceKey = await importSeed(vectors.keys.device.seed_hex);
+    const req = (name: string) =>
+      signEnrollRequest(deviceKey, {
+        device: hexToBytes(vectors.keys.device.public_hex),
+        deviceEnc: hexToBytes(vectors.keys.device.public_enc_hex),
+        time: 1757116860,
+        name,
+      });
+    // Refusing here rather than letting the holder rewrite it: the name
+    // goes into a certificate as offered, and one the certificate rules
+    // reject is a request that cannot be granted as asked.
+    await expect(req('  padded  ')).rejects.toThrow(IdentityError);
+    await expect(req('   ')).rejects.toThrow(IdentityError);
+    await expect(req('x'.repeat(65))).rejects.toThrow(IdentityError);
+  });
+});
+
+describe('pairTag', () => {
+  it('matches hxd-ng, and binds one device to one secret', async () => {
+    const secret = hexToBytes(vectors.enroll_request.pairing_secret_hex);
+    const device = hexToBytes(vectors.keys.device.public_hex);
+    expect(secret.length).toBe(PAIRING_SECRET_BYTES);
+    expect(bytesToHex(await pairTag(secret, device))).toBe(vectors.enroll_request.fields.pair);
+
+    // A different device under the same secret is a different tag —
+    // which is what stops a mailbox splicing a real tag onto a key of
+    // its own (§5.6).
+    const other = hexToBytes(vectors.keys.identity.public_hex);
+    expect(bytesToHex(await pairTag(secret, other))).not.toBe(vectors.enroll_request.fields.pair);
+  });
+
+  it('refuses a secret that is not 16 bytes', async () => {
+    await expect(pairTag(new Uint8Array(15), new Uint8Array(32))).rejects.toThrow(IdentityError);
+  });
+});
+
+describe('decodeBundle / openBundle', () => {
+  const encoded = () => hexToBytes(vectors.bundle.encoded_hex);
+
+  it('decodes to the exact certificate and card hxd-ng put in it', () => {
+    const b = decodeBundle(encoded());
+    expect(bytesToHex(b.cert)).toBe(vectors.device_cert.signed_hex);
+    expect(bytesToHex(b.card)).toBe(vectors.card.signed_hex);
+  });
+
+  it('opens to both objects and the identity they agree on', async () => {
+    const { cert, card } = await openBundle(encoded());
+    expect(bytesToHex(cert.identity)).toBe(vectors.keys.identity.public_hex);
+    expect(bytesToHex(card.identity)).toBe(bytesToHex(cert.identity));
+    expect(card.name).toBe(vectors.card.fields.name);
+  });
+
+  it('refuses a card belonging to an identity other than the certificate names', async () => {
+    // Both halves genuine, both signatures valid, and the name shown
+    // beside the fingerprint would be somebody else's — a hostile
+    // mailbox's substituted answer (§9). Nothing but this comparison
+    // catches it, so the case is worth building rather than assuming.
+    //
+    // The stand-in second identity is the device key from the vectors:
+    // it is a real Ed25519 key this test can sign with, and it is not
+    // the identity the certificate names, which is all that matters.
+    const foreignCard = await signCardAs(vectors.keys.device.seed_hex, vectors.keys.device.public_hex, 'Mallory');
+    const bundle = encodeBundle(hexToBytes(vectors.device_cert.signed_hex), foreignCard);
+
+    // It decodes fine — the shape is not what is wrong with it.
+    expect(decodeBundle(bundle).card).toEqual(foreignCard);
+    await expect(openBundle(bundle)).rejects.toThrow(/different identities/);
+
+    // And the card on its own is genuine, so the rejection is the
+    // pairing and not a broken signature.
+    await expect(verifyEnvelope(foreignCard, hexToBytes(vectors.keys.device.public_hex), CARD_DOMAIN)).resolves.toBeDefined();
+  });
+
+  it('refuses a bundle bigger than its members could be', () => {
+    expect(() => decodeBundle(new Uint8Array(4 * 1024 + 16 * 1024 + 257))).toThrow(IdentityError);
+  });
+});
+
+describe('fetchDiscovery', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  const reply = (identity: unknown) => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => ({
+        ok: true,
+        json: async () => ({ v: 1, name: 'x', ng: { ws: '/ng' }, identity }),
+      })),
+    );
+  };
+
+  it('leaves `web` absent rather than present-and-undefined', async () => {
+    // Absence is the whole meaning of the field — it says there is
+    // nowhere to point a QR code — so a caller testing `'web' in …` has
+    // to be able to tell the two apart.
+    reply({ enabled: true, endpoints: {} });
+    const d = await fetchDiscovery('https://hl.example');
+    expect(d.identity.enabled).toBe(true);
+    if (!d.identity.enabled) return;
+    expect('web' in d.identity).toBe(false);
+  });
+
+  it('carries `web` through when the server names one', async () => {
+    reply({ enabled: true, endpoints: {}, web: 'https://hl.example/app/' });
+    const d = await fetchDiscovery('https://hl.example');
+    if (!d.identity.enabled) return;
+    expect(d.identity.web).toBe('https://hl.example/app/');
   });
 });
 

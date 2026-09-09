@@ -89,6 +89,20 @@ bind = "127.0.0.1:${ngPort}"
 key = "identity-server.key"
 new_accounts = "guest"
 unattested = "guest"
+# Where the test's page actually lives — a different origin from this
+# server, which is the ordinary split-origin deployment and also why the
+# enroll runs below pass --web. A QR is drawn for a server-advertised
+# client only on the server's own origin: the fragment carries the
+# pairing secret, and a mailbox free to name any origin could collect it.
+web = "http://localhost:5701/"
+# The default is 4, and it is right for a deployment. This suite is not
+# one: every test here is a different holder on 127.0.0.1 against one
+# server, and a holder that is killed rather than closed leaves its
+# session in the mailbox for the full ten-minute TTL. So the limit
+# counts the whole suite as a single abusive client. Raised rather than
+# worked around, because the alternative — a server per test — would
+# cost more than it proves.
+enroll_per_address = 64
 `,
   );
   const proc: ChildProcessWithoutNullStreams = spawn(bin('hxd'), ['--config', 'hxd-ng.toml'], {
@@ -113,12 +127,99 @@ unattested = "guest"
   };
 }
 
+/**
+ * `hlid enroll`, which does not exit until a device asks — so unlike
+ * {@link hlid} it has to be driven while it runs: read the pairing code
+ * off its output, then answer the prompt it shows afterwards.
+ *
+ * The answer is written to stdin up front. It waits in the pipe until
+ * `hlid` reaches its prompt, which is the only moment it reads stdin,
+ * and doing it this way means the test never has to guess when that is.
+ */
+export function hlidEnroll(cwd: string, args: string[], approve: boolean): HlidEnroll {
+  return hlidHolder(cwd, ['enroll', ...args], approve);
+}
+
+/** `hlid agent`: the same driver with no budget, so it stays up and
+ *  takes renewals without a code. */
+export function hlidAgent(cwd: string, args: string[]): HlidEnroll {
+  return hlidHolder(cwd, ['agent', ...args], true);
+}
+
+function hlidHolder(cwd: string, args: string[], approve: boolean): HlidEnroll {
+  const child = spawn(bin('hlid'), args, { cwd, env: hlidEnv(cwd) });
+  // Enough answers for every prompt a test will produce; each waits in
+  // the pipe until it is asked for.
+  child.stdin.write((approve ? 'y\n' : 'n\n').repeat(4));
+  child.stdin.end();
+
+  let output = '';
+  let resolveCode: (c: string) => void;
+  let resolveUrl: (u: string) => void;
+  const code = new Promise<string>((resolve, reject) => {
+    resolveCode = resolve;
+    setTimeout(() => reject(new Error(`hlid enroll showed no code:\n${output}`)), 30_000).unref();
+  });
+  // Only meaningful with `--show-url`; without it there is no URL to
+  // wait for and the timeout is not armed, so this simply never settles
+  // and no caller has any business awaiting it.
+  const wantsUrl = args.includes('--show-url');
+  const scanUrl = new Promise<string>((resolve, reject) => {
+    resolveUrl = resolve;
+    if (wantsUrl) {
+      setTimeout(() => reject(new Error(`hlid enroll showed no scan URL:\n${output}`)), 30_000).unref();
+    }
+  });
+  // A rejection nobody is waiting for is an unhandled rejection, and in
+  // Playwright that fails whichever test happens to be running. This
+  // handler does not consume it — `await holder.scanUrl` still sees the
+  // rejection — it only says somebody is watching.
+  void scanUrl.catch(() => {});
+  child.stderr.on('data', (chunk: Buffer) => {
+    output += chunk.toString();
+    // The same eight characters and hyphen a user reads off the screen.
+    const m = /\b([0-9A-Z]{4}-[0-9A-Z]{4})\b/.exec(output);
+    if (m) resolveCode(m[1]!);
+    const u = /(https?:\/\/\S*#enroll=\S+)/.exec(output);
+    if (u) resolveUrl(u[1]!);
+  });
+
+  return {
+    code,
+    scanUrl,
+    output: () => output,
+    exited: new Promise<number>((resolve) => child.on('close', (c) => resolve(c ?? -1))),
+    stop: () => child.kill(),
+  };
+}
+
+/** The temp directory is the identity's home, so nothing lands in the
+ *  real one. See {@link hlid}. */
+function hlidEnv(cwd: string): NodeJS.ProcessEnv {
+  return { ...process.env, HLID_HOME: cwd };
+}
+
+export interface HlidEnroll {
+  /** Resolves with the pairing code as soon as `hlid` prints it. */
+  code: Promise<string>;
+  /** Resolves with the QR code's URL, when run with `--show-url`. */
+  scanUrl: Promise<string>;
+  /** Everything `hlid` has said so far — its prompt, for assertions. */
+  output: () => string;
+  exited: Promise<number>;
+  stop: () => void;
+}
+
 /** Runs `hlid` and returns its stdout — `keygen`'s public key and
  *  fingerprint lines, in particular. Throws with stderr attached on a
  *  non-zero exit, which is always a paste-worthy diagnostic here (a bad
  *  argument, a rejected field) rather than something to recover from. */
 export function hlid(cwd: string, args: string[]): string {
-  const result = spawnSync(bin('hlid'), args, { cwd, encoding: 'utf8' });
+  // HLID_HOME, always: `hlid init` and every flag fallback default to
+  // ~/.hlid, and a test that writes an identity into the home directory
+  // of whoever ran it is a test that has done real damage — hlid would
+  // then silently use it as the default for their own commands.
+  const result = spawnSync(bin('hlid'), args, { cwd, env: hlidEnv(cwd), encoding: 'utf8' });
   if (result.status !== 0) {
     throw new Error(`hlid ${args.join(' ')} failed (exit ${result.status}):\n${result.stderr}`);
   }

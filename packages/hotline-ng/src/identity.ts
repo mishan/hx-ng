@@ -467,7 +467,7 @@ export async function pairTag(secret: Uint8Array, device: Uint8Array): Promise<U
   const key = await crypto.subtle.importKey('raw', bufferSource(secret), { name: 'HMAC', hash: 'SHA-256' }, false, [
     'sign',
   ]);
-  return new Uint8Array(await crypto.subtle.sign('HMAC', key, bufferSource(device)));
+  return new Uint8Array(await crypto.subtle.sign({ name: 'HMAC' }, key, bufferSource(device)));
 }
 
 /** A certificate and the card of the identity that signed it (§5.4).
@@ -601,7 +601,11 @@ export async function fetchDiscovery(httpBase: string): Promise<Discovery> {
         minAttestationAge: ri.min_attestation_age ?? 0,
         trustedRegistrars: ri.trusted_registrars ?? [],
         endpoints: ri.endpoints,
-        web: ri.web ?? undefined,
+        // Spread rather than `web: ri.web ?? undefined`, which would set
+        // the property to `undefined` and make "absent" indistinguishable
+        // from "present and empty" for a caller testing `'web' in …`.
+        // Absence is the whole meaning of the field.
+        ...(typeof ri.web === 'string' ? { web: ri.web } : {}),
       }
     : { enabled: false };
   return { v: raw.v, name: raw.name, serverKey: raw.server_key ?? null, ng: raw.ng, identity };

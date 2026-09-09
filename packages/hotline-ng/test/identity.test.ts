@@ -14,6 +14,7 @@ import {
   hexToBytes,
   postAuth,
   decodeBundle,
+  fetchDiscovery,
   openBundle,
   pairTag,
   signEnrollRequest,
@@ -237,6 +238,38 @@ describe('decodeBundle / openBundle', () => {
 
   it('refuses a bundle bigger than its members could be', () => {
     expect(() => decodeBundle(new Uint8Array(4 * 1024 + 16 * 1024 + 257))).toThrow(IdentityError);
+  });
+});
+
+describe('fetchDiscovery', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  const reply = (identity: unknown) => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => ({
+        ok: true,
+        json: async () => ({ v: 1, name: 'x', ng: { ws: '/ng' }, identity }),
+      })),
+    );
+  };
+
+  it('leaves `web` absent rather than present-and-undefined', async () => {
+    // Absence is the whole meaning of the field — it says there is
+    // nowhere to point a QR code — so a caller testing `'web' in …` has
+    // to be able to tell the two apart.
+    reply({ enabled: true, endpoints: {} });
+    const d = await fetchDiscovery('https://hl.example');
+    expect(d.identity.enabled).toBe(true);
+    if (!d.identity.enabled) return;
+    expect('web' in d.identity).toBe(false);
+  });
+
+  it('carries `web` through when the server names one', async () => {
+    reply({ enabled: true, endpoints: {}, web: 'https://hl.example/app/' });
+    const d = await fetchDiscovery('https://hl.example');
+    if (!d.identity.enabled) return;
+    expect(d.identity.web).toBe('https://hl.example/app/');
   });
 });
 

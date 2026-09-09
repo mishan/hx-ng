@@ -20,12 +20,14 @@ import {
   screenShareBlockedReason,
   VoiceSession,
   WireFailure,
+  CAP_HISTORY,
   CAP_INBOX,
   isFingerprint,
   type BlockParams,
   type ConnState,
   type Credentials,
   type InboxOk,
+  type HistoryOk,
   type MsgParams,
   type RemoteVideo,
   type User,
@@ -64,6 +66,7 @@ export class App {
   private debug: DebugPanel;
   private identityPanel: IdentityPanel;
   private pingTimer: number | null = null;
+  private historyLoading = false;
   private url = '';
   /** The store revision the transcript element was last drawn from. */
   private drawnRevision = 0;
@@ -209,6 +212,11 @@ export class App {
           );
         }
       },
+      onMissedHistory: (ok) => {
+        if (this.mergeHistory(ok, 'newer') && this.store.active === LOBBY) {
+          this.renderTranscript();
+        }
+      },
       onEnded: (reason) => {
         this.say(reason);
         this.media?.teardown();
@@ -253,6 +261,11 @@ export class App {
     // threads that still have their history, and it is also the only way
     // to see mail past `deliver_at_flush`, which the login flush caps.
     if (conn.hasCap(CAP_INBOX)) void this.loadMail({ initial: true });
+    if (conn.hasCap(CAP_HISTORY)) {
+      void this.loadHistory({ initial: true }).catch((e: Error) =>
+        this.say(e instanceof WireFailure ? errorText(e.wire) : e.message),
+      );
+    }
     this.pingTimer = window.setInterval(() => {
       if (conn.state === 'online') void conn.ping().then(() => this.renderPill());
     }, 15000);
@@ -295,11 +308,16 @@ export class App {
     });
 
     conn.on('chat', (d) => {
+      if (d.id !== undefined && this.store.hasHistory(d.id)) return;
       this.push(LOBBY, {
-        t: Date.now(),
+        // `at` is required by the current wire, but pre-history servers
+        // did not send it. Keep those servers usable while deployments
+        // roll forward.
+        t: Number.isFinite(d.at) ? d.at * 1000 : Date.now(),
         kind: styleToKind(d.style),
         from: d.from,
         text: d.text,
+        id: d.id,
       });
     });
 
@@ -461,6 +479,12 @@ export class App {
       }
       case 'mail':
         return this.loadMail();
+      case 'history':
+        if (!conn.hasCap(CAP_HISTORY)) return this.say('This server does not keep chat history.');
+        if (this.store.active !== LOBBY) return this.say('Chat history belongs to the lobby.');
+        if (this.store.historyExhausted) return this.say('That is the beginning of the conversation.');
+        await this.loadHistory();
+        return;
 
       // Blocking is account-level and outlives any session, which is why
       // it is worth doing from here rather than leaving it to an
@@ -532,7 +556,7 @@ export class App {
         return;
       case 'help':
         return this.say(
-          '/me · /msg <nick or account> <text> · /mail · /block <who> · /unblock <who> · /blocks · ' +
+          '/me · /msg <nick or account> <text> · /history · /mail · /block <who> · /unblock <who> · /blocks · ' +
             '/nick <name> · /icon <n> · /clear · /close · /drop · /debug · /logout',
         );
       default:
@@ -572,6 +596,53 @@ export class App {
     this.renderRail();
     this.renderTranscript();
     this.renderComposerHint();
+  }
+
+  // --- public chat history ---------------------------------------------
+
+  private mergeHistory(ok: HistoryOk, direction: 'older' | 'newer'): number {
+    return this.store.mergeHistory(
+      ok.lines.map((line) => ({
+        t: line.at * 1000,
+        kind: line.deleted ? 'deleted' : styleToKind(line.style),
+        from: line.deleted
+          ? undefined
+          : { nick: line.from.nick, icon: line.from.icon },
+        text: line.deleted ? 'Message deleted.' : line.text,
+        id: line.id,
+        deleted: line.deleted,
+        media: line.media,
+      })),
+      ok.has_more,
+      direction,
+    );
+  }
+
+  /** Load the newest public page at login, then page backwards whenever
+   *  the reader reaches the top. Redrawing after a prepend changes the
+   *  scroll height, so move the viewport by exactly that delta rather
+   *  than making the line under their eyes jump. */
+  private async loadHistory(opts: { initial?: boolean } = {}): Promise<void> {
+    const conn = this.conn;
+    if (!conn || this.historyLoading || !conn.hasCap(CAP_HISTORY)) return;
+    if (!opts.initial && this.store.historyExhausted) return;
+
+    this.historyLoading = true;
+    const oldHeight = this.transcript.scrollHeight;
+    const oldTop = this.transcript.scrollTop;
+    try {
+      const before = opts.initial ? undefined : this.store.oldestHistoryId;
+      const page = await conn.history(before === undefined ? {} : { before });
+      const added = this.mergeHistory(page, 'older');
+      if (added && this.store.active === LOBBY) {
+        this.renderTranscript();
+        if (!opts.initial) {
+          this.transcript.scrollTop = oldTop + this.transcript.scrollHeight - oldHeight;
+        }
+      }
+    } finally {
+      this.historyLoading = false;
+    }
   }
 
   // --- mail -------------------------------------------------------------
@@ -982,7 +1053,19 @@ export class App {
     // Opening the debug drawer, or any other resize, must not silently
     // scroll the newest line out of view.
     let pinned = true;
-    this.transcript.addEventListener('scroll', () => (pinned = isAtBottom(this.transcript)));
+    this.transcript.addEventListener('scroll', () => {
+      pinned = isAtBottom(this.transcript);
+      if (
+        !pinned &&
+        this.transcript.scrollTop < 64 &&
+        this.store.active === LOBBY &&
+        !this.store.historyExhausted
+      ) {
+        void this.loadHistory().catch((e: Error) =>
+          this.say(e instanceof WireFailure ? errorText(e.wire) : e.message),
+        );
+      }
+    });
     new ResizeObserver(() => {
       if (pinned) scrollToEnd(this.transcript);
     }).observe(this.transcript);

@@ -40,6 +40,19 @@ export function mailboxFrom(httpBase: string, endpoint: string | undefined): Mai
   return endpoint ? { base: `${httpBase}${endpoint}` } : null;
 }
 
+/** The mailbox is trusted with availability and nothing else (§9), and
+ *  that includes being well-formed: a proxy in front of it can answer
+ *  200 with an error page, and `res.json()` then rejects with the
+ *  runtime's own `SyntaxError`, which is what the user would be shown.
+ *  Every read of a body goes through here so the failure is one of ours. */
+async function readJson<T>(res: Response, what: string): Promise<T> {
+  try {
+    return (await res.json()) as T;
+  } catch {
+    throw new IdentityError('server-error', `the server's ${what} was not JSON (HTTP ${res.status})`);
+  }
+}
+
 async function errorFrom(res: Response, fallback: string): Promise<IdentityError> {
   let code: string | undefined;
   try {
@@ -67,13 +80,61 @@ export async function postEnrollRequest(
     body: JSON.stringify(body),
   });
   if (!res.ok) throw await errorFrom(res, 'the server refused this enrollment request');
-  const { request: secret } = (await res.json()) as { request: string };
-  if (!secret) throw new IdentityError('server-error', 'the server accepted the request but returned no handle');
+  const { request: secret } = await readJson<{ request?: unknown }>(res, 'answer');
+  if (typeof secret !== 'string' || !secret) {
+    throw new IdentityError('server-error', 'the server accepted the request but returned no handle');
+  }
   return secret;
 }
 
 function cancelled(): IdentityError {
   return new IdentityError('server-error', 'enrollment cancelled');
+}
+
+/**
+ * How long `awaitAnswer` will keep asking before it gives up.
+ *
+ * A well-behaved mailbox ends this itself: the request lives five
+ * minutes and the session ten, after which the answer is 410. But the
+ * mailbox is exactly the party this module does not trust, and a
+ * hostile one — or an ordinary proxy that does not understand a long
+ * poll — can answer 202 forever. Ten minutes is the longest anything in
+ * this flow legitimately takes, so past it there is nothing left to
+ * wait for.
+ */
+const POLL_DEADLINE_MS = 10 * 60_000;
+
+/**
+ * The floor between two polls.
+ *
+ * §5.5's long poll is meant to hold for up to thirty seconds, so an
+ * honest 202 costs one request per half-minute. A proxy that answers it
+ * immediately turns the loop below into a spin that pins a core and
+ * floods the network until the deadline; this makes that case merely
+ * wasteful. It costs an honest server nothing, because an honest 202
+ * has already taken far longer than this.
+ */
+const POLL_GAP_MS = 1_000;
+
+/** `setTimeout` that settles early, and rejects, if `signal` aborts —
+ *  so giving up during the gap is as prompt as giving up during a
+ *  fetch. */
+function pause(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const done = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
+    };
+    const onAbort = () => {
+      done();
+      reject(cancelled());
+    };
+    const timer = setTimeout(() => {
+      done();
+      resolve();
+    }, ms);
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
 }
 
 export type Answer =
@@ -90,8 +151,16 @@ export type Answer =
  * gives up should not leave a fetch loop running for ten minutes.
  */
 export async function awaitAnswer(mailbox: Mailbox, secret: string, signal?: AbortSignal): Promise<Answer> {
+  const deadline = Date.now() + POLL_DEADLINE_MS;
   for (;;) {
     if (signal?.aborted) throw cancelled();
+    if (Date.now() >= deadline) {
+      throw new IdentityError(
+        'server-error',
+        'the server never answered this enrollment request. Try again, or ask the holder for a new code.',
+      );
+    }
+    const started = Date.now();
     let res: Response;
     try {
       res = await fetch(`${mailbox.base}/requests/${encodeURIComponent(secret)}`, { signal });
@@ -105,13 +174,22 @@ export async function awaitAnswer(mailbox: Mailbox, secret: string, signal?: Abo
       throw e;
     }
     if (res.status === 200) {
-      const { bundle } = (await res.json()) as { bundle: string };
+      const { bundle } = await readJson<{ bundle?: unknown }>(res, 'answer');
+      if (typeof bundle !== 'string' || !bundle) {
+        throw new IdentityError('server-error', 'the server answered this enrollment with no bundle');
+      }
       return { kind: 'bundle', bundle: base64urlToBytes(bundle) };
     }
-    if (res.status === 202) continue; // still pending at the deadline
+    if (res.status === 202) {
+      // Still pending at the deadline. Only sleep for what is left of
+      // the gap: an honest long poll has already spent it.
+      const left = POLL_GAP_MS - (Date.now() - started);
+      if (left > 0) await pause(left, signal);
+      continue;
+    }
     if (res.status === 403) {
-      const { denied } = (await res.json()) as { denied?: string };
-      return { kind: 'denied', reason: denied ?? 'refused' };
+      const { denied } = await readJson<{ denied?: unknown }>(res, 'refusal');
+      return { kind: 'denied', reason: typeof denied === 'string' && denied ? denied : 'refused' };
     }
     // 410, and anything else: the request is gone, and the server will
     // not say whether it expired or was already collected.

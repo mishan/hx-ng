@@ -309,13 +309,15 @@ enrollment check in §7.1 can report.)
 
    ```
    hlid cert --device-pub 3f2a… --device-enc-pub 91c4… \
-     --caps web --days 90 --name "Firefox on the laptop" -o web.bundle
+     --caps web --days 90 --name 'Firefox on the laptop' -o cert.bin
    ```
 
-   It does not name a key file: it relies on `hlid` having a default
-   directory (§9), because a pre-filled command that guesses
-   `~/.hlid/identity.key` is only exact for someone who followed one
-   particular tutorial.
+   Exact means exact, so this is what `buildHlidCertCommand` actually
+   emits, down to the POSIX single-quoting a device name with an
+   apostrophe in it needs. It does not name a key file: it relies on
+   `hlid` having a default directory (§9), because a pre-filled command
+   that guesses `~/.hlid/identity.key` is only exact for someone who
+   followed one particular tutorial.
 
    **Linking an account is not part of this panel.** It used to print an
    `hlid link` line beside the certificate command, which meant the two
@@ -325,9 +327,9 @@ enrollment check in §7.1 can report.)
    doing both in one trip through the mailbox, and that is where linking
    should reappear; until it does, `hlid link` is a thing the user runs
    in a terminal, not a thing this panel pretends to orchestrate.
-3. The user pastes back **one blob**: `hlid cert -o web.bundle` writes
-   the certificate and the identity's current card together, base64url,
-   and the panel accepts either that or a bare certificate. The card
+3. The user pastes back the certificate, and the card beside it if they
+   have one — `hlid cert --bundle` writes both as a single blob, which
+   the panel does not read yet (§9). The card
    cannot be fetched from the server on a first visit — `GET
    /identity/card/<fingerprint>` serves what `/identity/auth` has cached,
    and this identity has never authed there — so the paste is the common

@@ -2,6 +2,11 @@
 
 Who holds which key, where it is kept, and what a page can do with it.
 
+> Every `*.md` named here without a path is a **hxd-ng** document —
+> `hotline-ng-identity.md`, `hotline-ng-auth.md`, `identity-enrollment.md`
+> and the identity threat model all live in that repository's `docs/`,
+> not this one. This is the only file in hx-ng's `docs/`.
+
 `hotline-ng-identity.md` defines two keys per person — a long-lived
 *identity key* that certifies devices and signs the user card, and a
 per-device key that signs login proofs. It does not say what a *browser*
@@ -323,7 +328,8 @@ enrollment check in §7.1 can report.)
    `hlid link` line beside the certificate command, which meant the two
    halves of "enroll this browser and use my account" were ceremonies of
    different shapes — one a code, one a pasted shell command — with
-   nothing tying them together. `identity-enrollment.md` §12 sketches
+   nothing tying them together. hxd-ng's `identity-enrollment.md`
+   §12 sketches
    doing both in one trip through the mailbox, and that is where linking
    should reappear; until it does, `hlid link` is a thing the user runs
    in a terminal, not a thing this panel pretends to orchestrate.
@@ -435,7 +441,7 @@ in the routine path.
 
 ---
 
-## 9. What this needs that does not exist yet
+## 9. What is still missing here
 
 Three of the four things this section used to ask for have landed on the
 server side, so what is left here is this client's half of them.
@@ -450,7 +456,7 @@ identity key, a device key, a certificate and a card in one step; and
 object.
 
 **What this client has not caught up with is the bundle.** `hlid cert
---bundle` writes `identity-enrollment.md` §5.4 — an unsigned CBOR map of
+--bundle` writes hxd-ng's `identity-enrollment.md` §5.4 — an unsigned CBOR map of
 a `cert` and a `card`, verified by checking both signatures and that the
 card belongs to the identity the certificate names. The panel still asks
 for "one or two base64url blobs, told apart by shape", which is what

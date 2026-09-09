@@ -31,7 +31,7 @@ import {
   validateEnrollment,
   type EnrollmentResult,
 } from '../identity/enroll';
-import { mailboxFrom, scannedMailbox, type Mailbox } from '../identity/mailbox';
+import { mailboxFrom, scannedBase, type Mailbox } from '../identity/mailbox';
 import type { Scanned } from '../identity/scan';
 import {
   attachCertificate,
@@ -158,15 +158,31 @@ export class IdentityPanel {
     // at all. A phone that followed a QR code has no connect form
     // behind it.
     if (this.scanned) {
-      this.mailbox = scannedMailbox(this.scanned.mailbox);
-      if (this.open && this.device && !this.device.cert) this.render();
+      // Discovered, not assumed: §3 makes the mailbox path something a
+      // server advertises, and hlid reads it from discovery too. A
+      // hard-coded `/identity/enroll` works only for a server that
+      // happens to use the default, and fails silently for one that
+      // does not.
+      const base = scannedBase(this.scanned.mailbox);
+      try {
+        const discovery = await fetchDiscovery(base);
+        this.mailbox = discovery.identity.enabled ? mailboxFrom(base, discovery.identity.endpoints.enroll) : null;
+      } catch {
+        this.mailbox = null;
+      }
+      if (!this.mailbox) {
+        // Worth saying, unlike the typed path below: the user pointed a
+        // camera at a code and has no server field to correct.
+        this.scanError = `${this.scanned.mailbox} is not answering, or hosts no enrollment mailbox. Scan the code again, or enroll by pasting.`;
+      }
+      this.renderIfShowing();
       return;
     }
     if (!server) {
       // Cleared rather than left alone: a code box for a server this
       // panel is no longer pointed at would post to the wrong place.
       this.mailbox = null;
-      if (this.open && this.device && !this.device.cert) this.render();
+      this.renderIfShowing();
       return;
     }
     try {
@@ -181,7 +197,15 @@ export class IdentityPanel {
       // address gets said out loud.
       this.mailbox = null;
     }
-    if (this.open && this.device && !this.device.cert) this.render();
+    this.renderIfShowing();
+  }
+
+  /** Repaint if the panel is open and there is something to paint. The
+   *  cert condition used to be here as `!this.device.cert`, on the
+   *  assumption that only an unenrolled browser has a mailbox to show —
+   *  but an enrolled one that scanned a code has one too. */
+  private renderIfShowing(): void {
+    if (this.open && this.device) this.render();
   }
 
   private render(): void {
@@ -331,6 +355,27 @@ export class IdentityPanel {
     this.waiting?.abort();
     this.waiting = new AbortController();
     try {
+      // The QR's `identity` is what the *answer* is checked against, and
+      // that is all it is: it says nothing about the identity this
+      // browser is already enrolled with. Replacing that is the same
+      // question the typed and pasted paths ask before they overwrite a
+      // pin, and a scan should not answer it silently just because it
+      // arrived with a camera.
+      if (this.scanned) {
+        const previous = await pinnedIdentity();
+        if (previous !== null && previous !== this.scanned.identity) {
+          status.hidden = true;
+          const ok = confirm(
+            `This browser was enrolled with identity ${previous}.\n\n` +
+              `The code you scanned is for ${this.scanned.identity}.\n\n` +
+              'Only continue if you meant to change identities.',
+          );
+          if (!ok) {
+            throw new IdentityError('bad-field', 'Kept the identity this browser already had; nothing was stored.');
+          }
+          status.hidden = false;
+        }
+      }
       const outcome = await enrollWithCode({
         mailbox: this.mailbox,
         code,
@@ -407,6 +452,11 @@ export class IdentityPanel {
       label: result.cert.name,
     });
     await pinIdentity(result.fingerprint);
+    // A code works once (§5.2), so the scan that carried it is spent.
+    // Left set, it kept a code box on the enrolled panel offering to
+    // enroll again from a code the mailbox has already closed.
+    this.scanned = null;
+    this.scanError = null;
     this.becameLabel = result.card.name;
     this.device = await getActiveDevice();
     this.render();
@@ -474,6 +524,12 @@ export class IdentityPanel {
             h('code', {}, (device.fingerprint ?? '').slice(0, 8)),
           )
         : null,
+      // A browser that is already a device can still be handed a QR
+      // code — to renew, or to move to another identity. Without this
+      // the scan was read, its fragment stripped from the address bar,
+      // and then dropped on the floor: nothing on screen, and nothing
+      // to retry with.
+      this.scanned || this.scanError ? this.codeSection(device) : null,
       h('p', {}, 'Enrolled as ', h('strong', {}, device.label || '(unnamed device)')),
       h('div', { class: 'field-row' }, h('span', { class: 'k' }, 'Fingerprint'), h('code', {}, device.fingerprint ?? '')),
       h('p', { class: 'muted' }, `Certificate expires ${new Date(cert.expires * 1000).toLocaleString()}.`),

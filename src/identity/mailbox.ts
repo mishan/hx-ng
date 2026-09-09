@@ -54,26 +54,20 @@ async function readJson<T>(res: Response, what: string): Promise<T> {
 }
 
 /**
- * The mailbox a scanned QR code names (§5.6), which carries a bare host
- * and no scheme.
+ * The HTTP base for a host a QR code named (§5.6), which is where its
+ * discovery document — and therefore its mailbox endpoint — is found.
  *
- * The scheme comes from the page, for two reasons that agree. A page
- * served over https cannot fetch http at all — the browser blocks mixed
- * content — so anything else would simply fail there. And taking it
- * from the page means a scan can never *downgrade* the connection: the
- * QR code has no say in it.
- *
- * A host that matches the page's own gets a page-relative base, the same
- * reasoning `wsToHttp` uses: that is the ordinary deployment, reached
- * through the reverse proxy that served the page, and in `npm run dev`
- * through Vite's proxy. Anything else is absolute and cross-origin, and
- * relies on the server's CORS headers.
+ * Page-relative when the scanned host is the one serving this page, which
+ * is the ordinary deployment: the app and the server behind the same
+ * name. That keeps the request same-origin, so it needs no CORS headers
+ * and works in production through the reverse proxy that served the page,
+ * and in `npm run dev` through Vite's proxy. Anything else is absolute
+ * and cross-origin, and relies on the server's CORS headers.
  */
-export function scannedMailbox(host: string): Mailbox {
-  const endpoint = '/identity/enroll';
-  if (typeof location === 'undefined') return { base: `https://${host}${endpoint}` };
-  if (host === location.host || host === location.hostname) return { base: endpoint };
-  return { base: `${location.protocol}//${host}${endpoint}` };
+export function scannedBase(host: string): string {
+  if (typeof location === 'undefined') return `https://${host}`;
+  if (host === location.host || host === location.hostname) return '';
+  return `${location.protocol}//${host}`;
 }
 
 async function errorFrom(res: Response, fallback: string): Promise<IdentityError> {

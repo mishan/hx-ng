@@ -89,8 +89,11 @@ bind = "127.0.0.1:${ngPort}"
 key = "identity-server.key"
 new_accounts = "guest"
 unattested = "guest"
-# So hlid enroll draws a QR code, and points it at this dev server,
-# which is where the test's page actually lives.
+# Where the test's page actually lives — a different origin from this
+# server, which is the ordinary split-origin deployment and also why the
+# enroll runs below pass --web. A QR is drawn for a server-advertised
+# client only on the server's own origin: the fragment carries the
+# pairing secret, and a mailbox free to name any origin could collect it.
 web = "http://localhost:5701/"
 `,
   );

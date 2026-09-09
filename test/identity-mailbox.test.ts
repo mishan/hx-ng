@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { IdentityError, bytesToBase64url, hexToBytes } from '@hotline-ng/client';
 
-import { awaitAnswer, mailboxFrom, postEnrollRequest, scannedMailbox } from '../src/identity/mailbox';
+import { awaitAnswer, mailboxFrom, postEnrollRequest, scannedBase } from '../src/identity/mailbox';
 import vectors from '../packages/hotline-ng/test/identity-vectors.json';
 
 const MAILBOX = { base: 'https://hl.example/identity/enroll' };
@@ -56,7 +56,7 @@ describe('mailboxFrom', () => {
   });
 });
 
-describe('scannedMailbox', () => {
+describe('scannedBase', () => {
   afterEach(() => vi.unstubAllGlobals());
 
   it('takes the scheme from the page, never from the QR code', () => {
@@ -64,17 +64,26 @@ describe('scannedMailbox', () => {
     // from the page means a scanned code can never downgrade the
     // connection — it has no say in it.
     vi.stubGlobal('location', { protocol: 'https:', host: 'app.example', hostname: 'app.example' });
-    expect(scannedMailbox('hl.example').base).toBe('https://hl.example/identity/enroll');
+    expect(scannedBase('hl.example')).toBe('https://hl.example');
 
     vi.stubGlobal('location', { protocol: 'http:', host: 'localhost:5701', hostname: 'localhost' });
-    expect(scannedMailbox('127.0.0.1:5700').base).toBe('http://127.0.0.1:5700/identity/enroll');
+    expect(scannedBase('127.0.0.1:5700')).toBe('http://127.0.0.1:5700');
   });
 
   it('is page-relative when the scan names this page own host', () => {
     // The ordinary deployment: reached through the same reverse proxy
     // that served the page, and in `npm run dev` through Vite's proxy.
     vi.stubGlobal('location', { protocol: 'https:', host: 'hl.example', hostname: 'hl.example' });
-    expect(scannedMailbox('hl.example').base).toBe('/identity/enroll');
+    expect(scannedBase('hl.example')).toBe('');
+  });
+
+  it('is a base for discovery, not a mailbox path of its own', () => {
+    // §3 makes the mailbox endpoint something the server advertises,
+    // and hlid reads it from discovery. A hard-coded `/identity/enroll`
+    // here worked only for a server that happened to use the default.
+    vi.stubGlobal('location', { protocol: 'https:', host: 'app.example', hostname: 'app.example' });
+    const base = scannedBase('hl.example');
+    expect(mailboxFrom(base, '/enroll')).toEqual({ base: 'https://hl.example/enroll' });
   });
 });
 

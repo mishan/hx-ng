@@ -179,7 +179,9 @@ test.describe('identity: enrollment and login against a real hxd-ng server', () 
 
     const holder = hlidEnroll(
       hlidDir,
-      ['--server', `http://127.0.0.1:${NG_PORT}`, '--show-url'],
+      // `--web` because the page is on another origin from the server:
+      // the user says where the QR points, rather than the server.
+      ['--server', `http://127.0.0.1:${NG_PORT}`, '--web', 'http://localhost:5701/', '--show-url'],
       true,
     );
     const url = await holder.scanUrl;
@@ -213,5 +215,48 @@ test.describe('identity: enrollment and login against a real hxd-ng server', () 
     // did not ask for the comparison either.
     expect(holder.output()).toContain('(scanned)');
     expect(holder.output()).not.toContain('Compare the device fingerprint');
+
+    // --- Already a device, and handed another code ----------------------
+    // The panel read the fragment, cleared it from the address bar, and
+    // then drew the enrolled view — which had no code box in it. The
+    // scan vanished with nothing on screen and nothing to retry with,
+    // because the fragment was already gone.
+    const again = hlidEnroll(hlidDir, ['--server', `http://127.0.0.1:${NG_PORT}`, '--web', 'http://localhost:5701/', '--show-url'], true);
+    const againUrl = await again.scanUrl;
+    // `goto` to a fragment on the page already loaded is a same-document
+    // navigation and re-runs nothing; the reload is what makes this a
+    // scan rather than a no-op.
+    await page.goto(`/${againUrl.slice(againUrl.indexOf('#'))}`);
+    await page.reload();
+    await expect(page.locator('.identity-body .code-entry')).toBeVisible({ timeout: 10_000 });
+    await expect(page.locator('.identity-body')).toContainText('Enrolled as');
+    again.stop();
+
+    // --- And one for somebody else's identity ---------------------------
+    // The QR's `identity` is checked against the *answer*; it says
+    // nothing about the identity this browser already has. Overwriting
+    // that is the question the typed and pasted paths both ask, and a
+    // scan should not answer it silently.
+    const bobDir = mkdtempSync(join(tmpdir(), 'hlid-scan-e2e-bob-'));
+    hlid(bobDir, ['init', '--name', 'Bob']);
+    const bob = hlidEnroll(bobDir, ['--server', `http://127.0.0.1:${NG_PORT}`, '--web', 'http://localhost:5701/', '--show-url'], true);
+    const bobUrl = await bob.scanUrl;
+    await page.goto(`/${bobUrl.slice(bobUrl.indexOf('#'))}`);
+    await page.reload();
+    await expect(page.locator('.identity-body .code-entry')).toBeVisible({ timeout: 10_000 });
+
+    let asked = '';
+    page.once('dialog', (d) => {
+      asked = d.message();
+      void d.dismiss();
+    });
+    await page.getByRole('button', { name: 'Enroll with code' }).click();
+    await expect.poll(() => asked, { timeout: 10_000 }).toContain('Only continue if you meant to change identities');
+    expect(asked).toContain(fingerprint!);
+
+    // Dismissed, so nothing was stored: still Alice's device.
+    await expect(page.locator('.identity-body')).toContainText('Kept the identity this browser already had');
+    await expect(page.locator('.identity-body')).toContainText('Enrolled as');
+    bob.stop();
   });
 });

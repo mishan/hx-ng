@@ -63,3 +63,28 @@ describe('parseScanFragment', () => {
     );
   });
 });
+
+describe('parseScanFragment, on a mailbox that is not a bare host', () => {
+  it('refuses values that would move where the request is posted', () => {
+    // This value is concatenated into the URL the enrollment request
+    // goes to, so an unchecked one redirects it: `@` makes the real
+    // host a userinfo field, a slash moves the path, and `?` or `#`
+    // swallows the rest of the URL outright.
+    for (const bad of [
+      'evil.com@hl.example',
+      'hl.example/extra',
+      'hl.example#x',
+      'hl.example?a=b',
+      'hl.example:99999999',
+      'hl example',
+      '',
+    ]) {
+      expect(() => parseScanFragment(fragment({ mailbox: bad })), bad).toThrow(IdentityError);
+    }
+  });
+
+  it('accepts a bare host, with or without a port', () => {
+    expect(parseScanFragment(fragment({ mailbox: 'hl.example' }))!.mailbox).toBe('hl.example');
+    expect(parseScanFragment(fragment({ mailbox: '127.0.0.1:5700' }))!.mailbox).toBe('127.0.0.1:5700');
+  });
+});

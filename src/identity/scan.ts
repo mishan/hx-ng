@@ -55,10 +55,20 @@ export function parseScanFragment(fragment: string): Scanned | null {
   if (!code) return null;
 
   const mailbox = params.get('mailbox');
+  // Validated, not just carried: this value is concatenated into the URL
+  // the enrollment request is posted to, so an unchecked one redirects
+  // it. `evil.com@hl.example` makes the real host a userinfo field,
+  // `hl.example/extra` moves the path, and a `?` or `#` swallows the
+  // rest outright. A bare host, optionally with a port, is the only
+  // thing §5.6 means by `mailbox`.
+  const bareHost = /^[a-z0-9.-]+(:[0-9]{1,5})?$/i;
   const identity = params.get('identity');
   const pair = params.get('pair');
   if (!mailbox || !identity || !pair) {
     throw new IdentityError('bad-field', 'this enrollment link is incomplete — scan the code again');
+  }
+  if (!bareHost.test(mailbox)) {
+    throw new IdentityError('bad-field', 'this enrollment link names a malformed mailbox');
   }
   // 52 Crockford digits, the form `Fingerprint` prints.
   if (!/^[0-9a-hjkmnp-tv-z]{52}$/.test(identity)) {

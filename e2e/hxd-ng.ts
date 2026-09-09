@@ -137,12 +137,21 @@ export function hlidEnroll(cwd: string, args: string[], approve: boolean): HlidE
     resolveCode = resolve;
     setTimeout(() => reject(new Error(`hlid enroll showed no code:\n${output}`)), 30_000).unref();
   });
-  // Only present with `--show-url`, and only when the server named a web
-  // client — so a caller that does not ask for it never awaits this.
+  // Only meaningful with `--show-url`; without it there is no URL to
+  // wait for and the timeout is not armed, so this simply never settles
+  // and no caller has any business awaiting it.
+  const wantsUrl = args.includes('--show-url');
   const scanUrl = new Promise<string>((resolve, reject) => {
     resolveUrl = resolve;
-    setTimeout(() => reject(new Error(`hlid enroll showed no scan URL:\n${output}`)), 30_000).unref();
+    if (wantsUrl) {
+      setTimeout(() => reject(new Error(`hlid enroll showed no scan URL:\n${output}`)), 30_000).unref();
+    }
   });
+  // A rejection nobody is waiting for is an unhandled rejection, and in
+  // Playwright that fails whichever test happens to be running. This
+  // handler does not consume it — `await holder.scanUrl` still sees the
+  // rejection — it only says somebody is watching.
+  void scanUrl.catch(() => {});
   child.stderr.on('data', (chunk: Buffer) => {
     output += chunk.toString();
     // The same eight characters and hyphen a user reads off the screen.

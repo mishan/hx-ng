@@ -113,10 +113,6 @@ unattested = "guest"
   };
 }
 
-/** Runs `hlid` and returns its stdout — `keygen`'s public key and
- *  fingerprint lines, in particular. Throws with stderr attached on a
- *  non-zero exit, which is always a paste-worthy diagnostic here (a bad
- *  argument, a rejected field) rather than something to recover from. */
 /**
  * `hlid enroll`, which does not exit until a device asks — so unlike
  * {@link hlid} it has to be driven while it runs: read the pairing code
@@ -167,6 +163,10 @@ export interface HlidEnroll {
   stop: () => void;
 }
 
+/** Runs `hlid` and returns its stdout — `keygen`'s public key and
+ *  fingerprint lines, in particular. Throws with stderr attached on a
+ *  non-zero exit, which is always a paste-worthy diagnostic here (a bad
+ *  argument, a rejected field) rather than something to recover from. */
 export function hlid(cwd: string, args: string[]): string {
   // HLID_HOME, always: `hlid init` and every flag fallback default to
   // ~/.hlid, and a test that writes an identity into the home directory

@@ -319,7 +319,7 @@ enrollment check in §7.1 can report.)
 
    ```
    hlid cert --device-pub 3f2a… --device-enc-pub 91c4… \
-     --caps web --days 90 --name 'Firefox on the laptop' -o cert.bin
+     --caps web --days 90 --name 'Firefox on the laptop' --bundle -o web.bundle
    ```
 
    Exact means exact, so this is what `buildHlidCertCommand` actually
@@ -338,9 +338,10 @@ enrollment check in §7.1 can report.)
    doing both in one trip through the mailbox, and that is where linking
    should reappear; until it does, `hlid link` is a thing the user runs
    in a terminal, not a thing this panel pretends to orchestrate.
-3. The user pastes back the certificate, and the card beside it if they
-   have one — `hlid cert --bundle` writes both as a single blob, which
-   the panel does not read yet (§9). The card
+3. The user pastes back **one blob**: `--bundle` writes the certificate
+   and the identity's current card together, and the panel also accepts
+   a bare certificate, or a certificate and a card as two blobs. The
+   card
    cannot be fetched from the server on a first visit — `GET
    /identity/card/<fingerprint>` serves what `/identity/auth` has cached,
    and this identity has never authed there — so the paste is the common

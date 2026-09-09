@@ -25,6 +25,8 @@ describe('buildHlidCertCommand', () => {
     expect(cmd).toContain('--caps web');
     expect(cmd).toContain('--days 90');
     expect(cmd).toContain("'Firefox'");
+    // One blob to paste, and the same object the mailbox path carries.
+    expect(cmd).toContain('--bundle');
   });
 
   it('shell-quotes a name, server, or login that would otherwise break the command', () => {

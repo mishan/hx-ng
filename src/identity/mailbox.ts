@@ -72,6 +72,10 @@ export async function postEnrollRequest(
   return secret;
 }
 
+function cancelled(): IdentityError {
+  return new IdentityError('server-error', 'enrollment cancelled');
+}
+
 export type Answer =
   | { kind: 'bundle'; bundle: Uint8Array }
   | { kind: 'denied'; reason: string }
@@ -87,8 +91,19 @@ export type Answer =
  */
 export async function awaitAnswer(mailbox: Mailbox, secret: string, signal?: AbortSignal): Promise<Answer> {
   for (;;) {
-    if (signal?.aborted) throw new IdentityError('server-error', 'enrollment cancelled');
-    const res = await fetch(`${mailbox.base}/requests/${encodeURIComponent(secret)}`, { signal });
+    if (signal?.aborted) throw cancelled();
+    let res: Response;
+    try {
+      res = await fetch(`${mailbox.base}/requests/${encodeURIComponent(secret)}`, { signal });
+    } catch (e) {
+      // A poll aborted mid-flight rejects with the runtime's own
+      // `AbortError`, which is a different type and a different message
+      // from the one the caller gets when it aborts between polls.
+      // Callers show these to people; one cancellation should not have
+      // two shapes.
+      if (signal?.aborted) throw cancelled();
+      throw e;
+    }
     if (res.status === 200) {
       const { bundle } = (await res.json()) as { bundle: string };
       return { kind: 'bundle', bundle: base64urlToBytes(bundle) };

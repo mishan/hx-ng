@@ -117,6 +117,11 @@ export class IdentityPanel {
     }
     if (this.device || this.unsupported) this.render();
     else void this.load();
+    // Every open, not only the first: the server field can change
+    // between them, discovery can have failed the first time, and a
+    // mailbox that has since appeared or gone away should be reflected
+    // rather than remembered.
+    void this.findMailbox();
   }
 
   private async load(): Promise<void> {
@@ -136,7 +141,13 @@ export class IdentityPanel {
 
   private async findMailbox(): Promise<void> {
     const server = this.serverUrl().trim();
-    if (!server) return;
+    if (!server) {
+      // Cleared rather than left alone: a code box for a server this
+      // panel is no longer pointed at would post to the wrong place.
+      this.mailbox = null;
+      if (this.open && this.device && !this.device.cert) this.render();
+      return;
+    }
     try {
       const httpBase = wsToHttp(server);
       const discovery = await fetchDiscovery(httpBase);
@@ -197,7 +208,7 @@ export class IdentityPanel {
       h(
         'p',
         { class: 'note' },
-        "This writes just the certificate — paste it below, and this identity's card too if you have it separately (a second browser can skip the card; the server already has it cached). hlid can write both as one blob with --bundle; this panel does not read that format yet (docs/identity-keys.md §9).",
+        "Paste back what it writes. `hlid cert --bundle` puts the certificate and this identity's card in one blob, which is the easiest thing to paste; a bare certificate works too, and so does a certificate and a card as two blobs (a second browser can skip the card — the server already has it cached).",
       ),
       h('h3', {}, this.mailbox ? 'Paste it back' : '2. Paste it back'),
       paste,

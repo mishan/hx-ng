@@ -53,7 +53,11 @@ export function buildHlidCertCommand(
 ): string {
   const days = opts.days ?? 90;
   const name = opts.name ?? 'browser';
-  return `hlid cert --device-pub ${devicePubHex} --device-enc-pub ${deviceEncPubHex} --caps web --days ${days} --name ${shq(name)} -o cert.bin`;
+  // `--bundle` writes the certificate and this identity's card as one
+  // object, which is one blob to paste instead of two and — the part
+  // that matters — the same object the mailbox path carries, so both
+  // routes end at the same verifier.
+  return `hlid cert --device-pub ${devicePubHex} --device-enc-pub ${deviceEncPubHex} --caps web --days ${days} --name ${shq(name)} --bundle -o web.bundle`;
 }
 
 export interface ParsedPaste {

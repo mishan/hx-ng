@@ -109,4 +109,24 @@ describe('awaitAnswer', () => {
     fakeFetch([]);
     await expect(awaitAnswer(MAILBOX, 's', controller.signal)).rejects.toThrow(IdentityError);
   });
+
+  it('reports an abort mid-flight the same way as one between polls', async () => {
+    // The long poll is up to thirty seconds, so aborting *during* a
+    // fetch is the ordinary case, not the edge one. It rejects with the
+    // runtime's own AbortError, and a caller showing this to somebody
+    // should not get two different shapes for one cancellation.
+    const controller = new AbortController();
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        controller.abort();
+        const e = new Error('The operation was aborted.');
+        e.name = 'AbortError';
+        throw e;
+      }),
+    );
+    const err = await awaitAnswer(MAILBOX, 's', controller.signal).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(IdentityError);
+    expect((err as Error).message).toMatch(/cancelled/);
+  });
 });

@@ -95,6 +95,14 @@ unattested = "guest"
 # client only on the server's own origin: the fragment carries the
 # pairing secret, and a mailbox free to name any origin could collect it.
 web = "http://localhost:5701/"
+# The default is 4, and it is right for a deployment. This suite is not
+# one: every test here is a different holder on 127.0.0.1 against one
+# server, and a holder that is killed rather than closed leaves its
+# session in the mailbox for the full ten-minute TTL. So the limit
+# counts the whole suite as a single abusive client. Raised rather than
+# worked around, because the alternative — a server per test — would
+# cost more than it proves.
+enroll_per_address = 64
 `,
   );
   const proc: ChildProcessWithoutNullStreams = spawn(bin('hxd'), ['--config', 'hxd-ng.toml'], {

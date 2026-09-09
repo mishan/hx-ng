@@ -471,14 +471,23 @@ agent`. It happens at startup, fire-and-forget — with nothing listening
 it is one 404 and the renewal banner goes on nagging, which is the
 fallback to a code and then to the paste.
 
-Two things it does not do. It does not paper over a denial: what the
+It asks for the lifetime the certificate already has, not the panel's
+ninety-day default: the holder grants the shorter of what was asked and
+its own policy, so a renewal nobody asked for would otherwise quietly
+shorten a longer certificate every time it ran. A renewal changes the
+expiry date and nothing else.
+
+Three things it does not do. It does not paper over a denial: what the
 ninety-day lifetime bounds is how long a *copied* browser profile keeps
 logging in as you, and a renewal prompt for a browser its owner was not
 using is the one signal that copy gives, so a "no" is worth surfacing.
-And it does not ask about a renewal that comes back from a different
+It does not ask about a renewal that comes back from a different
 identity — unlike a first enrollment, where a changed fingerprint might
 be a user changing identities, a renewal was addressed to somebody
-specific, and an answer from anywhere else is simply wrong.
+specific, and an answer from anywhere else is simply wrong. And it does
+not announce itself as a first enrollment: with the panel open it says
+the certificate was renewed, which is what just happened, rather than
+repeating whose device this became months ago.
 
 ---
 

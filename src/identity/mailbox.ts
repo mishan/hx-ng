@@ -63,10 +63,17 @@ async function readJson<T>(res: Response, what: string): Promise<T> {
  * and works in production through the reverse proxy that served the page,
  * and in `npm run dev` through Vite's proxy. Anything else is absolute
  * and cross-origin, and relies on the server's CORS headers.
+ *
+ * `location.host` and not `location.hostname`: the two differ exactly
+ * when the page carries a non-default port, and that is the case where
+ * treating them as equal is wrong. A page at `example.com:8443` reading
+ * a QR code for `example.com` — port 443, a different server — would
+ * take the page-relative branch and post the enrollment request back to
+ * 8443, which is the one place the code said not to send it.
  */
 export function scannedBase(host: string): string {
   if (typeof location === 'undefined') return `https://${host}`;
-  if (host === location.host || host === location.hostname) return '';
+  if (host === location.host) return '';
   return `${location.protocol}//${host}`;
 }
 

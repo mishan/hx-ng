@@ -19,7 +19,7 @@ import { readFileSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { expect, test } from '@playwright/test';
+import { expect, test, type Page } from '@playwright/test';
 
 import {
   buildHxdNg,
@@ -268,6 +268,47 @@ test.describe('identity: enrollment and login against a real hxd-ng server', () 
     bob.stop();
   });
 
+  /**
+   * Enroll this browser with a certificate that is already most of the
+   * way through its life, by *backdating the certificate* rather than
+   * moving the page's clock.
+   *
+   * That distinction is the whole point. `hlid` is a separate process
+   * with the real clock, and a browser whose clock disagrees with it by
+   * seventy days does not have a renewal problem — it has a clock
+   * problem, and the holder rejects its request as a replay
+   * (`identity-enrollment.md` §4), exactly as the server rejects its
+   * login proof. Faking the elapsed time on one side only tested a
+   * client that could not log in either. Backdating the certificate
+   * puts both clocks in the present, where they belong.
+   */
+  async function enrollAged(page: Page, hlidDir: string, ageDays: number): Promise<void> {
+    await page.goto('/');
+    await page.getByRole('button', { name: 'Identity keys…' }).click();
+    const keyRows = page.locator('.identity-body .field-row code');
+    const devicePub = await keyRows.nth(0).textContent();
+    const deviceEncPub = await keyRows.nth(1).textContent();
+
+    const issued = Math.floor(Date.now() / 1000) - ageDays * 24 * 3600;
+    hlid(hlidDir, [
+      'cert',
+      '--device-pub', devicePub!,
+      '--device-enc-pub', deviceEncPub!,
+      '--caps', 'web',
+      '--days', '90',
+      '--issued', String(issued),
+      '--name', 'Aged',
+      '--bundle',
+      '-o', 'aged.bundle',
+    ]);
+    const bundle = readFileSync(join(hlidDir, 'aged.bundle')).toString('base64url');
+    await page.locator('.identity-body textarea.paste').fill(bundle);
+    await page.getByRole('button', { name: 'Enroll from paste' }).click();
+    await expect(page.locator('.identity-body')).toContainText('This browser is now a device of', {
+      timeout: 20_000,
+    });
+  }
+
   test('renews itself with no code, against a running hlid agent', async ({ page }) => {
     // identity-enrollment.md §8: from one-third of its lifetime
     // remaining a browser posts its old certificate, and the mailbox
@@ -276,48 +317,173 @@ test.describe('identity: enrollment and login against a real hxd-ng server', () 
     const hlidDir = mkdtempSync(join(tmpdir(), 'hlid-renew-e2e-'));
     hlid(hlidDir, ['init', '--name', 'Alice']);
 
-    const agent = hlidAgent(hlidDir, ['--server', `http://127.0.0.1:${NG_PORT}`, '--renew', 'auto']);
-    const code = await agent.code;
-
-    // The page's clock is controlled from the start, so that time can be
-    // moved past two-thirds of the certificate's life without waiting
-    // sixty days for it. `hlid` is a separate process and keeps the real
-    // clock, which is what makes the renewed certificate genuinely new.
-    const start = Date.now();
-    await page.clock.install({ time: start });
-    await page.goto('/');
-
-    await page.getByRole('button', { name: 'Identity keys…' }).click();
-    const codeBox = page.locator('.identity-body .code-entry');
-    await expect(codeBox).toBeVisible({ timeout: 10_000 });
-    await codeBox.fill(code);
-    await page.getByRole('button', { name: 'Enroll with code' }).click();
-    await expect(page.locator('.identity-body')).toContainText('This browser is now a device of', {
-      timeout: 20_000,
-    });
-    // Seventy days on: past two-thirds of ninety, so the client should
+    // Seventy days into ninety: past two-thirds, so the client should
     // decide a renewal is due the next time it starts.
-    await page.clock.setSystemTime(start + 70 * 24 * 3600 * 1000);
-    await page.reload();
+    await enrollAged(page, hlidDir, 70);
+    const before = await page.locator('.identity-body').textContent();
+
+    const agent = hlidAgent(hlidDir, ['--server', `http://127.0.0.1:${NG_PORT}`, '--renew', 'auto']);
+    await agent.code;
 
     // No code box, no button, no prompt in the browser: the renewal
     // happens on its own at startup. The agent approves it because it
     // was started with --renew auto.
+    await page.reload();
     await page.getByRole('button', { name: 'Identity keys…' }).click();
     await expect(page.locator('.identity-body')).toContainText('renewed automatically', {
       timeout: 20_000,
     });
+    // A genuinely new certificate: the expiry moved.
+    await expect(page.locator('.identity-body')).not.toHaveText(before!);
 
     // And it reached the agent as a *renewal*, not as another
     // enrollment: it was routed by identity with no code, and approved
-    // without a prompt because of --renew auto. The certificate's own
-    // expiry is no use as evidence here — the agent signs both with the
-    // same ninety-day policy, seconds apart on the real clock.
+    // without a prompt because of --renew auto.
     expect(agent.output()).toContain('Renew');
     expect(agent.output()).toContain('yes (--renew auto)');
 
     // The agent is still up, still holding the identity — the part
     // `hlid enroll` could not do.
     agent.stop();
+  });
+
+  test('renews for the lifetime it already had, not the panel default', async ({ page }) => {
+    // The holder grants min(asked, its policy), so an automatic renewal
+    // that asked for the panel's ninety-day default would quietly
+    // shorten a longer certificate every time it ran — and the panel's
+    // default is what `certDays` is at startup, before the user has
+    // touched the day buttons. A renewal nobody asked for moves the
+    // expiry date and changes nothing else.
+    const hlidDir = mkdtempSync(join(tmpdir(), 'hlid-renew-days-e2e-'));
+    hlid(hlidDir, ['init', '--name', 'Alice']);
+
+    await page.goto('/');
+    await page.getByRole('button', { name: 'Identity keys…' }).click();
+    const keyRows = page.locator('.identity-body .field-row code');
+    const devicePub = await keyRows.nth(0).textContent();
+    const deviceEncPub = await keyRows.nth(1).textContent();
+
+    // A 365-day certificate, 300 days in: past two-thirds, and longer
+    // than the panel would ever ask for on its own.
+    const issued = Math.floor(Date.now() / 1000) - 300 * 24 * 3600;
+    hlid(hlidDir, [
+      'cert',
+      '--device-pub', devicePub!,
+      '--device-enc-pub', deviceEncPub!,
+      '--caps', 'web',
+      '--days', '365',
+      '--issued', String(issued),
+      '--name', 'Long-lived',
+      '--bundle',
+      '-o', 'long.bundle',
+    ]);
+    const bundle = readFileSync(join(hlidDir, 'long.bundle')).toString('base64url');
+    await page.locator('.identity-body textarea.paste').fill(bundle);
+    await page.getByRole('button', { name: 'Enroll from paste' }).click();
+    await expect(page.locator('.identity-body')).toContainText('This browser is now a device of', {
+      timeout: 20_000,
+    });
+
+    // The agent's own policy has to allow it, or the floor would be the
+    // holder's rather than the client's ask, and this would pass either
+    // way.
+    const agent = hlidAgent(hlidDir, [
+      '--server', `http://127.0.0.1:${NG_PORT}`,
+      '--renew', 'auto',
+      '--days', '365',
+    ]);
+    await agent.code;
+
+    await page.reload();
+    await page.getByRole('button', { name: 'Identity keys…' }).click();
+    await expect(page.locator('.identity-body')).toContainText('renewed automatically', {
+      timeout: 20_000,
+    });
+
+    // Roughly a year out, not roughly ninety days: the renewal kept the
+    // lifetime the certificate already had.
+    const expiry = /Certificate expires ([^.]+)\./.exec(
+      (await page.locator('.identity-body').textContent()) ?? '',
+    )?.[1];
+    expect(expiry).toBeTruthy();
+    const daysOut = (Date.parse(expiry!) - Date.now()) / 86_400_000;
+    expect(daysOut).toBeGreaterThan(300);
+
+    agent.stop();
+  });
+
+  test('says it renewed itself even with the panel already open', async ({ page }) => {
+    // The panel being closed is the easy case: `keep` has nothing to
+    // paint on, and the notice survives to the next open. With the panel
+    // open the paint is the one the user is looking at, and it used to
+    // read "this browser is now a device of Alice" — true months ago,
+    // not what just happened — because `keep` announced a first
+    // enrollment unconditionally and the renewal flag was set after the
+    // render that would have shown it.
+    const hlidDir = mkdtempSync(join(tmpdir(), 'hlid-renew-open-e2e-'));
+    hlid(hlidDir, ['init', '--name', 'Alice']);
+    await enrollAged(page, hlidDir, 70);
+
+    const agent = hlidAgent(hlidDir, ['--server', `http://127.0.0.1:${NG_PORT}`, '--renew', 'auto']);
+    await agent.code;
+
+    // The renewal's answer is held back so that it certainly arrives
+    // *after* the panel is open. Without this the whole thing is over
+    // before the first click on loopback, which is the closed-panel case
+    // — the one that already worked, and the reason this bug was not
+    // visible from a local run.
+    await page.route('**/identity/enroll/requests/*', async (route) => {
+      await new Promise((r) => setTimeout(r, 2000));
+      await route.continue();
+    });
+
+    await page.reload();
+    await page.getByRole('button', { name: 'Identity keys…' }).click();
+
+    const body = page.locator('.identity-body');
+    await expect(body).toContainText('renewed automatically', { timeout: 20_000 });
+    await expect(body).not.toContainText('This browser is now a device of');
+
+    agent.stop();
+  });
+
+  test('offers "Renew now" the first time the panel is opened', async ({ page }) => {
+    // The renewal banner needs the mailbox, and discovery is a round
+    // trip that lands after the first paint. Repainting for it used to
+    // be skipped for a device that had a certificate — which is every
+    // device that could possibly renew — so the button was missing until
+    // something else happened to repaint, and the copy that did appear
+    // had closed over a null mailbox and did nothing when clicked.
+    //
+    // No agent is running here on purpose: this is about the button
+    // being offered and actually reaching the mailbox, so `no_holder`
+    // coming back is the proof it went somewhere.
+    const hlidDir = mkdtempSync(join(tmpdir(), 'hlid-banner-e2e-'));
+    hlid(hlidDir, ['init', '--name', 'Alice']);
+    await enrollAged(page, hlidDir, 70);
+
+    // Discovery held back, so the panel certainly paints before the
+    // answer lands. On loopback it usually wins the race on its own,
+    // which is exactly why this bug survived: the ordering that breaks
+    // it is the one a real network produces and a local test does not.
+    await page.route('**/.well-known/hotline', async (route) => {
+      await new Promise((r) => setTimeout(r, 1500));
+      await route.continue();
+    });
+
+    // A fresh page: the first open of the panel is the one under test.
+    await page.reload();
+    await page.getByRole('button', { name: 'Identity keys…' }).click();
+    // Painted, and with no mailbox yet — so the button below can only
+    // appear if the answer to discovery repaints the enrolled view.
+    await expect(page.locator('.identity-body')).toContainText('Enrolled as');
+
+    const renew = page.getByRole('button', { name: 'Renew now' });
+    await expect(renew).toBeVisible({ timeout: 20_000 });
+
+    await renew.click();
+    await expect(page.locator('.identity-body')).toContainText('Nothing is listening', {
+      timeout: 20_000,
+    });
   });
 });

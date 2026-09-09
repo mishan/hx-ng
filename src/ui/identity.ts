@@ -208,8 +208,7 @@ export class IdentityPanel {
    *  cert condition used to be here as `!this.device.cert`, on the
    *  assumption that only an unenrolled browser has a mailbox to show —
    *  but an enrolled one that scanned a code has one too. */
-  private renderIfShowing(): void {
-    if (this.open && this.device) this.render();
+  private renderIfShowing(): void {    if (this.open && this.device) this.render();
   }
 
   private render(): void {
@@ -423,11 +422,11 @@ export class IdentityPanel {
           if (!ok) {
             throw new IdentityError('bad-field', 'Kept the identity this browser already had; nothing was stored.');
           }
-          await this.keep(device, outcome.cert, outcome.card, outcome.result);
+          await this.keep(device, outcome.cert, outcome.card, outcome.result, 'enrolled');
           break;
         }
         case 'enrolled':
-          await this.keep(device, outcome.cert, outcome.card, outcome.result);
+          await this.keep(device, outcome.cert, outcome.card, outcome.result, 'enrolled');
           break;
       }
     } catch (e) {
@@ -442,11 +441,22 @@ export class IdentityPanel {
 
   /** Store a certificate that has already been validated, whichever way
    *  it arrived, and pin the identity it names. */
+  /**
+   * Store what arrived and repaint.
+   *
+   * `news` is what the panel should say about it, and it is a parameter
+   * because the three cases are genuinely different. Announcing a first
+   * enrollment unconditionally meant an automatic renewal with the panel
+   * open said "this browser is now a device of Alice" — which it has
+   * been for months — and never said the one thing that had actually
+   * just happened.
+   */
   private async keep(
     device: StoredDevice,
     cert: Uint8Array,
     card: Uint8Array,
     result: EnrollmentResult,
+    news: 'enrolled' | 'renewed' | 'renewed-quietly',
   ): Promise<void> {
     await attachCertificate(device.devicePub, {
       cert,
@@ -461,9 +471,17 @@ export class IdentityPanel {
     // enroll again from a code the mailbox has already closed.
     this.scanned = null;
     this.scanError = null;
-    this.becameLabel = result.card.name;
+    // Set before the render that reads them, so the notice appears on
+    // this paint rather than whenever the panel is next opened.
+    this.becameLabel = news === 'enrolled' ? result.card.name : null;
+    this.renewedQuietly = news === 'renewed-quietly';
     this.device = await getActiveDevice();
-    this.render();
+    // Only when there is something to paint on. Both notices clear
+    // themselves as they render — that is what keeps them from becoming
+    // furniture — so painting a closed panel would spend the news on a
+    // body nobody is looking at. An automatic renewal at startup is
+    // exactly that case, and `toggle` renders when the panel is opened.
+    if (this.open) this.render();
   }
 
   private async submitPaste(device: StoredDevice, raw: string, error: HTMLElement, btn: HTMLButtonElement): Promise<void> {
@@ -500,7 +518,7 @@ export class IdentityPanel {
         );
         if (!ok) throw new IdentityError('bad-field', 'Kept the identity this browser already had; nothing was stored.');
       }
-      await this.keep(device, parsed.cert, cardBytes, result);
+      await this.keep(device, parsed.cert, cardBytes, result, 'enrolled');
     } catch (e) {
       error.textContent = e instanceof Error ? e.message : String(e);
       error.hidden = false;
@@ -566,13 +584,17 @@ export class IdentityPanel {
         device,
         prev: device.cert,
         name: cert.name,
-        days: this.certDays,
+        // The lifetime this certificate already has, not the panel's
+        // default. The holder grants `min(asked, its policy)`, so asking
+        // for 90 — which is what `certDays` is at startup, before the
+        // user has touched anything — would quietly shorten a longer
+        // certificate every time it renewed itself. A renewal nobody
+        // asked for should change the expiry date and nothing else.
+        days: certLifetimeDays(cert),
         pinned: device.fingerprint,
       });
       if (outcome.kind !== 'renewed') return;
-      await this.keep(device, outcome.cert, outcome.card, outcome.result);
-      this.renewedQuietly = true;
-      this.becameLabel = null;
+      await this.keep(device, outcome.cert, outcome.card, outcome.result, 'renewed-quietly');
     } catch {
       // Nothing here is worth interrupting a page load for. A renewal
       // that fails leaves the certificate exactly as it was, and the
@@ -686,7 +708,7 @@ export class IdentityPanel {
         case 'gone':
           throw new IdentityError('bad-field', 'That request expired before it was answered.');
         case 'renewed':
-          await this.keep(device, outcome.cert, outcome.card, outcome.result);
+          await this.keep(device, outcome.cert, outcome.card, outcome.result, 'renewed');
           break;
       }
     } catch (e) {
@@ -705,6 +727,15 @@ export class IdentityPanel {
     this.certDays = 90;
     await this.load();
   }
+}
+
+/**
+ * How many days a certificate was issued for, rounded to the nearest
+ * whole day — which is the unit `days` is in, and the unit `hlid` issued
+ * it in, so the round trip is exact for anything hlid wrote.
+ */
+function certLifetimeDays(cert: { issued: number; expires: number }): number {
+  return Math.max(1, Math.round((cert.expires - cert.issued) / 86_400));
 }
 
 function copyButton(getText: () => string): HTMLButtonElement {

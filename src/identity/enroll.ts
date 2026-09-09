@@ -1,5 +1,5 @@
 /**
- * The enrolment ceremony (`docs/identity-keys.md` §7.1): build the
+ * The enrollment ceremony (`docs/identity-keys.md` §7.1): build the
  * commands the identity panel shows, parse what the user pastes back,
  * and check it before it's ever trusted.
  *
@@ -81,7 +81,7 @@ function classify(bytes: Uint8Array): 'cert' | 'card' {
 /** One or two whitespace-separated base64url blobs — what pasting the
  *  output of `hlid cert -o cert.bin` and, optionally, `hlid card -o
  *  card.bin` on the same line or across two lines actually looks like. */
-export function parseEnrolmentPaste(input: string): ParsedPaste {
+export function parseEnrollmentPaste(input: string): ParsedPaste {
   const tokens = input.trim().split(/\s+/).filter(Boolean);
   if (tokens.length === 0) throw new IdentityError('bad-field', 'nothing pasted');
   if (tokens.length > 2) {
@@ -110,7 +110,7 @@ export function parseEnrolmentPaste(input: string): ParsedPaste {
   return { cert, card };
 }
 
-export interface EnrolmentResult {
+export interface EnrollmentResult {
   cert: DeviceCert;
   card: Card;
   fingerprint: string;
@@ -125,13 +125,13 @@ export interface EnrolmentResult {
  * should say so — discovering it at `/identity/auth` as `bad_cert` is a
  * worse place to find out.
  */
-export async function validateEnrolment(
+export async function validateEnrollment(
   certBytes: Uint8Array,
   cardBytes: Uint8Array,
   devicePubHex: string,
   deviceEncPubHex: string,
   now: number,
-): Promise<EnrolmentResult> {
+): Promise<EnrollmentResult> {
   const cert = decodeDeviceCert(certBytes);
   const card = decodeCard(cardBytes);
 
@@ -165,7 +165,7 @@ export function needsRenewal(cert: DeviceCert, now: number): boolean {
 
 /** `GET /identity/card/<fingerprint>` — only useful for a *second*
  *  browser: the server can only serve a card it has already cached from
- *  this identity authenticating somewhere, so a first-time enrolment
+ *  this identity authenticating somewhere, so a first-time enrollment
  *  still needs the card pasted. `null` on 404, not an error — "no card
  *  cached yet" is the expected answer the first time. */
 export async function fetchCardFallback(httpBase: string, fingerprint: string): Promise<Uint8Array | null> {

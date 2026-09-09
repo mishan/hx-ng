@@ -24,9 +24,9 @@ import {
   buildHlidLinkCommand,
   fetchCardFallback,
   needsRenewal,
-  parseEnrolmentPaste,
-  validateEnrolment,
-} from '../identity/enrol';
+  parseEnrollmentPaste,
+  validateEnrollment,
+} from '../identity/enroll';
 import {
   attachCertificate,
   ensureActiveDevice,
@@ -95,10 +95,10 @@ export class IdentityPanel {
       return;
     }
     if (this.device.cert) this.renderEnrolled(this.device);
-    else this.renderEnrol(this.device);
+    else this.renderEnroll(this.device);
   }
 
-  private renderEnrol(device: StoredDevice): void {
+  private renderEnroll(device: StoredDevice): void {
     const devicePubHex = device.devicePub;
     const deviceEncPubHex = bytesToHex(device.deviceEncPub);
 
@@ -136,8 +136,8 @@ export class IdentityPanel {
       placeholder: 'paste the certificate here — and the card too, if hlid wrote it to a separate file',
     });
     const error = h('p', { class: 'error', hidden: true });
-    const enrolBtn = h('button', { class: 'primary' }, 'Enrol');
-    enrolBtn.onclick = () => void this.submitPaste(device, paste.value, error, enrolBtn);
+    const enrollBtn = h('button', { class: 'primary' }, 'Enroll');
+    enrollBtn.onclick = () => void this.submitPaste(device, paste.value, error, enrollBtn);
 
     fill(
       this.body,
@@ -161,7 +161,7 @@ export class IdentityPanel {
       h('h3', {}, '3. Paste it back'),
       paste,
       error,
-      enrolBtn,
+      enrollBtn,
     );
   }
 
@@ -169,7 +169,7 @@ export class IdentityPanel {
     error.hidden = true;
     btn.disabled = true;
     try {
-      const parsed = parseEnrolmentPaste(raw);
+      const parsed = parseEnrollmentPaste(raw);
       let cardBytes = parsed.card;
       if (!cardBytes) {
         const cert = decodeDeviceCert(parsed.cert);
@@ -183,7 +183,7 @@ export class IdentityPanel {
           );
         }
       }
-      const result = await validateEnrolment(
+      const result = await validateEnrollment(
         parsed.cert,
         cardBytes,
         device.devicePub,

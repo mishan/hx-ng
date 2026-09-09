@@ -19,6 +19,7 @@ import {
   validateEnrollment,
 } from '../src/identity/enroll';
 import type { StoredDevice } from '../src/identity/storage';
+import { IdentityError } from '@hotline-ng/client';
 import vectors from '../packages/hotline-ng/test/identity-vectors.json';
 
 const certBytes = () => hexToBytes(vectors.device_cert.signed_hex);
@@ -365,6 +366,18 @@ describe('renewWithoutCode', () => {
     insideLifetime();
     fetchReturning([{ status: 404, body: { error: 'no_holder' } }]);
     expect((await renew()).kind).toBe('no-holder');
+  });
+
+  it('tells no-holder from any other 404 by the code, not the wording', async () => {
+    // The message is for a person and will be reworded or localized.
+    // Branching on it — as this first did — makes editing a sentence
+    // change what the program does.
+    insideLifetime();
+    fetchReturning([{ status: 404, body: { error: 'unknown_code' } }]);
+    await expect(renew()).rejects.toThrow(IdentityError);
+
+    fetchReturning([{ status: 404, body: {} }]);
+    await expect(renew()).rejects.toThrow(IdentityError);
   });
 
   it('passes a denial back rather than papering over it', async () => {

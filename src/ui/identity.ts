@@ -518,19 +518,8 @@ export class IdentityPanel {
 
     fill(
       this.body,
-      this.renewedQuietly
-        ? h('p', { class: 'became' }, 'This certificate was renewed automatically.')
-        : null,
-      this.becameLabel
-        ? h(
-            'p',
-            { class: 'became' },
-            'This browser is now a device of ',
-            h('strong', {}, this.becameLabel),
-            '  ',
-            h('code', {}, (device.fingerprint ?? '').slice(0, 8)),
-          )
-        : null,
+      this.renewedQuietly ? this.renewedNotice() : null,
+      this.becameLabel ? this.becameNotice(device) : null,
       // A browser that is already a device can still be handed a QR
       // code — to renew, or to move to another identity. Without this
       // the scan was read, its fragment stripped from the address bar,
@@ -583,11 +572,34 @@ export class IdentityPanel {
       if (outcome.kind !== 'renewed') return;
       await this.keep(device, outcome.cert, outcome.card, outcome.result);
       this.renewedQuietly = true;
+      this.becameLabel = null;
     } catch {
       // Nothing here is worth interrupting a page load for. A renewal
       // that fails leaves the certificate exactly as it was, and the
       // panel's banner goes on nagging.
     }
+  }
+
+  /** Shown once. Both this and `becameLabel` announce something that
+   *  just happened; leaving them set would have the panel go on
+   *  reporting it every time it is opened, which turns news into
+   *  furniture. */
+  private renewedNotice(): HTMLElement {
+    this.renewedQuietly = false;
+    return h('p', { class: 'became' }, 'This certificate was renewed automatically.');
+  }
+
+  private becameNotice(device: StoredDevice): HTMLElement {
+    const label = this.becameLabel ?? '';
+    this.becameLabel = null;
+    return h(
+      'p',
+      { class: 'became' },
+      'This browser is now a device of ',
+      h('strong', {}, label),
+      '  ',
+      h('code', {}, (device.fingerprint ?? '').slice(0, 8)),
+    );
   }
 
   private renewalBanner(device: StoredDevice): HTMLElement {

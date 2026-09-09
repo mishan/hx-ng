@@ -17,7 +17,7 @@
  */
 
 import type { StoredDevice } from './storage';
-import { awaitAnswer, postEnrollRequest, type Mailbox } from './mailbox';
+import { awaitAnswer, MailboxError, postEnrollRequest, type Mailbox } from './mailbox';
 
 import {
   CARD_DOMAIN,
@@ -333,8 +333,10 @@ export async function renewWithoutCode(opts: {
     secret = await postEnrollRequest(opts.mailbox, request, null);
   } catch (e) {
     // `no_holder` is the expected outcome when no agent is running, not
-    // a failure to report as one.
-    if (e instanceof IdentityError && /Nothing is listening/.test(e.message)) {
+    // a failure to report as one. Branched on the wire code rather than
+    // the sentence: the sentence is for a person, and rewording it
+    // should not change what the program does.
+    if (e instanceof MailboxError && e.code === 'no_holder') {
       return { kind: 'no-holder' };
     }
     throw e;

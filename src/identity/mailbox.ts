@@ -70,7 +70,27 @@ export function scannedBase(host: string): string {
   return `${location.protocol}//${host}`;
 }
 
-async function errorFrom(res: Response, fallback: string): Promise<IdentityError> {
+/**
+ * An `IdentityError` that also carries the mailbox's own error code.
+ *
+ * The code is what callers branch on. The message is for a person and
+ * will be reworded, or localized, or both; branching on it — as the
+ * renewal path first did, matching `/Nothing is listening/` — makes a
+ * change to a sentence change what the program does.
+ */
+export class MailboxError extends IdentityError {
+  constructor(
+    message: string,
+    /** §5.2's code, when the server sent one. */
+    readonly code: string | undefined,
+    readonly status: number,
+  ) {
+    super('server-error', message);
+    this.name = 'MailboxError';
+  }
+}
+
+async function errorFrom(res: Response, fallback: string): Promise<MailboxError> {
   let code: string | undefined;
   try {
     code = ((await res.json()) as { error?: string }).error;
@@ -78,7 +98,7 @@ async function errorFrom(res: Response, fallback: string): Promise<IdentityError
     /* not JSON; the status is all there is */
   }
   const text = (code && POST_ERRORS[code]) ?? `${fallback} (HTTP ${res.status})`;
-  return new IdentityError('server-error', text);
+  return new MailboxError(text, code, res.status);
 }
 
 /** §5.2. `code` is what the user typed; it is sent as typed, since the

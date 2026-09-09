@@ -1,13 +1,15 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { bytesToBase64url, hexToBytes, type DeviceCert } from '@hotline-ng/client';
+import { base64urlToBytes, bytesToBase64url, bytesToHex, hexToBytes, type DeviceCert } from '@hotline-ng/client';
 
 import {
   buildHlidCertCommand,
+  enrollWithCode,
   needsRenewal,
   parseEnrollmentPaste,
   validateEnrollment,
 } from '../src/identity/enroll';
+import type { StoredDevice } from '../src/identity/storage';
 import vectors from '../packages/hotline-ng/test/identity-vectors.json';
 
 const certBytes = () => hexToBytes(vectors.device_cert.signed_hex);
@@ -93,5 +95,161 @@ describe('needsRenewal', () => {
     expect(needsRenewal(cert(issued, expires), oneThirdRemaining - 1)).toBe(false);
     expect(needsRenewal(cert(issued, expires), oneThirdRemaining)).toBe(true);
     expect(needsRenewal(cert(issued, expires), expires)).toBe(true);
+  });
+});
+
+
+// --- the bundle, and enrolling with a code ------------------------------
+
+/** WebCrypto has no raw-seed import for an Ed25519 private key, only
+ *  PKCS8; RFC 8410's encoding of a raw seed is this prefix plus the
+ *  seed. Test-only — a real device key is generated in the browser and
+ *  never imported from a seed at all. */
+const PKCS8_ED25519_PREFIX = hexToBytes('302e020100300506032b657004220420');
+
+async function importSeed(seedHex: string): Promise<CryptoKey> {
+  const seed = hexToBytes(seedHex).subarray(0, 32);
+  const pkcs8 = new Uint8Array(PKCS8_ED25519_PREFIX.length + seed.length);
+  pkcs8.set(PKCS8_ED25519_PREFIX, 0);
+  pkcs8.set(seed, PKCS8_ED25519_PREFIX.length);
+  return crypto.subtle.importKey('pkcs8', pkcs8, { name: 'Ed25519' }, false, ['sign']);
+}
+
+async function storedDevice(): Promise<StoredDevice> {
+  return {
+    devicePub: devicePubHex,
+    deviceSign: await importSeed(vectors.keys.device.seed_hex),
+    // Never used for signing here; the request carries the public half.
+    deviceEnc: await importSeed(vectors.keys.device.seed_hex),
+    deviceEncPub: hexToBytes(deviceEncPubHex),
+  };
+}
+
+function fetchReturning(replies: { status: number; body?: unknown }[]) {
+  const calls: { url: string; init?: RequestInit }[] = [];
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async (url: string, init?: RequestInit) => {
+      calls.push({ url, init });
+      const next = replies.shift();
+      if (!next) throw new Error(`unexpected fetch: ${url}`);
+      return { ok: next.status < 300, status: next.status, json: async () => next.body } as Response;
+    }),
+  );
+  return calls;
+}
+
+describe('parseEnrollmentPaste, given a bundle', () => {
+  it('takes one blob from `hlid cert --bundle` as both halves', () => {
+    const parsed = parseEnrollmentPaste(bytesToBase64url(hexToBytes(vectors.bundle.encoded_hex)));
+    expect(bytesToHex(parsed.cert)).toBe(vectors.device_cert.signed_hex);
+    expect(bytesToHex(parsed.card!)).toBe(vectors.card.signed_hex);
+  });
+
+  it('refuses a bundle pasted alongside something else', () => {
+    // A bundle already carries the card, so a second blob is a
+    // contradiction rather than something to reconcile.
+    const both = `${bytesToBase64url(hexToBytes(vectors.bundle.encoded_hex))} ${bytesToBase64url(cardBytes())}`;
+    expect(() => parseEnrollmentPaste(both)).toThrow(/on its own/);
+  });
+});
+
+describe('enrollWithCode', () => {
+  const mailbox = { base: 'https://hl.example/identity/enroll' };
+  const bundle = () => bytesToBase64url(hexToBytes(vectors.bundle.encoded_hex));
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
+
+  /** The published certificate has a real expiry, so the clock is put
+   *  inside its window rather than the vector being reissued. */
+  function insideTheCertificatesLifetime() {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date((vectors.device_cert.fields.issued + 60) * 1000));
+  }
+
+  it('signs for this browser, posts under the code, and keeps what verifies', async () => {
+    insideTheCertificatesLifetime();
+    const calls = fetchReturning([
+      { status: 201, body: { request: 'sekrit' } },
+      { status: 200, body: { bundle: bundle() } },
+    ]);
+
+    const outcome = await enrollWithCode({
+      mailbox,
+      code: 'K7PM-4XWE',
+      device: await storedDevice(),
+      name: 'Firefox on Linux',
+      pinned: null,
+    });
+
+    expect(outcome.kind).toBe('enrolled');
+    if (outcome.kind !== 'enrolled') return;
+    expect(outcome.result.fingerprint).toBe(vectors.keys.identity.fingerprint);
+    expect(bytesToHex(outcome.cert)).toBe(vectors.device_cert.signed_hex);
+
+    // The request that went out is signed by this browser's key and
+    // names its two public halves — the holder verifies exactly that.
+    const posted = JSON.parse(calls[0]!.init!.body as string);
+    expect(posted.code).toBe('K7PM-4XWE');
+    expect(base64urlToBytes(posted.request).length).toBeGreaterThan(64);
+  });
+
+  it('stops on an identity it has not seen before, rather than storing it', async () => {
+    // A hostile mailbox can hand back a bundle in which every signature
+    // verifies and the identity is somebody else's. Nothing in the
+    // codec catches that; what catches it is that this browser was
+    // already somebody's device.
+    insideTheCertificatesLifetime();
+    fetchReturning([
+      { status: 201, body: { request: 'sekrit' } },
+      { status: 200, body: { bundle: bundle() } },
+    ]);
+
+    const outcome = await enrollWithCode({
+      mailbox,
+      code: 'K7PM-4XWE',
+      device: await storedDevice(),
+      pinned: 'a-different-identity-fingerprint',
+    });
+
+    expect(outcome.kind).toBe('identity-changed');
+    if (outcome.kind !== 'identity-changed') return;
+    expect(outcome.was).toBe('a-different-identity-fingerprint');
+    expect(outcome.now).toBe(vectors.keys.identity.fingerprint);
+  });
+
+  it('passes a denial and an expiry back rather than throwing', async () => {
+    insideTheCertificatesLifetime();
+    fetchReturning([
+      { status: 201, body: { request: 's' } },
+      { status: 403, body: { denied: 'not_mine' } },
+    ]);
+    expect(await enrollWithCode({ mailbox, code: 'C', device: await storedDevice(), pinned: null })).toEqual({
+      kind: 'denied',
+      reason: 'not_mine',
+    });
+
+    fetchReturning([{ status: 201, body: { request: 's' } }, { status: 410 }]);
+    expect(await enrollWithCode({ mailbox, code: 'C', device: await storedDevice(), pinned: null })).toEqual({
+      kind: 'gone',
+    });
+  });
+
+  it('refuses a bundle certifying a device that is not this one', async () => {
+    // The mailbox substituting an answer meant for somebody else. The
+    // check is `validateEnrollment`'s, unchanged from the paste path —
+    // which is the point of both routes carrying the same object.
+    insideTheCertificatesLifetime();
+    fetchReturning([
+      { status: 201, body: { request: 's' } },
+      { status: 200, body: { bundle: bundle() } },
+    ]);
+    const stranger = { ...(await storedDevice()), devicePub: 'ff'.repeat(32) };
+    await expect(enrollWithCode({ mailbox, code: 'C', device: stranger, pinned: null })).rejects.toThrow(
+      /different device key/,
+    );
   });
 });

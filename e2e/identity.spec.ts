@@ -21,7 +21,7 @@ import { join } from 'node:path';
 
 import { expect, test } from '@playwright/test';
 
-import { buildHxdNg, hlid, hxdNgAvailable, startServer, type RunningServer } from './hxd-ng';
+import { buildHxdNg, hlid, hlidEnroll, hxdNgAvailable, startServer, type RunningServer } from './hxd-ng';
 
 const NG_PORT = 5700;
 
@@ -83,7 +83,7 @@ test.describe('identity: enrollment and login against a real hxd-ng server', () 
 
     // --- 3. Paste it back and enroll ---------------------------------------
     await page.locator('.identity-body textarea.paste').fill(`${certB64} ${cardB64}`);
-    await page.getByRole('button', { name: 'Enroll' }).click();
+    await page.getByRole('button', { name: 'Enroll from paste' }).click();
     await expect(page.locator('.identity-body')).toContainText('Enrolled as Playwright');
     await expect(page.locator('.identity-body')).toContainText(fingerprint!);
     await page.getByRole('button', { name: 'Close' }).click();
@@ -116,6 +116,56 @@ test.describe('identity: enrollment and login against a real hxd-ng server', () 
     //        login, and a dropped socket must not need it again. -------
     await page.locator('.composer-input').fill('/drop');
     await page.locator('.composer-input').press('Enter');
+    await expect(page.locator('.pill')).toContainText('online', { timeout: 10_000 });
+  });
+
+  test('enroll with a pairing code, with hlid holding the identity key', async ({ page }) => {
+    // The route that replaces the paste: nothing is copied between the
+    // two screens except eight characters the user types, and the
+    // fingerprint they compare.
+    await page.goto('/');
+    await page.getByRole('button', { name: 'Identity keys…' }).click();
+
+    const hlidDir = mkdtempSync(join(tmpdir(), 'hlid-enroll-e2e-'));
+    const initOut = hlid(hlidDir, ['init', '--name', 'Alice']);
+    const fingerprint = /fingerprint: (\S+)/.exec(initOut)?.[1];
+    expect(fingerprint).toBeTruthy();
+
+    // The panel only draws the code box once discovery says this server
+    // has a mailbox, which is a round trip after the panel opens.
+    const codeBox = page.locator('.identity-body .code-entry');
+    await expect(codeBox).toBeVisible({ timeout: 10_000 });
+
+    // The fingerprint the user is asked to compare. It has to be on this
+    // screen, because a hostile mailbox's substituted request is caught
+    // by a human seeing that the two do not match.
+    const deviceFp = await page.locator('.identity-body .device-fp').textContent();
+    expect(deviceFp).toMatch(/^[0-9a-z]{8}$/);
+
+    const holder = hlidEnroll(hlidDir, ['--server', `http://127.0.0.1:${NG_PORT}`, '--days', '90'], true);
+    const code = await holder.code;
+    expect(code).toMatch(/^[0-9A-Z]{4}-[0-9A-Z]{4}$/);
+
+    await codeBox.fill(code);
+    await page.getByRole('button', { name: 'Enroll with code' }).click();
+
+    // §5.5: having typed a code rather than run their own command, the
+    // user is told whose device this browser has become.
+    await expect(page.locator('.identity-body')).toContainText('This browser is now a device of', {
+      timeout: 20_000,
+    });
+    await expect(page.locator('.identity-body')).toContainText('Alice');
+    await expect(page.locator('.identity-body')).toContainText(fingerprint!);
+
+    expect(await holder.exited).toBe(0);
+    // And the holder showed the same device fingerprint, which is the
+    // whole of what the human comparison is.
+    expect(holder.output()).toContain(deviceFp!);
+    expect(holder.output()).toContain('Compare the device fingerprint');
+
+    // It can log in with what it just got, the same as the pasted path.
+    await page.getByRole('button', { name: 'Close' }).click();
+    await page.getByRole('button', { name: 'Log in with identity' }).click();
     await expect(page.locator('.pill')).toContainText('online', { timeout: 10_000 });
   });
 });

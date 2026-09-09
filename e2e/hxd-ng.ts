@@ -117,8 +117,62 @@ unattested = "guest"
  *  fingerprint lines, in particular. Throws with stderr attached on a
  *  non-zero exit, which is always a paste-worthy diagnostic here (a bad
  *  argument, a rejected field) rather than something to recover from. */
+/**
+ * `hlid enroll`, which does not exit until a device asks — so unlike
+ * {@link hlid} it has to be driven while it runs: read the pairing code
+ * off its output, then answer the prompt it shows afterwards.
+ *
+ * The answer is written to stdin up front. It waits in the pipe until
+ * `hlid` reaches its prompt, which is the only moment it reads stdin,
+ * and doing it this way means the test never has to guess when that is.
+ */
+export function hlidEnroll(cwd: string, args: string[], approve: boolean): HlidEnroll {
+  const child = spawn(bin('hlid'), ['enroll', ...args], { cwd, env: hlidEnv(cwd) });
+  child.stdin.write(approve ? 'y\n' : 'n\n');
+  child.stdin.end();
+
+  let output = '';
+  let resolveCode: (c: string) => void;
+  const code = new Promise<string>((resolve, reject) => {
+    resolveCode = resolve;
+    setTimeout(() => reject(new Error(`hlid enroll showed no code:\n${output}`)), 30_000).unref();
+  });
+  child.stderr.on('data', (chunk: Buffer) => {
+    output += chunk.toString();
+    // The same eight characters and hyphen a user reads off the screen.
+    const m = /\b([0-9A-Z]{4}-[0-9A-Z]{4})\b/.exec(output);
+    if (m) resolveCode(m[1]!);
+  });
+
+  return {
+    code,
+    output: () => output,
+    exited: new Promise<number>((resolve) => child.on('close', (c) => resolve(c ?? -1))),
+    stop: () => child.kill(),
+  };
+}
+
+/** The temp directory is the identity's home, so nothing lands in the
+ *  real one. See {@link hlid}. */
+function hlidEnv(cwd: string): NodeJS.ProcessEnv {
+  return { ...process.env, HLID_HOME: cwd };
+}
+
+export interface HlidEnroll {
+  /** Resolves with the pairing code as soon as `hlid` prints it. */
+  code: Promise<string>;
+  /** Everything `hlid` has said so far — its prompt, for assertions. */
+  output: () => string;
+  exited: Promise<number>;
+  stop: () => void;
+}
+
 export function hlid(cwd: string, args: string[]): string {
-  const result = spawnSync(bin('hlid'), args, { cwd, encoding: 'utf8' });
+  // HLID_HOME, always: `hlid init` and every flag fallback default to
+  // ~/.hlid, and a test that writes an identity into the home directory
+  // of whoever ran it is a test that has done real damage — hlid would
+  // then silently use it as the default for their own commands.
+  const result = spawnSync(bin('hlid'), args, { cwd, env: hlidEnv(cwd), encoding: 'utf8' });
   if (result.status !== 0) {
     throw new Error(`hlid ${args.join(' ')} failed (exit ${result.status}):\n${result.stderr}`);
   }

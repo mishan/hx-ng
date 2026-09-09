@@ -24,6 +24,11 @@ const DB_VERSION = 1;
 const DEVICES_STORE = 'devices';
 const META_STORE = 'meta';
 const ACTIVE_KEY = 'active';
+/** The identity this browser has enrolled with before, in `meta` rather
+ *  than on the device record: it has to outlive "forget this device", or
+ *  the check it exists for is one a user can clear by accident. See
+ *  {@link pinnedIdentity}. */
+const PINNED_KEY = 'pinnedIdentity';
 
 export interface StoredDevice {
   /** 32 bytes hex; the record's key, known at generation. */
@@ -178,6 +183,35 @@ export async function attachCertificate(devicePub: string, c: Certification): Pr
       certExpires: c.certExpires,
       label: c.label,
     });
+  });
+}
+
+/**
+ * The identity fingerprint this browser has enrolled with before, if
+ * any.
+ *
+ * A hostile mailbox can hand back a bundle for an identity that is not
+ * the one the user meant (`identity-enrollment.md` §9, "substitute the
+ * answer"). Every signature in it verifies, so nothing in the codec
+ * catches it: what catches it is that this browser was Alice's device
+ * yesterday and is being told it is Mallory's today. So the fingerprint
+ * is remembered, and a change is something the user has to confirm.
+ *
+ * It lives in `meta` and not on the device record deliberately. It
+ * survives "forget this device", because a store that forgets the
+ * pin along with the key would let one accidental click turn the check
+ * off for good.
+ */
+export async function pinnedIdentity(): Promise<string | null> {
+  return withDb(META_STORE, 'readonly', async (tx) => {
+    const fp = await requestResult<string | undefined>(tx.objectStore(META_STORE).get(PINNED_KEY));
+    return fp ?? null;
+  });
+}
+
+export async function pinIdentity(fingerprint: string): Promise<void> {
+  await withDb(META_STORE, 'readwrite', async (tx) => {
+    tx.objectStore(META_STORE).put(fingerprint, PINNED_KEY);
   });
 }
 

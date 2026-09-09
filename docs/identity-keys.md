@@ -305,6 +305,11 @@ enrollment check in §7.1 can report.)
 
 ### 7.1 Enrolling a browser as a device (phase B)
 
+> Since **§7.4**, this is the *fallback*. A server that advertises an
+> enrollment mailbox gets a pairing code instead, and nothing below is
+> copied by hand. The steps here are what still happens when there is no
+> mailbox, or nothing listening at the other end of one.
+
 1. The client generates both device keypairs, non-extractable, and
    stores them with no certificate (§4). This costs nothing and can
    happen the first time the user opens the identity panel.
@@ -402,6 +407,43 @@ to do it. Constraining the Worker's API to `mintCert` and `signCard`
 rather than `sign(bytes)` is worth doing too, but it is defence in
 depth, not a boundary.
 
+### 7.4 Enrolling with a pairing code
+
+The paste above is now the fallback. When discovery advertises
+`identity.endpoints.enroll`, the panel draws a code box instead, and the
+ceremony is hxd-ng's `identity-enrollment.md`: the user runs `hlid
+enroll --server …` wherever their identity key is, types the code it
+shows, and the certificate arrives without anything being copied.
+
+What this client is responsible for, and why:
+
+1. **Its own device fingerprint, beside the code box.** `hlid`'s prompt
+   shows the same eight characters. A hostile mailbox can feed the
+   holder a request for a device key of its own, and the *only* thing
+   that catches it is a human seeing that the two screens disagree
+   (`identity-enrollment.md` §9). A fingerprint shown in the terminal
+   alone would be nothing to compare against.
+2. **The same verifier as the paste.** What comes back is checked by
+   `validateEnrollment`: the certificate names this browser's two keys,
+   the card names the certificate's identity, nothing has expired, both
+   signatures verify.
+3. **Who this browser has become.** The paste path never needed to say
+   it — the user had just run their own identity's command. Having typed
+   a code, they have not, so the panel shows the identity's name and
+   fingerprint after enrolling.
+4. **A pinned identity.** The fingerprint is remembered across
+   enrollments, and one that changes needs a confirmation. This is the
+   check for a mailbox substituting an *answer*: every signature in a
+   bundle for the wrong identity verifies, so nothing in the codec
+   objects, and "this browser was Alice's device yesterday" is what
+   objects instead. It is kept in `meta`, not on the device record, so
+   that "forget this device" does not quietly clear it.
+
+Not implemented here yet: the QR path (`identity-enrollment.md` §5.6),
+which would fill the code in from a scan and let the enrollee pin the
+identity *before* it asks rather than after; and posting a renewal
+without a code (§8), which needs `hlid agent` at the other end.
+
 ---
 
 ## 8. What the wire actually needs, per connection
@@ -455,15 +497,13 @@ identity key, a device key, a certificate and a card in one step; and
 `hlid cert --bundle` writes the certificate and the card as a single
 object.
 
-**What this client has not caught up with is the bundle.** `hlid cert
---bundle` writes hxd-ng's `identity-enrollment.md` §5.4 — an unsigned CBOR map of
-a `cert` and a `card`, verified by checking both signatures and that the
-card belongs to the identity the certificate names. The panel still asks
-for "one or two base64url blobs, told apart by shape", which is what
-`hlid cert` plus `hlid card` produce. Teaching it the bundle collapses
-§7.1 step 3's paste to one blob and, more to the point, gives it the
-*same* verifier the mailbox path will use — so the paste stops being a
-second code path to audit. That is the next thing to do here.
+**The bundle and the code box have landed.** The panel reads hxd-ng's
+`identity-enrollment.md` §5.4 bundle, so `hlid cert --bundle` collapses
+§7.1 step 3's paste to one blob; and when the server advertises a
+mailbox, the ordinary route is not a paste at all but a pairing code
+(§7.4 below). Both end at the same `validateEnrollment`, which is the
+point of the two routes carrying the same object: the fallback is not a
+second code path to audit.
 
 **CORS is answered by the server now.** The identity endpoints and
 discovery send `Access-Control-Allow-Origin: *` with an `OPTIONS`

@@ -819,6 +819,34 @@ dialog.picker header input { width: 9rem; }
 .identity-body .field-row code { font: 12px/1.4 var(--mono); overflow-wrap: anywhere; }
 .identity-body .note { font-size: 0.85em; color: var(--muted); }
 .identity-body .paste { width: 100%; min-height: 4.5rem; font: 12px/1.4 var(--mono); box-sizing: border-box; }
+/* The code box. The pairing code is eight characters read off another
+   screen and typed here, so it is set in the mono face at a size that
+   makes a mistyped glyph obvious, and wide enough that the hyphen never
+   wraps. */
+.identity-body .enroll-code {
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  padding: 0.6rem 0.75rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+.identity-body .code-row { display: flex; gap: 0.5rem; align-items: center; }
+.identity-body .code-entry {
+  font: 18px/1.4 var(--mono);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  width: 10ch;
+  padding: 0.2rem 0.4rem;
+}
+/* The device fingerprint sits next to the code because the user's job is
+   to see that it matches the one hlid is showing. Making it look like
+   the code's equal, rather than like a footnote, is the whole design. */
+.identity-body .device-fp { font: 14px/1.4 var(--mono); letter-spacing: 0.06em; }
+.identity-body .became {
+  border-left: 3px solid var(--accent);
+  padding-left: 0.6rem;
+}
 .identity-body .renewal-nag {
   border: 1px solid var(--accent);
   border-radius: 8px;

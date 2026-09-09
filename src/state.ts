@@ -4,9 +4,9 @@
 
 import type {
   ChatStyle,
+  HistoryMedia,
   InboxCounts,
   InboxOk,
-  Sender,
   ServerInfo,
   Status,
   User,
@@ -21,6 +21,7 @@ export type LineKind =
    *  kick announcements, agreement text. */
   | 'notice'
   | 'broadcast'
+  | 'deleted'
   /** Something this client is saying about itself — connection state,
    *  errors. Never came off the wire. */
   | 'system';
@@ -28,7 +29,7 @@ export type LineKind =
 export interface Line {
   t: number;
   kind: LineKind;
-  from?: Sender;
+  from?: { uid?: number; nick?: string; login?: string; icon?: number };
   text: string;
   /** Set on lines this client generated, so the transcript can mark them
    *  as not having come from the server. */
@@ -39,6 +40,10 @@ export interface Line {
   queued?: boolean;
   /** The store's id, when it has one. `msg_read` marks up to it. */
   id?: number;
+  /** A moderated history row keeps its id and timestamp but no text. */
+  deleted?: boolean;
+  /** Canonical metadata survives even when the image handle does not. */
+  media?: HistoryMedia;
 }
 
 export type ConvId = string;
@@ -171,6 +176,11 @@ export class Store {
    *  them stops paging early over mail the login flush happened to
    *  deliver first. */
   mailExhausted = false;
+  /** Paging cursor and exhaustion state for the public transcript. */
+  oldestHistoryId?: number;
+  newestHistoryId?: number;
+  historyExhausted = false;
+  private seenHistory = new Set<number>();
   /**
    * Stored message ids this client has already placed. Mail arrives
    * twice by design — the login flush pushes `msg` events for what is
@@ -383,6 +393,35 @@ export class Store {
     this.mail = { unread: this.mail.unread + 1, total: this.mail.total + 1 };
   }
 
+  hasHistory(id: number): boolean {
+    return this.seenHistory.has(id);
+  }
+
+  /** Merge a durable public-chat page with live lines already drawn.
+   *  History and live events deliberately overlap; ids, not text or
+   *  timestamps, decide whether they are the same line. */
+  mergeHistory(lines: Line[], hasMore: boolean, direction: 'older' | 'newer'): number {
+    const lobby = this.conversations.get(LOBBY)!;
+    const fresh = lines.filter((line) => line.id !== undefined && !this.seenHistory.has(line.id));
+    for (const line of lines) if (line.id !== undefined) this.recordHistoryId(line.id);
+    if (!fresh.length) {
+      if (direction === 'older') this.historyExhausted = !hasMore;
+      return 0;
+    }
+    lobby.lines.push(...fresh);
+    lobby.lines.sort((a, b) => a.t - b.t || (a.id ?? Number.MAX_SAFE_INTEGER) - (b.id ?? Number.MAX_SAFE_INTEGER));
+    if (lobby.lines.length > MAX_LINES) lobby.lines.splice(0, lobby.lines.length - MAX_LINES);
+    if (direction === 'older') this.historyExhausted = !hasMore;
+    this.revision++;
+    return fresh.length;
+  }
+
+  private recordHistoryId(id: number): void {
+    this.seenHistory.add(id);
+    if (this.oldestHistoryId === undefined || id < this.oldestHistoryId) this.oldestHistoryId = id;
+    if (this.newestHistoryId === undefined || id > this.newestHistoryId) this.newestHistoryId = id;
+  }
+
   /**
    * `fresh` is whether this line should bump the conversation's unread
    * count, and it is not the same question as whether the conversation
@@ -397,7 +436,10 @@ export class Store {
   add(id: ConvId, line: Line, fresh = true): Conversation | undefined {
     const c = this.conversations.get(id);
     if (!c) return undefined;
-    if (line.id !== undefined) {
+    if (line.id !== undefined && c.kind === 'lobby') {
+      if (this.seenHistory.has(line.id)) return undefined;
+      this.recordHistoryId(line.id);
+    } else if (line.id !== undefined) {
       this.seenMail.add(line.id);
       c.mailIds.add(line.id);
     }

@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { Connection, type ConnectionHooks, type Credentials } from '../src/connection';
-import type { InboxOk, LoginOk, SelfUser, User } from '../src/protocol';
+import type { HistoryLine, InboxOk, LoginOk, SelfUser, User } from '../src/protocol';
 
 import { installFakeWire, settle, uninstallFakeWire, type FakeServer } from './fake-wire';
 
@@ -44,6 +44,14 @@ const loginOk = (over: Partial<LoginOk> = {}): LoginOk => ({
   caps: ['inbox'],
   seq: 0,
   ...over,
+});
+
+const historyLine = (id: number): HistoryLine => ({
+  id,
+  at: 1_700_000_000 + id,
+  from: { nick: 'Bob', icon: 128 },
+  text: `line ${id}`,
+  style: 'normal',
 });
 
 let server: FakeServer;
@@ -146,6 +154,32 @@ describe('resume', () => {
     expect(second.state).toBe('online');
     expect(server.sockets).toHaveLength(2); // no third socket was opened to do it
   });
+
+  it('catches public history up after an expired session needs a fresh login', async () => {
+    server.on('login', () => ({ ok: loginOk({ caps: ['history'] }) }));
+    const first = await connect();
+    server.event('chat', {
+      from: { uid: 2, nick: 'Bob' },
+      text: 'last seen',
+      style: 'normal',
+      id: 10,
+      at: 1_700_000_010,
+    });
+    await settle();
+    expect(first.lastHistoryId).toBe(10);
+
+    server.on('resume', () => ({ error: { code: 'session_expired', text: 'gone' } }));
+    server.on('history', () => ({ ok: { lines: [historyLine(11)], has_more: false } }));
+    const recovered: number[] = [];
+    const second = new Connection(CREDS, {
+      onMissedHistory: (page) => recovered.push(...page.lines.map((line) => line.id)),
+    });
+    await second.start();
+
+    expect(server.sent('history')[0]?.params).toEqual({ after: 10, limit: 200 });
+    expect(recovered).toEqual([11]);
+    expect(second.lastHistoryId).toBe(11);
+  });
 });
 
 describe('resync recovery', () => {
@@ -231,6 +265,80 @@ describe('resync recovery', () => {
     await second.start();
     await settle();
     expect(server.sent('inbox')).toHaveLength(0);
+  });
+
+  it('pages public history forward from the cursor captured before sync', async () => {
+    server.on('login', () => ({ ok: loginOk({ caps: ['history'] }) }));
+    const first = await connect();
+    server.event('chat', {
+      from: { uid: 2, nick: 'Bob' },
+      text: 'last seen',
+      style: 'normal',
+      id: 10,
+      at: 1_700_000_010,
+    });
+    await settle();
+    expect(first.lastHistoryId).toBe(10);
+
+    server.on('resume', () => ({ error: { code: 'resync_required', text: 'gap' } }));
+    server.on('sync', () => {
+      // Live traffic may resume before sync answers. Recovery must still
+      // begin at 10, not at this moving high-water mark.
+      server.event('chat', {
+        from: { uid: 2, nick: 'Bob' },
+        text: 'live during sync',
+        style: 'normal',
+        id: 20,
+        at: 1_700_000_020,
+      });
+      return {
+        ok: { server: { name: 'Test', subject: 'hi' }, users: [user(1, 'Alice')], seq: 977 },
+      };
+    });
+    server.on('history', (params) =>
+      params.after === 10
+        ? { ok: { lines: [historyLine(11), historyLine(12)], has_more: true } }
+        : { ok: { lines: [historyLine(13)], has_more: false } },
+    );
+
+    const recovered: number[] = [];
+    const second = new Connection(CREDS, {
+      onMissedHistory: (page) => recovered.push(...page.lines.map((line) => line.id)),
+    });
+    await second.start();
+
+    expect(server.sent('history').map((frame) => frame.params)).toEqual([
+      { after: 10, limit: 200 },
+      { after: 12, limit: 200 },
+    ]);
+    expect(recovered).toEqual([11, 12, 13]);
+    expect(second.lastHistoryId).toBe(20);
+  });
+});
+
+describe('chat history', () => {
+  it('sends typed paging requests and remembers the highest returned id', async () => {
+    const conn = await connect();
+    server.on('history', () => ({
+      ok: {
+        lines: [
+          {
+            id: 8,
+            at: 1_700_000_008,
+            from: { nick: 'Bob', icon: 128 },
+            text: 'eight',
+            style: 'normal',
+          },
+        ],
+        has_more: true,
+      },
+    }));
+
+    const page = await conn.history({ before: 12, limit: 25 });
+    expect(server.sent('history')[0]?.params).toEqual({ before: 12, limit: 25 });
+    expect(page.lines[0]?.id).toBe(8);
+    expect(conn.lastHistoryId).toBe(8);
+    expect(JSON.parse(sessionStorage.getItem('hxd-ng.session')!).historyId).toBe(8);
   });
 });
 

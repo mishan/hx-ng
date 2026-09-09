@@ -523,7 +523,15 @@ button.call:disabled { opacity: 0.45; cursor: default; }
   vertical-align: 1px;
 }
 .line.notice .text, .line.system .text { color: var(--muted); font-style: italic; }
+.line.deleted .text { color: var(--muted); font-style: italic; }
 .line.action .text { color: var(--accent); font-style: italic; }
+.line .media-tag {
+  display: inline-block;
+  margin-left: 0.4rem;
+  color: var(--muted);
+  font-size: 0.75rem;
+  font-style: italic;
+}
 .line.broadcast .name { color: var(--admin); font-weight: 700; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.05em; padding-top: 0.2rem; }
 .line.broadcast .text {
   background: color-mix(in srgb, var(--admin) 13%, transparent);

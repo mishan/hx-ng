@@ -148,6 +148,11 @@ export interface VideoConfig {
   screen: VideoLimits;
 }
 
+export interface HistoryConfig {
+  max_lines: number;
+  max_days: number;
+}
+
 export interface LoginOk {
   session: string;
   token: string;
@@ -165,6 +170,8 @@ export interface LoginOk {
    *  before any mail arrives. Absent is not zero: it means this server
    *  stores nothing, and the client should not offer a mail view. */
   inbox?: InboxCounts;
+  /** Present only when the server keeps public-chat history. */
+  history?: HistoryConfig;
 }
 
 export interface ResumeParams {
@@ -269,6 +276,54 @@ export interface InboxParams {
 export interface InboxOk extends InboxCounts {
   /** Newest first. */
   messages: StoredMessage[];
+}
+
+// --- Public chat history (docs/chat-history.md §7) ---------------------
+
+/** The durable sender identity a history row can safely expose. There
+ *  is deliberately no uid: it may belong to somebody else now. */
+export interface HistorySender {
+  /** Absent on a deleted row. */
+  nick?: string;
+  icon: number;
+}
+
+/** Metadata that remains after the image bytes or handle disappear. */
+export interface HistoryMedia {
+  /** Absent when the handle expired or was revoked. */
+  id?: string;
+  type: string;
+  width: number;
+  height: number;
+  bytes: number;
+  removed?: boolean;
+}
+
+export interface HistoryLine {
+  id: number;
+  /** Unix seconds. */
+  at: number;
+  from: HistorySender;
+  text: string;
+  style: ChatStyle;
+  deleted?: boolean;
+  media?: HistoryMedia;
+}
+
+export interface HistoryParams {
+  /** Page backwards from this id, exclusive. */
+  before?: number;
+  /** Page forwards from this id, exclusive. */
+  after?: number;
+  /** 1–200, default 50. Both cursors define an exclusive range. */
+  limit?: number;
+}
+
+export interface HistoryOk {
+  /** Always oldest first, whichever cursor was used. */
+  lines: HistoryLine[];
+  /** More rows exist in the direction of this request. */
+  has_more: boolean;
 }
 
 /** Who to block. Exactly one of the three, and `fingerprint` only
@@ -383,7 +438,15 @@ export interface Events {
   user_joined: { user: User };
   user_changed: { user: User };
   user_parted: { uid: number };
-  chat: { from: Sender; text: string; style: ChatStyle };
+  chat: {
+    from: Sender;
+    text: string;
+    style: ChatStyle;
+    /** Present when the server persisted this public line. */
+    id?: number;
+    /** Unix seconds. */
+    at: number;
+  };
   notice: { text: string };
   subject: { subject: string };
   /** A private message. `id` is absent when nothing durable was stored
@@ -422,6 +485,7 @@ export const CAP_VOICE = 'voice';
 export const CAP_VIDEO = 'video';
 export const CAP_INBOX = 'inbox';
 export const CAP_IDENTITY = 'identity';
+export const CAP_HISTORY = 'history';
 
 /**
  * `resync_required` is not a failure: the session is still alive and the

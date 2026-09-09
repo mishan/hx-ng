@@ -412,6 +412,73 @@ test.describe('identity: enrollment and login against a real hxd-ng server', () 
     agent.stop();
   });
 
+  test('"Renew now" keeps the lifetime too, not just the automatic path', async ({ page }) => {
+    // The automatic path took the certificate's own lifetime; the button
+    // beside it sent `certDays`, which is ninety until somebody touches
+    // a day button. So the renewal a user *asked* for was the one that
+    // shortened a long certificate — and with the holder now refusing an
+    // ask longer than what it is renewing, a short one would be refused
+    // outright.
+    const hlidDir = mkdtempSync(join(tmpdir(), 'hlid-renew-btn-e2e-'));
+    hlid(hlidDir, ['init', '--name', 'Alice']);
+
+    await page.goto('/');
+    await page.getByRole('button', { name: 'Identity keys…' }).click();
+    const keyRows = page.locator('.identity-body .field-row code');
+    const devicePub = await keyRows.nth(0).textContent();
+    const deviceEncPub = await keyRows.nth(1).textContent();
+
+    // Thirty days into thirty-five: past two-thirds, and *shorter* than
+    // the panel's default, which is the direction the button got wrong
+    // in a way a holder now rejects rather than silently trims.
+    const issued = Math.floor(Date.now() / 1000) - 30 * 24 * 3600;
+    hlid(hlidDir, [
+      'cert',
+      '--device-pub', devicePub!,
+      '--device-enc-pub', deviceEncPub!,
+      '--caps', 'web',
+      '--days', '35',
+      '--issued', String(issued),
+      '--name', 'Short-lived',
+      '--bundle',
+      '-o', 'short.bundle',
+    ]);
+    const bundle = readFileSync(join(hlidDir, 'short.bundle')).toString('base64url');
+    await page.locator('.identity-body textarea.paste').fill(bundle);
+    await page.getByRole('button', { name: 'Enroll from paste' }).click();
+    await expect(page.locator('.identity-body')).toContainText('This browser is now a device of', {
+      timeout: 20_000,
+    });
+
+    // The agent starts *after* the page has loaded, so the automatic
+    // renewal on load found no holder and it is the button that does
+    // the work here.
+    const agent = hlidAgent(hlidDir, ['--server', `http://127.0.0.1:${NG_PORT}`, '--renew', 'auto']);
+    await agent.code;
+
+    const expiryText = async () =>
+      /Certificate expires ([^.]+)\./.exec((await page.locator('.identity-body').textContent()) ?? '')?.[1];
+    const before = await expiryText();
+
+    const renew = page.getByRole('button', { name: 'Renew now' });
+    await expect(renew).toBeVisible({ timeout: 20_000 });
+    await renew.click();
+    // A renewal the user pressed a button for announces nothing — the
+    // expiry moving is the whole of what happened, and the banner goes
+    // with it, the certificate no longer being near its end.
+    await expect.poll(expiryText, { timeout: 20_000 }).not.toBe(before);
+    await expect(renew).toBeHidden();
+
+    // Thirty-five days out again, not ninety: the same or less (§8).
+    const expiry = await expiryText();
+    expect(expiry).toBeTruthy();
+    const daysOut = (Date.parse(expiry!) - Date.now()) / 86_400_000;
+    expect(daysOut).toBeGreaterThan(30);
+    expect(daysOut).toBeLessThan(40);
+
+    agent.stop();
+  });
+
   test('says it renewed itself even with the panel already open', async ({ page }) => {
     // The panel being closed is the easy case: `keep` has nothing to
     // paint on, and the notice survives to the next open. With the panel

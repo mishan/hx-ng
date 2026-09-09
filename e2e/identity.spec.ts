@@ -168,4 +168,50 @@ test.describe('identity: enrollment and login against a real hxd-ng server', () 
     await page.getByRole('button', { name: 'Log in with identity' }).click();
     await expect(page.locator('.pill')).toContainText('online', { timeout: 10_000 });
   });
+
+  test('a scanned QR code fills everything in and needs no comparison', async ({ page }) => {
+    // What a phone does: the camera opens this client at the URL in the
+    // QR code, with the pairing code, the mailbox, the identity to pin
+    // and the pairing secret already in the fragment.
+    const hlidDir = mkdtempSync(join(tmpdir(), 'hlid-scan-e2e-'));
+    const initOut = hlid(hlidDir, ['init', '--name', 'Alice']);
+    const fingerprint = /fingerprint: (\S+)/.exec(initOut)?.[1];
+
+    const holder = hlidEnroll(
+      hlidDir,
+      ['--server', `http://127.0.0.1:${NG_PORT}`, '--show-url'],
+      true,
+    );
+    const url = await holder.scanUrl;
+    const fragment = url.slice(url.indexOf('#'));
+    expect(fragment).toContain(`identity=${fingerprint}`);
+
+    await page.goto(`/${fragment}`);
+
+    // The panel opens itself: the user is standing in front of a
+    // terminal and the code expires in ten minutes.
+    const codeBox = page.locator('.identity-body .code-entry');
+    await expect(codeBox).toBeVisible({ timeout: 10_000 });
+    await expect(codeBox).toHaveValue(/^[0-9A-Z]{4}-[0-9A-Z]{4}$/);
+
+    // The fragment is out of the address bar — it carries the pairing
+    // secret, and a URL that stays there gets copied and bookmarked.
+    expect(page.url()).not.toContain('#enroll=');
+    expect(page.url()).not.toContain('pair=');
+
+    // No fingerprint to compare: the scan made that check in software.
+    await expect(page.locator('.identity-body .device-fp')).toHaveCount(0);
+
+    await page.getByRole('button', { name: 'Enroll with code' }).click();
+    await expect(page.locator('.identity-body')).toContainText('This browser is now a device of', {
+      timeout: 20_000,
+    });
+    await expect(page.locator('.identity-body')).toContainText('Alice');
+
+    expect(await holder.exited).toBe(0);
+    // And the holder saw a request whose pairing proof verified, so it
+    // did not ask for the comparison either.
+    expect(holder.output()).toContain('(scanned)');
+    expect(holder.output()).not.toContain('Compare the device fingerprint');
+  });
 });

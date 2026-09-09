@@ -89,6 +89,9 @@ bind = "127.0.0.1:${ngPort}"
 key = "identity-server.key"
 new_accounts = "guest"
 unattested = "guest"
+# So hlid enroll draws a QR code, and points it at this dev server,
+# which is where the test's page actually lives.
+web = "http://localhost:5701/"
 `,
   );
   const proc: ChildProcessWithoutNullStreams = spawn(bin('hxd'), ['--config', 'hxd-ng.toml'], {
@@ -129,19 +132,29 @@ export function hlidEnroll(cwd: string, args: string[], approve: boolean): HlidE
 
   let output = '';
   let resolveCode: (c: string) => void;
+  let resolveUrl: (u: string) => void;
   const code = new Promise<string>((resolve, reject) => {
     resolveCode = resolve;
     setTimeout(() => reject(new Error(`hlid enroll showed no code:\n${output}`)), 30_000).unref();
+  });
+  // Only present with `--show-url`, and only when the server named a web
+  // client — so a caller that does not ask for it never awaits this.
+  const scanUrl = new Promise<string>((resolve, reject) => {
+    resolveUrl = resolve;
+    setTimeout(() => reject(new Error(`hlid enroll showed no scan URL:\n${output}`)), 30_000).unref();
   });
   child.stderr.on('data', (chunk: Buffer) => {
     output += chunk.toString();
     // The same eight characters and hyphen a user reads off the screen.
     const m = /\b([0-9A-Z]{4}-[0-9A-Z]{4})\b/.exec(output);
     if (m) resolveCode(m[1]!);
+    const u = /(https?:\/\/\S*#enroll=\S+)/.exec(output);
+    if (u) resolveUrl(u[1]!);
   });
 
   return {
     code,
+    scanUrl,
     output: () => output,
     exited: new Promise<number>((resolve) => child.on('close', (c) => resolve(c ?? -1))),
     stop: () => child.kill(),
@@ -157,6 +170,8 @@ function hlidEnv(cwd: string): NodeJS.ProcessEnv {
 export interface HlidEnroll {
   /** Resolves with the pairing code as soon as `hlid` prints it. */
   code: Promise<string>;
+  /** Resolves with the QR code's URL, when run with `--show-url`. */
+  scanUrl: Promise<string>;
   /** Everything `hlid` has said so far — its prompt, for assertions. */
   output: () => string;
   exited: Promise<number>;

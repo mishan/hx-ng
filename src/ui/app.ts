@@ -49,6 +49,7 @@ import { clock, fill, h } from './dom';
 import { icon } from './icons';
 import { pickIcon } from './iconpicker';
 import { IdentityPanel } from './identity';
+import { takeScanFragment, type Scanned } from '../identity/scan';
 import { renderRoster } from './roster';
 import { Tiles } from './tiles';
 import { appendLine, isAtBottom, renderTranscript, scrollToEnd } from './transcript';
@@ -63,6 +64,8 @@ export class App {
   private media: VoiceSession | null = null;
   private debug: DebugPanel;
   private identityPanel: IdentityPanel;
+  /** Set when this page was opened by a QR code, or by a broken one. */
+  private openPanelForScan = false;
   private pingTimer: number | null = null;
   private url = '';
   /** The store revision the transcript element was last drawn from. */
@@ -117,7 +120,23 @@ export class App {
     // deployment's own default is the reasonable guess — it is, after
     // all, "the ordinary case of the client sitting in front of its own
     // server" the rest of this client already assumes.
-    this.identityPanel = new IdentityPanel(() => this.url || this.config.defaultServer);
+    // The scan fragment is read here, before anything else can navigate
+    // away from it — `takeScanFragment` also clears it from the address
+    // bar, since the pairing secret in it should not survive a copied
+    // URL or a bookmark (`identity-enrollment.md` §5.6).
+    let scanned: Scanned | null = null;
+    let scanError: string | null = null;
+    try {
+      scanned = takeScanFragment();
+    } catch (e) {
+      scanError = e instanceof Error ? e.message : String(e);
+    }
+    this.identityPanel = new IdentityPanel(
+      () => this.url || this.config.defaultServer,
+      scanned,
+      scanError,
+    );
+    this.openPanelForScan = scanned !== null || scanError !== null;
     this.buildShell();
     this.applyTheme(readTheme());
 
@@ -142,6 +161,11 @@ export class App {
     // `?debug` opens the drawer before the first frame, which is what you
     // want when the thing you are debugging is the login itself.
     if (new URLSearchParams(location.search).has('debug')) this.debug.toggle(true);
+
+    // A page opened by a QR code has one job, and the user is standing
+    // in front of a terminal waiting for it. Opening the panel is not a
+    // convenience here — the code expires in ten minutes.
+    if (this.openPanelForScan) this.identityPanel.toggle(true);
 
     // A reload is a dropped connection like any other: if this tab still
     // holds a session for the server it was last on, go straight back

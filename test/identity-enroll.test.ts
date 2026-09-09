@@ -1,6 +1,14 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { base64urlToBytes, bytesToBase64url, bytesToHex, hexToBytes, type DeviceCert } from '@hotline-ng/client';
+import {
+  base64urlToBytes,
+  bytesToBase64url,
+  bytesToHex,
+  hexToBytes,
+  pairTag,
+  type DeviceCert,
+} from '@hotline-ng/client';
+import { decodeCanonical, mapGet } from '../packages/hotline-ng/src/cbor';
 
 import {
   buildHlidCertCommand,
@@ -238,6 +246,54 @@ describe('enrollWithCode', () => {
     expect(await enrollWithCode({ mailbox, code: 'C', device: await storedDevice(), pinned: null })).toEqual({
       kind: 'gone',
     });
+  });
+
+  it('folds a pairing tag into the request when the page was scanned', async () => {
+    insideTheCertificatesLifetime();
+    const calls = fetchReturning([
+      { status: 201, body: { request: 's' } },
+      { status: 200, body: { bundle: bundle() } },
+    ]);
+    const pairingSecret = new Uint8Array(16).fill(0x5a);
+
+    await enrollWithCode({
+      mailbox,
+      code: 'K7PM-4XWE',
+      device: await storedDevice(),
+      // A scan pins the identity it expects before asking, so this is
+      // the fingerprint off the QR code rather than one remembered from
+      // a previous enrollment.
+      pinned: vectors.keys.identity.fingerprint,
+      pairingSecret,
+    });
+
+    const posted = JSON.parse(calls[0]!.init!.body as string);
+    const decoded = decodeCanonical(base64urlToBytes(posted.request));
+    const pair = mapGet(decoded, 'pair');
+    expect(pair?.t).toBe('bytes');
+    // The holder recomputes exactly this under the secret it drew, and
+    // refuses the request outright if it does not match.
+    const expected = await pairTag(pairingSecret, hexToBytes(devicePubHex));
+    expect(bytesToHex((pair as { v: Uint8Array }).v)).toBe(bytesToHex(expected));
+  });
+
+  it('reports a scanned answer from the wrong identity without asking', async () => {
+    // With a scan the pin came off the QR code, so a mismatch is not a
+    // user changing identities — it is the answer not being from the
+    // identity whose screen they photographed.
+    insideTheCertificatesLifetime();
+    fetchReturning([
+      { status: 201, body: { request: 's' } },
+      { status: 200, body: { bundle: bundle() } },
+    ]);
+    const outcome = await enrollWithCode({
+      mailbox,
+      code: 'K7PM-4XWE',
+      device: await storedDevice(),
+      pinned: 'zzzz'.repeat(13),
+      pairingSecret: new Uint8Array(16).fill(0x5a),
+    });
+    expect(outcome.kind).toBe('identity-changed');
   });
 
   it('refuses a bundle certifying a device that is not this one', async () => {

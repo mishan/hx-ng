@@ -30,6 +30,7 @@ import {
   decodeDeviceCert,
   fingerprintOf,
   hexToBytes,
+  pairTag,
   signEnrollRequest,
   verifyEnvelope,
   type Card,
@@ -215,6 +216,14 @@ export interface CodeEnrollment {
   days?: number;
   /** The identity this browser has enrolled with before, if any. */
   pinned: string | null;
+  /**
+   * The pairing secret from a scanned QR code (§5.6). Present, the
+   * request carries a keyed tag proving it came from whoever scanned
+   * the holder's screen, and `pinned` will have been set from the same
+   * scan — so the answer is checked against an identity this browser
+   * knew *before* it asked, rather than one it learned from the answer.
+   */
+  pairingSecret?: Uint8Array;
   signal?: AbortSignal;
 }
 
@@ -240,13 +249,15 @@ export type CodeOutcome =
  */
 export async function enrollWithCode(opts: CodeEnrollment): Promise<CodeOutcome> {
   const deviceEncPubHex = bytesToHex(opts.device.deviceEncPub);
+  const device = hexToBytes(opts.device.devicePub);
   const request = await signEnrollRequest(opts.device.deviceSign, {
-    device: hexToBytes(opts.device.devicePub),
+    device,
     deviceEnc: opts.device.deviceEncPub,
     name: opts.name,
     caps: opts.caps,
     days: opts.days,
     time: Math.floor(Date.now() / 1000),
+    pair: opts.pairingSecret ? await pairTag(opts.pairingSecret, device) : undefined,
   });
 
   const secret = await postEnrollRequest(opts.mailbox, request, opts.code);

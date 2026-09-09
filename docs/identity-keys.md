@@ -440,10 +440,31 @@ What this client is responsible for, and why:
    objects instead. It is kept in `meta`, not on the device record, so
    that "forget this device" does not quietly clear it.
 
-Not implemented here yet: the QR path (`identity-enrollment.md` §5.6),
-which would fill the code in from a scan and let the enrollee pin the
-identity *before* it asks rather than after; and posting a renewal
-without a code (§8), which needs `hlid agent` at the other end.
+**And when the code was scanned rather than typed** (§5.6), two of those
+four change. A QR code carries the pairing code, the mailbox, the
+identity fingerprint and a 16-byte pairing secret, all in the URL's
+*fragment* — which browsers do not send to the server, so none of it
+reaches an access log. This client reads it once at startup and clears
+it from the address bar, because a URL that stays there gets copied,
+bookmarked and restored.
+
+What that buys is the two checks becoming software's job rather than a
+human's. The identity is pinned from the code itself, so it is checked
+*before* this browser asks rather than against whatever it was enrolled
+with last time — which on a first enrollment is nothing. And the pairing
+secret becomes a keyed tag on the request, which the holder verifies
+under the secret it drew and the mailbox never saw. So the panel drops
+the fingerprint comparison and the terminal drops the line asking for
+it.
+
+A scanned answer from the wrong identity is therefore not a question but
+a refusal: with a typed code, a changed fingerprint might be a user
+changing identities, and it asks. With a scan, the pin came off the
+screen they photographed, and an answer from somewhere else is simply
+wrong.
+
+Not implemented here yet: posting a renewal without a code (§8), which
+needs `hlid agent` at the other end.
 
 ---
 

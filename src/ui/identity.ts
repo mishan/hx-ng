@@ -31,7 +31,8 @@ import {
   validateEnrollment,
   type EnrollmentResult,
 } from '../identity/enroll';
-import { mailboxFrom, type Mailbox } from '../identity/mailbox';
+import { mailboxFrom, scannedMailbox, type Mailbox } from '../identity/mailbox';
+import type { Scanned } from '../identity/scan';
 import {
   attachCertificate,
   ensureActiveDevice,
@@ -87,8 +88,18 @@ export class IdentityPanel {
   /** Whose device this browser just became, shown once after enrolling
    *  (`identity-enrollment.md` §5.5). */
   private becameLabel: string | null = null;
+  /** The QR code this page was opened by, if it was (§5.6). Read once at
+   *  startup and taken out of the address bar there. */
+  private scanned: Scanned | null = null;
+  private scanError: string | null = null;
 
-  constructor(private serverUrl: () => string) {
+  constructor(
+    private serverUrl: () => string,
+    scanned: Scanned | null = null,
+    scanError: string | null = null,
+  ) {
+    this.scanned = scanned;
+    this.scanError = scanError;
     this.body = h('div', { class: 'identity-body' });
     const closeBtn = h('button', { class: 'ghost' }, 'Close');
     closeBtn.onclick = () => this.toggle(false);
@@ -141,6 +152,16 @@ export class IdentityPanel {
 
   private async findMailbox(): Promise<void> {
     const server = this.serverUrl().trim();
+    // A scan names its own mailbox, and the point of that is that the
+    // user cannot end up pointed at the wrong one — so it wins over
+    // whatever this page's server field says, and does not need it set
+    // at all. A phone that followed a QR code has no connect form
+    // behind it.
+    if (this.scanned) {
+      this.mailbox = scannedMailbox(this.scanned.mailbox);
+      if (this.open && this.device && !this.device.cert) this.render();
+      return;
+    }
     if (!server) {
       // Cleared rather than left alone: a code box for a server this
       // panel is no longer pointed at would post to the wrong place.
@@ -228,6 +249,14 @@ export class IdentityPanel {
    * compare it against.
    */
   private codeSection(device: StoredDevice): HTMLElement | null {
+    if (this.scanError) {
+      // A scanned link that is malformed is not something to shrug off
+      // into the typed path: it means a QR code was read and something
+      // is wrong with it, and quietly dropping the pinned identity and
+      // the pairing proof would turn the stronger ceremony into the
+      // weaker one without saying so.
+      return h('div', { class: 'enroll-code' }, h('p', { class: 'error' }, this.scanError));
+    }
     if (!this.mailbox) return null;
 
     const input = h('input', {
@@ -236,6 +265,7 @@ export class IdentityPanel {
       placeholder: 'K7PM-4XWE',
       spellcheck: false,
       autocomplete: 'off',
+      value: this.scanned?.code ?? '',
     });
     const status = h('p', { class: 'muted', hidden: true });
     const error = h('p', { class: 'error', hidden: true });
@@ -248,22 +278,32 @@ export class IdentityPanel {
     return h(
       'div',
       { class: 'enroll-code' },
-      h('h3', {}, 'Enroll with a code'),
-      h(
-        'p',
-        { class: 'muted' },
-        'Run ',
-        h('code', {}, 'hlid enroll --server …'),
-        ' wherever your identity key is, and type the code it shows.',
-      ),
+      h('h3', {}, this.scanned ? 'Enroll this device' : 'Enroll with a code'),
+      this.scanned
+        ? h(
+            'p',
+            { class: 'muted' },
+            'Scanned from ',
+            h('strong', {}, this.scanned.mailbox),
+            '. Approve it where hlid is running.',
+          )
+        : h(
+            'p',
+            { class: 'muted' },
+            'Run ',
+            h('code', {}, 'hlid enroll --server …'),
+            ' wherever your identity key is, and type the code it shows.',
+          ),
       h('div', { class: 'code-row' }, input, submit),
-      h(
-        'div',
-        { class: 'field-row' },
-        h('span', { class: 'k' }, 'This device'),
-        h('code', { class: 'device-fp' }, this.shortDeviceFp ?? '…'),
-        h('span', { class: 'note' }, 'hlid will show the same eight characters — check that they match.'),
-      ),
+      this.scanned
+        ? null
+        : h(
+            'div',
+            { class: 'field-row' },
+            h('span', { class: 'k' }, 'This device'),
+            h('code', { class: 'device-fp' }, this.shortDeviceFp ?? '…'),
+            h('span', { class: 'note' }, 'hlid will show the same eight characters — check that they match.'),
+          ),
       status,
       error,
     );
@@ -298,7 +338,11 @@ export class IdentityPanel {
         name: defaultDeviceName(),
         caps: CAPS.WEB,
         days: this.certDays,
-        pinned: await pinnedIdentity(),
+        // A scan pins the identity it expects *before* asking. A typed
+        // code can only compare against what this browser was enrolled
+        // with before, which on a first enrollment is nothing.
+        pinned: this.scanned?.identity ?? (await pinnedIdentity()),
+        pairingSecret: this.scanned?.pairingSecret,
         signal: this.waiting.signal,
       });
       switch (outcome.kind) {
@@ -307,9 +351,20 @@ export class IdentityPanel {
         case 'gone':
           throw new IdentityError('bad-field', 'That request expired before it was answered. Try again with a fresh code.');
         case 'identity-changed': {
-          // Not an error, and not something to decide for the user:
-          // people do change identities. But it is the shape a
-          // substituted answer has (§9), so it stops here and says so.
+          if (this.scanned) {
+            // The pin came off the QR code this page was opened with, so
+            // a mismatch is not a user changing identities — it is the
+            // answer not being from the identity whose screen they
+            // photographed. There is nothing to confirm.
+            throw new IdentityError(
+              'bad-field',
+              `This certificate is from identity ${outcome.now}, not the ${outcome.was} the code was for. Nothing was stored.`,
+            );
+          }
+          // A typed code pins only what this browser was enrolled with
+          // before, and people do change identities — so this is a
+          // question rather than a refusal. It is still the shape a
+          // substituted answer has (§9), which is why it is asked.
           status.hidden = true;
           const ok = confirm(
             `This browser was enrolled with identity ${outcome.was}.\n\n` +

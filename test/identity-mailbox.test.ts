@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { IdentityError, bytesToBase64url, hexToBytes } from '@hotline-ng/client';
 
-import { awaitAnswer, mailboxFrom, postEnrollRequest } from '../src/identity/mailbox';
+import { awaitAnswer, mailboxFrom, postEnrollRequest, scannedMailbox } from '../src/identity/mailbox';
 import vectors from '../packages/hotline-ng/test/identity-vectors.json';
 
 const MAILBOX = { base: 'https://hl.example/identity/enroll' };
@@ -53,6 +53,28 @@ describe('mailboxFrom', () => {
     expect(mailboxFrom('https://hl.example', '/identity/enroll')).toEqual({
       base: 'https://hl.example/identity/enroll',
     });
+  });
+});
+
+describe('scannedMailbox', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('takes the scheme from the page, never from the QR code', () => {
+    // A page on https cannot fetch http at all, and taking the scheme
+    // from the page means a scanned code can never downgrade the
+    // connection — it has no say in it.
+    vi.stubGlobal('location', { protocol: 'https:', host: 'app.example', hostname: 'app.example' });
+    expect(scannedMailbox('hl.example').base).toBe('https://hl.example/identity/enroll');
+
+    vi.stubGlobal('location', { protocol: 'http:', host: 'localhost:5701', hostname: 'localhost' });
+    expect(scannedMailbox('127.0.0.1:5700').base).toBe('http://127.0.0.1:5700/identity/enroll');
+  });
+
+  it('is page-relative when the scan names this page own host', () => {
+    // The ordinary deployment: reached through the same reverse proxy
+    // that served the page, and in `npm run dev` through Vite's proxy.
+    vi.stubGlobal('location', { protocol: 'https:', host: 'hl.example', hostname: 'hl.example' });
+    expect(scannedMailbox('hl.example').base).toBe('/identity/enroll');
   });
 });
 

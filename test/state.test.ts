@@ -219,6 +219,60 @@ describe('transcript bounds', () => {
   });
 });
 
+describe('public chat history', () => {
+  it('deduplicates overlap with live chat and keeps id order at one timestamp', () => {
+    const s = new Store();
+    s.add(LOBBY, chat(2_000, 'live', { id: 3, from: { uid: 9, nick: 'Alice' } }));
+    const added = s.mergeHistory(
+      [
+        chat(1_000, 'one', { id: 1, from: { nick: 'Alice', icon: 128 } }),
+        chat(2_000, 'two', { id: 2, from: { nick: 'Alice', icon: 128 } }),
+        chat(2_000, 'live', { id: 3, from: { nick: 'Alice', icon: 128 } }),
+      ],
+      true,
+      'older',
+    );
+
+    expect(added).toBe(2);
+    expect(s.conversation(LOBBY)!.lines.map((line) => line.id)).toEqual([1, 2, 3]);
+    expect(s.oldestHistoryId).toBe(1);
+    expect(s.newestHistoryId).toBe(3);
+    expect(s.historyExhausted).toBe(false);
+  });
+
+  it('keeps the page it just fetched when the transcript is already full', () => {
+    const s = new Store();
+    for (let i = 1; i <= 2000; i++) s.add(LOBBY, chat(10_000 + i, `live ${i}`, { id: 1000 + i }));
+    const added = s.mergeHistory(
+      Array.from({ length: 200 }, (_, n) => chat(1_000 + n, `old ${n}`, { id: 1 + n })),
+      true,
+      'older',
+    );
+
+    expect(added).toBe(200);
+    const lines = s.conversation(LOBBY)!.lines;
+    expect(lines).toHaveLength(2000);
+    expect(lines[0]!.id).toBe(1);
+    expect(s.oldestHistoryId).toBe(1);
+    // The newest lines made room instead, and their ids went with them,
+    // so a catch-up can bring them back rather than filtering them out.
+    expect(s.hasHistory(3000)).toBe(false);
+    expect(s.newestHistoryId).toBe(2800);
+  });
+
+  it('keeps chat ids separate from private-mail ids and records exhaustion', () => {
+    const s = new Store();
+    s.mergeHistory([chat(1, 'history', { id: 7 })], false, 'older');
+    expect(s.hasHistory(7)).toBe(true);
+    expect(s.hasMail(7)).toBe(false);
+    expect(s.historyExhausted).toBe(true);
+
+    const pm = s.openPm({ login: 'alice', nick: 'Alice' });
+    s.add(pm.id, chat(2, 'mail', { id: 7 }));
+    expect(s.hasMail(7)).toBe(true);
+  });
+});
+
 describe('small translations', () => {
   it('maps a chat style to a line kind', () => {
     expect(styleToKind('action')).toBe('action');

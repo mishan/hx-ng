@@ -211,6 +211,7 @@ Typed into the composer:
 | `/me <text>` | chat with `style: "action"` |
 | `/msg <nick\|uid\|account> <text>` | open a PM conversation and send. An account name reaches somebody who is not here |
 | `/mail` | load earlier stored messages, a page at a time |
+| `/history` | load an earlier page of public chat; scrolling to the top does the same |
 | `/block <who>`, `/unblock <who>` | a nick, an account, or (to unblock) a fingerprint |
 | `/blocks` | who you have blocked |
 | `/nick <name>` | needs `use_any_name` |
@@ -241,6 +242,17 @@ Typed into the composer:
   event carrying it arrives — including your own, because the server
   echoes chat to its author. Private messages are the exception the
   protocol forces: `msg` has no echo, so the sender's half is local.
+- **Public history and live chat meet on the line id.** The newest page
+  is loaded after login, reaching the top pages backwards without moving
+  the line under the reader's eyes, and an unreplayable resume gap pages
+  forward until it catches up. History replies may overlap live events;
+  an id is rendered once. The transcript is a window over the log rather
+  than a copy of it: paging back past the line cap drops lines off the
+  other end and forgets their ids with them, so what scrolls out can be
+  fetched again. Redacted rows remain as placeholders, and a line that
+  carried an image says which of the three it is — still there and not
+  drawable here yet, its handle expired, or removed — without inventing
+  bytes the server no longer has.
 - **A conversation is a person, not a uid.** Mail that waited for you
   arrives with `uid: 0`, because its sender had no session when it was
   flushed — so threads are keyed on the account where there is one, and

@@ -68,7 +68,8 @@ function lineEl(line: Line, prev: Line | undefined, store: Store): HTMLElement {
   // A message that waited has no live uid to look a face up by — the
   // sender had no session when it was flushed — so it gets no icon
   // rather than the wrong one.
-  const user = from && from.uid > 0 ? store.user(from.uid) : undefined;
+  const user = from?.uid !== undefined && from.uid > 0 ? store.user(from.uid) : undefined;
+  const iconId = user?.icon ?? from?.icon;
 
   return h(
     'div',
@@ -80,9 +81,16 @@ function lineEl(line: Line, prev: Line | undefined, store: Store): HTMLElement {
     h(
       'span',
       { class: 'gutter' },
-      sameSpeaker || !user ? null : icon(user.icon, CHAT_SCALE),
+      sameSpeaker || iconId === undefined ? null : icon(iconId, CHAT_SCALE),
     ),
-    h('span', { class: 'name', title: from?.login ?? (from ? `uid ${from.uid}` : '') }, sameSpeaker ? '' : (from?.nick ?? '')),
+    h(
+      'span',
+      {
+        class: 'name',
+        title: from?.login ?? (from?.uid !== undefined ? `uid ${from.uid}` : ''),
+      },
+      sameSpeaker ? '' : (from?.nick ?? ''),
+    ),
     h(
       'span',
       { class: 'text' },
@@ -92,6 +100,7 @@ function lineEl(line: Line, prev: Line | undefined, store: Store): HTMLElement {
       // the reader's timezone rather than in UTC.
       line.queued ? h('span', { class: 'tag', title: 'Held by the server until you came back' }, 'queued') : null,
       ...linkify(line.text),
+      mediaTag(line),
     ),
   );
 }
@@ -106,13 +115,25 @@ function eventLine(line: Line, prev: Line | undefined): HTMLElement {
         ? `${line.from?.nick ?? 'server'}: ${line.text}`
         : line.text;
   const label =
-    line.kind === 'broadcast' ? 'broadcast' : line.kind === 'notice' ? '' : '';
+    line.kind === 'broadcast' ? 'broadcast' : line.kind === 'deleted' ? 'deleted' : '';
   return h(
     'div',
     { class: `line ${line.kind}`, title: new Date(line.t).toLocaleString() },
     h('span', { class: 'time' }, stamp(line, prev)),
     h('span', { class: 'gutter' }),
     h('span', { class: 'name' }, label),
-    h('span', { class: 'text' }, ...linkify(text)),
+    h('span', { class: 'text' }, ...linkify(text), mediaTag(line)),
   );
+}
+
+function mediaTag(line: Line): HTMLElement | null {
+  const media = line.media;
+  if (!media) return null;
+  // Three states a reader can tell apart: the server took the image
+  // down, the handle it would be fetched by has expired, or it is still
+  // there and this client cannot draw it yet. The metadata rides in the
+  // title either way — it is what the log keeps once the bytes are gone.
+  const label = media.removed ? 'image removed' : media.id ? 'image' : 'image unavailable';
+  const size = `${media.width}×${media.height}, ${media.bytes} bytes, ${media.type}`;
+  return h('span', { class: 'media-tag', title: size }, label);
 }

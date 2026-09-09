@@ -15,11 +15,14 @@
 import {
   isEvent,
   isReply,
+  RATE_LIMITED,
   RESYNC_REQUIRED,
   type BlocksOk,
   type BlockParams,
   type EventFrame,
   type Events,
+  type HistoryOk,
+  type HistoryParams,
   type InboxCounts,
   type InboxOk,
   type InboxParams,
@@ -99,9 +102,22 @@ interface Saved {
   caps: string[];
   grace: number | null;
   video: VideoConfig | null;
+  historyId: number;
 }
 
 const SAVED_KEY = 'hxd-ng.session';
+
+/** How long the history catch-up waits after `rate_limited`, doubling
+ *  with each refusal. */
+const HISTORY_BACKOFF_MS = 250;
+const HISTORY_BACKOFF_TRIES = 3;
+/** Pages the catch-up will fetch before it stops. At the wire's largest
+ *  page this covers far more scrollback than any client keeps, and it
+ *  means a server that answers `has_more` forever cannot hold the loop
+ *  open for the life of the session. */
+const HISTORY_CATCHUP_PAGES = 20;
+
+const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
 /** Does this tab hold a session for `url` that a `resume` could pick up?
  *  The client asks before showing a login form, so a reload goes
@@ -143,6 +159,9 @@ export interface ConnectionHooks {
    * on `id` rather than appending blindly.
    */
   onMissedMail?: (ok: InboxOk) => void;
+  /** Public-chat pages recovered after an unreplayable outbox gap.
+   *  They may overlap live events already handled; deduplicate by id. */
+  onMissedHistory?: (ok: HistoryOk) => void;
   /** The session is gone for good — kicked, logged out, banned, or the
    *  grace window lapsed. No further reconnection will be attempted. */
   onEnded?: (reason: string) => void;
@@ -174,6 +193,8 @@ export class Connection {
   /** The video ceilings, from the login reply or from the saved session
    *  a resume came back through. */
   video: VideoConfig | null = null;
+  /** Highest durable public-chat id observed on an event or page. */
+  lastHistoryId = 0;
   /** Round-trip time of the last explicit `ping`, in milliseconds. */
   rtt: number | null = null;
 
@@ -202,6 +223,7 @@ export class Connection {
       this.caps = saved.caps ?? [];
       this.grace = saved.grace ?? null;
       this.video = saved.video ?? null;
+      this.lastHistoryId = saved.historyId ?? 0;
     } else if (opts.resumeOnly) {
       throw new Error('no session to resume');
     }
@@ -301,6 +323,7 @@ export class Connection {
   }
 
   private async doLogin(): Promise<void> {
+    const historyAfter = this.lastHistoryId;
     const params: LoginParams = { icon: this.creds.icon };
     // An identity socket ignores `login`/`password` — the token already
     // said who this is (hxd-ng's `docs/hotline-ng-identity.md` §6.1) —
@@ -331,6 +354,11 @@ export class Connection {
     this.setState('online');
     this.hooks.onLogin?.(ok);
     this.hooks.onSnapshot?.({ self: ok.self, users: ok.users, server: ok.server });
+    // Not awaited: the session is up and the room is drawable, and a
+    // catch-up that is paging — or backing off a rate limit — would
+    // otherwise hold the connect screen open behind it. Failures are
+    // traced and swallowed inside.
+    void this.pullMissedHistory(historyAfter);
   }
 
   /** Returns true when the session was recovered (with or without a
@@ -363,6 +391,7 @@ export class Connection {
         clearSaved();
         return false;
       }
+      const historyAfter = this.lastHistoryId;
       // The session lives; only the replay is unrecoverable. Take a
       // fresh snapshot and continue from the seq it reports.
       //
@@ -377,6 +406,7 @@ export class Connection {
       this.retry = 0;
       this.setState('online');
       await this.pullMissedMail();
+      void this.pullMissedHistory(historyAfter);
       return true;
     }
   }
@@ -412,6 +442,40 @@ export class Connection {
     } catch (e) {
       this.trace('in', 'missed-mail-failed', String(e instanceof Error ? e.message : e), true);
     }
+  }
+
+  /** Recover durable public chat after an outbox gap. The cursor is
+   *  captured when `resync_required` arrives: live chat can continue
+   *  while `sync` and these pages are in flight, and using the moving
+   *  highest id would skip the missing range. */
+  private async pullMissedHistory(after: number): Promise<void> {
+    if (!this.hooks.onMissedHistory || after === 0) return;
+    let cursor = after;
+    let refusals = 0;
+    for (let fetched = 0; fetched < HISTORY_CATCHUP_PAGES; ) {
+      let page: HistoryOk;
+      try {
+        page = await this.history({ after: cursor, limit: 200 });
+      } catch (e) {
+        // `rate_limited` is the server pacing this loop, not the end of
+        // the log — the spec says back off and ask again, and taking it
+        // for an answer would leave a gap in the transcript that nothing
+        // ever fills. Every other refusal is an answer.
+        if (e instanceof WireFailure && e.wire.code === RATE_LIMITED && refusals < HISTORY_BACKOFF_TRIES) {
+          await sleep(HISTORY_BACKOFF_MS * 2 ** refusals++);
+          continue;
+        }
+        this.trace('in', 'missed-history-failed', String(e instanceof Error ? e.message : e), true);
+        return;
+      }
+      refusals = 0;
+      fetched++;
+      this.hooks.onMissedHistory(page);
+      const next = page.lines.at(-1)?.id;
+      if (!page.has_more || next === undefined || next <= cursor) return;
+      cursor = next;
+    }
+    this.trace('in', 'missed-history-stopped', `gap still open at ${cursor}`, true);
   }
 
   /** `sync`: the roster and server info, without disturbing the session. */
@@ -502,6 +566,18 @@ export class Connection {
     return this.caps.includes(name);
   }
 
+  // --- public chat history (docs/chat-history.md §7) -------------------
+
+  /** Durable public chat, always ascending by id. `before` pages toward
+   *  older rows; `after` catches up toward newer ones. */
+  async history(params: HistoryParams = {}): Promise<HistoryOk> {
+    const page = await this.request<HistoryOk>('history', params);
+    let advanced = false;
+    for (const line of page.lines) advanced = this.noteHistoryId(line.id) || advanced;
+    if (advanced) this.persist();
+    return page;
+  }
+
   // --- private messages (docs/hotline-ng.md §7.1) -----------------------
 
   /** Send one. Pass a `guid` — a UUID of the client's own choosing — and
@@ -572,6 +648,10 @@ export class Connection {
     // stream is gapless; honouring that promise is what makes a later
     // resume able to pick up exactly where we left off.
     this.seq = frame.seq;
+    if (frame.ev === 'chat') {
+      const id = (frame.data as { id?: unknown } | null)?.id;
+      if (typeof id === 'number') this.noteHistoryId(id);
+    }
     this.persist();
     const set = this.handlers.get(frame.ev);
     if (!set) return; // unknown `ev` values are ignored, per spec
@@ -597,7 +677,16 @@ export class Connection {
       caps: this.caps,
       grace: this.grace,
       video: this.video,
+      historyId: this.lastHistoryId,
     });
+  }
+
+  private noteHistoryId(id: number): boolean {
+    if (Number.isSafeInteger(id) && id > this.lastHistoryId) {
+      this.lastHistoryId = id;
+      return true;
+    }
+    return false;
   }
 
   private trace(dir: 'out' | 'in', kind: string, raw: string, error = false): void {

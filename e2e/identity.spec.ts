@@ -21,7 +21,15 @@ import { join } from 'node:path';
 
 import { expect, test } from '@playwright/test';
 
-import { buildHxdNg, hlid, hlidEnroll, hxdNgAvailable, startServer, type RunningServer } from './hxd-ng';
+import {
+  buildHxdNg,
+  hlid,
+  hlidAgent,
+  hlidEnroll,
+  hxdNgAvailable,
+  startServer,
+  type RunningServer,
+} from './hxd-ng';
 
 const NG_PORT = 5700;
 
@@ -258,5 +266,58 @@ test.describe('identity: enrollment and login against a real hxd-ng server', () 
     await expect(page.locator('.identity-body')).toContainText('Kept the identity this browser already had');
     await expect(page.locator('.identity-body')).toContainText('Enrolled as');
     bob.stop();
+  });
+
+  test('renews itself with no code, against a running hlid agent', async ({ page }) => {
+    // identity-enrollment.md §8: from one-third of its lifetime
+    // remaining a browser posts its old certificate, and the mailbox
+    // routes it by the identity that certificate names — straight to
+    // `hlid agent`. Nobody types anything.
+    const hlidDir = mkdtempSync(join(tmpdir(), 'hlid-renew-e2e-'));
+    hlid(hlidDir, ['init', '--name', 'Alice']);
+
+    const agent = hlidAgent(hlidDir, ['--server', `http://127.0.0.1:${NG_PORT}`, '--renew', 'auto']);
+    const code = await agent.code;
+
+    // The page's clock is controlled from the start, so that time can be
+    // moved past two-thirds of the certificate's life without waiting
+    // sixty days for it. `hlid` is a separate process and keeps the real
+    // clock, which is what makes the renewed certificate genuinely new.
+    const start = Date.now();
+    await page.clock.install({ time: start });
+    await page.goto('/');
+
+    await page.getByRole('button', { name: 'Identity keys…' }).click();
+    const codeBox = page.locator('.identity-body .code-entry');
+    await expect(codeBox).toBeVisible({ timeout: 10_000 });
+    await codeBox.fill(code);
+    await page.getByRole('button', { name: 'Enroll with code' }).click();
+    await expect(page.locator('.identity-body')).toContainText('This browser is now a device of', {
+      timeout: 20_000,
+    });
+    // Seventy days on: past two-thirds of ninety, so the client should
+    // decide a renewal is due the next time it starts.
+    await page.clock.setSystemTime(start + 70 * 24 * 3600 * 1000);
+    await page.reload();
+
+    // No code box, no button, no prompt in the browser: the renewal
+    // happens on its own at startup. The agent approves it because it
+    // was started with --renew auto.
+    await page.getByRole('button', { name: 'Identity keys…' }).click();
+    await expect(page.locator('.identity-body')).toContainText('renewed automatically', {
+      timeout: 20_000,
+    });
+
+    // And it reached the agent as a *renewal*, not as another
+    // enrollment: it was routed by identity with no code, and approved
+    // without a prompt because of --renew auto. The certificate's own
+    // expiry is no use as evidence here — the agent signs both with the
+    // same ninety-day policy, seconds apart on the real clock.
+    expect(agent.output()).toContain('Renew');
+    expect(agent.output()).toContain('yes (--renew auto)');
+
+    // The agent is still up, still holding the identity — the part
+    // `hlid enroll` could not do.
+    agent.stop();
   });
 });

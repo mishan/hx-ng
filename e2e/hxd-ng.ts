@@ -129,8 +129,20 @@ web = "http://localhost:5701/"
  * and doing it this way means the test never has to guess when that is.
  */
 export function hlidEnroll(cwd: string, args: string[], approve: boolean): HlidEnroll {
-  const child = spawn(bin('hlid'), ['enroll', ...args], { cwd, env: hlidEnv(cwd) });
-  child.stdin.write(approve ? 'y\n' : 'n\n');
+  return hlidHolder(cwd, ['enroll', ...args], approve);
+}
+
+/** `hlid agent`: the same driver with no budget, so it stays up and
+ *  takes renewals without a code. */
+export function hlidAgent(cwd: string, args: string[]): HlidEnroll {
+  return hlidHolder(cwd, ['agent', ...args], true);
+}
+
+function hlidHolder(cwd: string, args: string[], approve: boolean): HlidEnroll {
+  const child = spawn(bin('hlid'), args, { cwd, env: hlidEnv(cwd) });
+  // Enough answers for every prompt a test will produce; each waits in
+  // the pipe until it is asked for.
+  child.stdin.write((approve ? 'y\n' : 'n\n').repeat(4));
   child.stdin.end();
 
   let output = '';

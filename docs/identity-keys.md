@@ -463,8 +463,22 @@ changing identities, and it asks. With a scan, the pin came off the
 screen they photographed, and an answer from somewhere else is simply
 wrong.
 
-Not implemented here yet: posting a renewal without a code (§8), which
-needs `hlid agent` at the other end.
+**Renewal needs no code either** (§8). From one-third of the
+certificate's lifetime remaining, this client posts the *old*
+certificate as `prev` and no code at all: the mailbox routes it by the
+identity that certificate names, straight to whoever is running `hlid
+agent`. It happens at startup, fire-and-forget — with nothing listening
+it is one 404 and the renewal banner goes on nagging, which is the
+fallback to a code and then to the paste.
+
+Two things it does not do. It does not paper over a denial: what the
+ninety-day lifetime bounds is how long a *copied* browser profile keeps
+logging in as you, and a renewal prompt for a browser its owner was not
+using is the one signal that copy gives, so a "no" is worth surfacing.
+And it does not ask about a renewal that comes back from a different
+identity — unlike a first enrollment, where a changed fingerprint might
+be a user changing identities, a renewal was addressed to somebody
+specific, and an answer from anywhere else is simply wrong.
 
 ---
 

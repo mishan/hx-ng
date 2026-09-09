@@ -28,6 +28,7 @@ import {
   fetchCardFallback,
   needsRenewal,
   parseEnrollmentPaste,
+  renewWithoutCode,
   validateEnrollment,
   type EnrollmentResult,
 } from '../identity/enroll';
@@ -92,6 +93,9 @@ export class IdentityPanel {
    *  startup and taken out of the address bar there. */
   private scanned: Scanned | null = null;
   private scanError: string | null = null;
+  /** Set when a certificate was renewed in the background, so the panel
+   *  can say so the next time it is opened. */
+  private renewedQuietly = false;
 
   constructor(
     private serverUrl: () => string,
@@ -514,6 +518,9 @@ export class IdentityPanel {
 
     fill(
       this.body,
+      this.renewedQuietly
+        ? h('p', { class: 'became' }, 'This certificate was renewed automatically.')
+        : null,
       this.becameLabel
         ? h(
             'p',
@@ -543,6 +550,46 @@ export class IdentityPanel {
     );
   }
 
+  /**
+   * Try a codeless renewal (`identity-enrollment.md` §8), if this
+   * browser has a certificate past two-thirds of its lifetime and the
+   * server has a mailbox.
+   *
+   * Called at startup and deliberately fire-and-forget: the point of
+   * routing a renewal by `prev` is that the user types nothing, so this
+   * must not block anything or announce itself when there is nobody
+   * listening. `no_holder` is the ordinary outcome — it means no `hlid
+   * agent` is running — and the panel's banner already says what to do
+   * about that.
+   */
+  async tryAutoRenewal(): Promise<void> {
+    try {
+      const device = await getActiveDevice();
+      if (!device?.cert || !device.fingerprint) return;
+      const cert = decodeDeviceCert(device.cert);
+      if (!needsRenewal(cert, Math.floor(Date.now() / 1000))) return;
+
+      await this.findMailbox();
+      if (!this.mailbox) return;
+
+      const outcome = await renewWithoutCode({
+        mailbox: this.mailbox,
+        device,
+        prev: device.cert,
+        name: cert.name,
+        days: this.certDays,
+        pinned: device.fingerprint,
+      });
+      if (outcome.kind !== 'renewed') return;
+      await this.keep(device, outcome.cert, outcome.card, outcome.result);
+      this.renewedQuietly = true;
+    } catch {
+      // Nothing here is worth interrupting a page load for. A renewal
+      // that fails leaves the certificate exactly as it was, and the
+      // panel's banner goes on nagging.
+    }
+  }
+
   private renewalBanner(device: StoredDevice): HTMLElement {
     const dayBtns = RENEWAL_DAYS.map((d) => {
       const b = h('button', { class: `ghost ${d === this.certDays ? 'on' : ''}` }, `${d} days`);
@@ -556,11 +603,34 @@ export class IdentityPanel {
       days: this.certDays,
       name: device.label,
     });
+
+    const status = h('p', { class: 'muted', hidden: true });
+    const error = h('p', { class: 'error', hidden: true });
+    const renewBtn = h('button', { class: 'primary' }, 'Renew now');
+    renewBtn.onclick = () => void this.renewNow(device, status, error, renewBtn);
+
     return h(
       'div',
       { class: 'renewal-nag' },
-      h('p', {}, "This certificate is past two-thirds of its lifetime — renew it with the same command, run again:"),
+      h('p', {}, 'This certificate is past two-thirds of its lifetime.'),
       h('div', {}, ...dayBtns),
+      this.mailbox
+        ? h(
+            'div',
+            {},
+            h(
+              'p',
+              { class: 'muted' },
+              'If ',
+              h('code', {}, 'hlid agent'),
+              ' is running, this needs no code — it will ask there.',
+            ),
+            renewBtn,
+            status,
+            error,
+          )
+        : null,
+      h('p', { class: 'note' }, 'Or run this again wherever hlid is, and paste the result below:'),
       h('div', { class: 'cmd-row' }, h('pre', { class: 'cmd' }, cmd), copyButton(() => cmd)),
       h(
         'p',
@@ -568,6 +638,53 @@ export class IdentityPanel {
         'Longer bounds how long a copied browser profile can keep logging in as you (docs/identity-keys.md §7.2) — pick it with that trade-off in mind, not just to clear this banner.',
       ),
     );
+  }
+
+  private async renewNow(
+    device: StoredDevice,
+    status: HTMLElement,
+    error: HTMLElement,
+    btn: HTMLButtonElement,
+  ): Promise<void> {
+    if (!this.mailbox || !device.cert || !device.fingerprint) return;
+    error.hidden = true;
+    status.hidden = false;
+    status.textContent = 'Waiting for the other end to approve…';
+    btn.disabled = true;
+    this.waiting?.abort();
+    this.waiting = new AbortController();
+    try {
+      const outcome = await renewWithoutCode({
+        mailbox: this.mailbox,
+        device,
+        prev: device.cert,
+        name: device.label,
+        days: this.certDays,
+        pinned: device.fingerprint,
+        signal: this.waiting.signal,
+      });
+      switch (outcome.kind) {
+        case 'no-holder':
+          throw new IdentityError(
+            'bad-field',
+            'Nothing is listening for this identity. Start `hlid agent`, or renew with the command below.',
+          );
+        case 'denied':
+          throw new IdentityError('bad-field', `The other end declined this renewal (${outcome.reason}).`);
+        case 'gone':
+          throw new IdentityError('bad-field', 'That request expired before it was answered.');
+        case 'renewed':
+          await this.keep(device, outcome.cert, outcome.card, outcome.result);
+          break;
+      }
+    } catch (e) {
+      status.hidden = true;
+      error.textContent = e instanceof Error ? e.message : String(e);
+      error.hidden = false;
+    } finally {
+      btn.disabled = false;
+      this.waiting = null;
+    }
   }
 
   private async forget(): Promise<void> {

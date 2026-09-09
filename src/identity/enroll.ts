@@ -278,3 +278,89 @@ export async function enrollWithCode(opts: CodeEnrollment): Promise<CodeOutcome>
   }
   return { kind: 'enrolled', result, cert, card };
 }
+
+export type RenewalOutcome =
+  | { kind: 'renewed'; result: EnrollmentResult; cert: Uint8Array; card: Uint8Array }
+  /** Nothing is standing by for this identity: `hlid agent` is not
+   *  running, or is running with `--renew deny`. The user has to do
+   *  something, so say so rather than retrying forever. */
+  | { kind: 'no-holder' }
+  | { kind: 'denied'; reason: string }
+  | { kind: 'gone' };
+
+/**
+ * Renew this browser's certificate without anybody typing a code
+ * (`identity-enrollment.md` §8).
+ *
+ * The request carries `prev`, so the mailbox routes it by the identity
+ * that certificate names rather than by a code — straight to whoever is
+ * running `hlid agent`. That is the whole reason a browser can renew on
+ * its own from one-third of its lifetime remaining: there is nothing for
+ * the user to do unless nobody is listening.
+ *
+ * It is still not silent at the other end. The holder prompts, and the
+ * argument for that is worth knowing here too: what the ninety-day
+ * lifetime bounds is how long a *copied* browser profile keeps logging
+ * in as you, and a renewal for a browser its owner was not using is the
+ * one signal that copy gives. This side should not paper over a denial.
+ */
+export async function renewWithoutCode(opts: {
+  mailbox: Mailbox;
+  device: StoredDevice;
+  /** The certificate being renewed; it names this device. */
+  prev: Uint8Array;
+  name?: string;
+  days?: number;
+  /** The identity this browser belongs to, which must not change. */
+  pinned: string;
+  signal?: AbortSignal;
+}): Promise<RenewalOutcome> {
+  const device = hexToBytes(opts.device.devicePub);
+  const request = await signEnrollRequest(opts.device.deviceSign, {
+    device,
+    deviceEnc: opts.device.deviceEncPub,
+    name: opts.name,
+    // No `caps`: absent means "whatever your policy gives" (§4), and a
+    // renewal is narrowed by the certificate it replaces anyway. Naming
+    // them here would only be a way to ask for less by accident.
+    days: opts.days,
+    time: Math.floor(Date.now() / 1000),
+    prev: opts.prev,
+  });
+
+  let secret: string;
+  try {
+    secret = await postEnrollRequest(opts.mailbox, request, null);
+  } catch (e) {
+    // `no_holder` is the expected outcome when no agent is running, not
+    // a failure to report as one.
+    if (e instanceof IdentityError && /Nothing is listening/.test(e.message)) {
+      return { kind: 'no-holder' };
+    }
+    throw e;
+  }
+
+  const answer = await awaitAnswer(opts.mailbox, secret, opts.signal);
+  if (answer.kind === 'denied') return { kind: 'denied', reason: answer.reason };
+  if (answer.kind === 'gone') return { kind: 'gone' };
+
+  const { cert, card } = decodeBundle(answer.bundle);
+  const result = await validateEnrollment(
+    cert,
+    card,
+    opts.device.devicePub,
+    bytesToHex(opts.device.deviceEncPub),
+    Math.floor(Date.now() / 1000),
+  );
+  if (result.fingerprint !== opts.pinned) {
+    // A renewal cannot legitimately change identity: this browser is
+    // already somebody's device and asked that identity for a new
+    // certificate. An answer from anywhere else is the substituted
+    // answer of §9, and there is nothing to ask the user about.
+    throw new IdentityError(
+      'bad-field',
+      `this renewal came back from identity ${result.fingerprint}, not ${opts.pinned}`,
+    );
+  }
+  return { kind: 'renewed', result, cert, card };
+}

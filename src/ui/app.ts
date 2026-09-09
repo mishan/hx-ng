@@ -167,6 +167,13 @@ export class App {
     // convenience here — the code expires in ten minutes.
     if (this.openPanelForScan) this.identityPanel.toggle(true);
 
+    // A certificate past two-thirds of its lifetime renews itself when
+    // something is listening (`identity-enrollment.md` §8) — the whole
+    // point of routing a renewal by `prev` is that the user types
+    // nothing. Fire-and-forget: with no agent running this is one 404
+    // and nothing else, and the panel's banner is what nags.
+    void this.identityPanel.tryAutoRenewal();
+
     // A reload is a dropped connection like any other: if this tab still
     // holds a session for the server it was last on, go straight back
     // into it rather than making someone log in again to reach the room

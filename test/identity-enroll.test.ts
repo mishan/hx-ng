@@ -15,6 +15,7 @@ import {
   enrollWithCode,
   needsRenewal,
   parseEnrollmentPaste,
+  renewWithoutCode,
   validateEnrollment,
 } from '../src/identity/enroll';
 import type { StoredDevice } from '../src/identity/storage';
@@ -309,5 +310,82 @@ describe('enrollWithCode', () => {
     await expect(enrollWithCode({ mailbox, code: 'C', device: stranger, pinned: null })).rejects.toThrow(
       /different device key/,
     );
+  });
+});
+
+describe('renewWithoutCode', () => {
+  const mailbox = { base: 'https://hl.example/identity/enroll' };
+  const bundle = () => bytesToBase64url(hexToBytes(vectors.bundle.encoded_hex));
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
+
+  function insideLifetime() {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date((vectors.device_cert.fields.issued + 60) * 1000));
+  }
+
+  const renew = async (over: Record<string, unknown> = {}) =>
+    renewWithoutCode({
+      mailbox,
+      device: await storedDevice(),
+      prev: hexToBytes(vectors.device_cert.signed_hex),
+      pinned: vectors.keys.identity.fingerprint,
+      ...over,
+    });
+
+  it('posts the old certificate and no code at all', async () => {
+    insideLifetime();
+    const calls = fetchReturning([
+      { status: 201, body: { request: 's' } },
+      { status: 200, body: { bundle: bundle() } },
+    ]);
+    const outcome = await renew();
+    expect(outcome.kind).toBe('renewed');
+
+    const posted = JSON.parse(calls[0]!.init!.body as string);
+    // No code: the mailbox routes this by the identity `prev` names,
+    // straight to whoever is running `hlid agent` (§8). That is the
+    // whole reason the user types nothing.
+    expect(posted).not.toHaveProperty('code');
+
+    const decoded = decodeCanonical(base64urlToBytes(posted.request));
+    expect(mapGet(decoded, 'prev')?.t).toBe('bytes');
+    // And no `caps`: absent means "whatever your policy gives", and a
+    // renewal is narrowed by the certificate it replaces anyway. Naming
+    // them here would only be a way to ask for less by accident.
+    expect(mapGet(decoded, 'caps')).toBeUndefined();
+  });
+
+  it('reports no-holder rather than throwing, since it is the ordinary case', async () => {
+    // No `hlid agent` running. Nothing is wrong; there is just nobody
+    // to ask, and the panel falls back to a code or the paste.
+    insideLifetime();
+    fetchReturning([{ status: 404, body: { error: 'no_holder' } }]);
+    expect((await renew()).kind).toBe('no-holder');
+  });
+
+  it('passes a denial back rather than papering over it', async () => {
+    // A renewal for a browser its owner was not using is the one signal
+    // a copied profile gives, so a "no" is worth surfacing.
+    insideLifetime();
+    fetchReturning([
+      { status: 201, body: { request: 's' } },
+      { status: 403, body: { denied: 'not_mine' } },
+    ]);
+    expect(await renew()).toEqual({ kind: 'denied', reason: 'not_mine' });
+  });
+
+  it('refuses a renewal that comes back from a different identity', async () => {
+    // Unlike a first enrollment there is nothing to ask about: this
+    // browser already belongs to somebody and asked *them*.
+    insideLifetime();
+    fetchReturning([
+      { status: 201, body: { request: 's' } },
+      { status: 200, body: { bundle: bundle() } },
+    ]);
+    await expect(renew({ pinned: 'zzzz'.repeat(13) })).rejects.toThrow(/came back from identity/);
   });
 });

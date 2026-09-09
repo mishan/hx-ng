@@ -68,7 +68,7 @@ async function waitForPort(url: string, timeoutMs: number): Promise<void> {
 }
 
 /** Starts a freshly built `hxd` in a throwaway directory: a guest-only,
- *  unattested identity server — enough to exercise enrolment and login
+ *  unattested identity server — enough to exercise enrollment and login
  *  without also needing a registrar or an existing account. */
 export async function startServer(ngPort: number): Promise<RunningServer> {
   const dir = mkdtempSync(join(tmpdir(), 'hxd-ng-e2e-'));

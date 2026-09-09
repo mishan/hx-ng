@@ -946,7 +946,7 @@ export class App {
     const debugBtn = h('button', { class: 'ghost', title: 'Wire trace and session state (⇧⌘D)' }, 'Debug');
     debugBtn.onclick = () => this.debug.toggle();
 
-    const identityBtn = h('button', { class: 'ghost', title: 'Device keys, enrolment, and renewal' }, 'Identity');
+    const identityBtn = h('button', { class: 'ghost', title: 'Device keys, enrollment, and renewal' }, 'Identity');
     identityBtn.onclick = () => this.identityPanel.toggle();
 
     const themeBtn = h('button', { class: 'ghost', title: 'Theme' });

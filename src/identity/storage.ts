@@ -32,7 +32,7 @@ export interface StoredDevice {
   deviceSign: CryptoKey;
   /** X25519 private, non-extractable. */
   deviceEnc: CryptoKey;
-  /** Kept beside the key it belongs to so enrolment can display it. */
+  /** Kept beside the key it belongs to so enrollment can display it. */
   deviceEncPub: Uint8Array;
   // Absent until a certificate has been pasted (§7.1):
   /** 52-char Crockford base32, the display form; indexed. */

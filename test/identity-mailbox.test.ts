@@ -85,6 +85,19 @@ describe('scannedBase', () => {
     const base = scannedBase('hl.example');
     expect(mailboxFrom(base, '/enroll')).toEqual({ base: 'https://hl.example/enroll' });
   });
+
+  it('does not treat a bare host as this page when the page has a port', () => {
+    // `host` carries the port and `hostname` does not, so they differ
+    // exactly where treating them as equal is wrong. A QR code naming
+    // `hl.example` means port 443; a page served from `hl.example:8443`
+    // is a different server, and resolving page-relative would post the
+    // enrollment request to the one place the code said not to.
+    vi.stubGlobal('location', { protocol: 'https:', host: 'hl.example:8443', hostname: 'hl.example' });
+    expect(scannedBase('hl.example')).toBe('https://hl.example');
+
+    // The page's own host, port and all, is still page-relative.
+    expect(scannedBase('hl.example:8443')).toBe('');
+  });
 });
 
 describe('postEnrollRequest', () => {

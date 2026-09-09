@@ -574,6 +574,72 @@ button.call:disabled { opacity: 0.45; cursor: default; }
   white-space: normal;
 }
 
+/* --- inline media (docs/inline-media.md) ------------------------------- */
+
+/* What is attached and not yet sent. Above the composer, because it is
+   already on the server: the next line will carry it, and until then it
+   can be taken back. */
+.attach-chip {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+  margin: 0 max(0.9rem, env(safe-area-inset-right)) 0 max(0.9rem, env(safe-area-inset-left));
+  padding: 0.35rem 0.5rem;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 0.8rem;
+  flex: none;
+}
+
+.attach {
+  padding-bottom: 0.35rem;
+  font-size: 1.1rem;
+  line-height: 1;
+}
+
+/* The row is sized from the server's own measurements before a byte of
+   the image has arrived, so a slow link fills these in rather than
+   reflowing the conversation around them. */
+.media {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-top: 0.35rem;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+  overflow: hidden;
+  max-width: 100%;
+}
+
+.media-note {
+  color: var(--muted);
+  font-size: 0.75rem;
+  padding: 0 0.5rem;
+  text-align: center;
+}
+
+.media.loaded {
+  border-color: transparent;
+  background: none;
+}
+
+.media-img {
+  display: block;
+  cursor: zoom-in;
+  object-fit: contain;
+  max-width: 100%;
+}
+
+/* An image that has expired or been taken down keeps its space and says
+   so: the line that carried it is still part of the conversation. */
+.media.gone {
+  border-style: dashed;
+}
+
 /* --- roster ----------------------------------------------------------- */
 
 .roster {

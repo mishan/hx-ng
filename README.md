@@ -273,6 +273,21 @@ Typed into the composer:
   sent, in the composer, with a mark on the roster row to match. That is
   what `transport` is for, and it is present whether or not the server
   runs the identity endpoints.
+- **Images are a handle and a fetch, never bytes on the socket.** A
+  picture is attached with the paperclip or pasted straight into the
+  composer, uploaded to `POST /media` there and then — the server is the
+  only thing that can say whether it will take those bytes, and finding
+  out at send time would lose the typed message with them — and the
+  chat line carries the handle it answered with. Inbound, the row is
+  drawn at the size the server measured off its own canonical copy
+  before a byte has arrived, so a slow link fills pictures in rather than
+  reflowing the conversation around them. The bytes come from
+  `GET /media/{id}` with the session's credential, which an `<img src>`
+  cannot send — hence the blob URLs, and hence something owning them.
+  An image whose handle has expired, or that a moderator has revoked,
+  keeps its place and says which. The paperclip is drawn only when the
+  server offers the capability: inert chrome would be a promise this
+  client cannot keep.
 - **Video is opt-in in both directions.** Nothing is published until you
   ask and nothing is received until you subscribe, and the subscription
   is declared as a complete set so turning it all off is one request.
@@ -305,6 +320,7 @@ published name like anybody else would.
 | `src/state.ts` | roster and transcripts; no DOM |
 | `src/ui/` | the shell, roster, transcript, composer, icon picker, video tiles, debug drawer |
 | `src/ui/tiles.ts` | the video strip, and everything a browser needs before it will paint a `<video>` |
+| `src/ui/media.ts` | inline images: one fetch per handle, the blob URLs, and the sized placeholder they replace |
 | `test/`, `packages/hotline-ng/test/` | the tests, kept out of `src` so the published package ships neither them nor a test runner |
 | `tools/build-icons.py` | `icons.rsrc` → sprite sheet |
 

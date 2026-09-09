@@ -18,26 +18,38 @@ import { continuesRun, type Conversation, type Line } from '../state';
 import type { Store } from '../state';
 import { clock, fill, h, linkify } from './dom';
 import { icon } from './icons';
+import { mediaEl, type MediaCache } from './media';
 
 /** Chat-gutter icons stay at 1× — at 2× they compete with the text for
  *  attention, and the roster is where you go to look at people. */
 const CHAT_SCALE = 1;
 
-export function renderTranscript(el: HTMLElement, conv: Conversation, store: Store): void {
+export function renderTranscript(
+  el: HTMLElement,
+  conv: Conversation,
+  store: Store,
+  media: MediaCache,
+): void {
   const nodes: HTMLElement[] = [];
   let prev: Line | undefined;
   for (const line of conv.lines) {
-    nodes.push(lineEl(line, prev, store));
+    nodes.push(lineEl(line, prev, store, media));
     prev = line;
   }
   fill(el, ...nodes);
   scrollToEnd(el);
 }
 
-export function appendLine(el: HTMLElement, line: Line, conv: Conversation, store: Store): void {
+export function appendLine(
+  el: HTMLElement,
+  line: Line,
+  conv: Conversation,
+  store: Store,
+  media: MediaCache,
+): void {
   const atBottom = isAtBottom(el);
   const prev = conv.lines[conv.lines.length - 2];
-  el.append(lineEl(line, prev, store));
+  el.append(lineEl(line, prev, store, media));
   while (el.childElementCount > conv.lines.length) el.firstElementChild?.remove();
   if (atBottom) scrollToEnd(el);
 }
@@ -58,7 +70,12 @@ function stamp(line: Line, prev: Line | undefined): string {
   return prev && clock(prev.t) === now ? '' : now;
 }
 
-function lineEl(line: Line, prev: Line | undefined, store: Store): HTMLElement {
+function lineEl(
+  line: Line,
+  prev: Line | undefined,
+  store: Store,
+  media: MediaCache,
+): HTMLElement {
   if (line.kind !== 'chat') return eventLine(line, prev);
 
   const from = line.from;
@@ -100,7 +117,10 @@ function lineEl(line: Line, prev: Line | undefined, store: Store): HTMLElement {
       // the reader's timezone rather than in UTC.
       line.queued ? h('span', { class: 'tag', title: 'Held by the server until you came back' }, 'queued') : null,
       ...linkify(line.text),
-      mediaTag(line),
+      // An image is a block under the text, not a word in it: a line
+      // may carry one with nothing said at all, which is a picture
+      // posted rather than an empty message.
+      line.media ? mediaEl(line.media, media) : null,
     ),
   );
 }

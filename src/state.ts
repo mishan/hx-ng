@@ -42,7 +42,10 @@ export interface Line {
   id?: number;
   /** A moderated history row keeps its id and timestamp but no text. */
   deleted?: boolean;
-  /** Canonical metadata survives even when the image handle does not. */
+  /** The image this line carried: a handle and the server's own
+   *  measurements of it, never bytes — see `ui/media.ts`. The canonical
+   *  metadata survives even when the handle does not, which is what a
+   *  placeholder is drawn from. */
   media?: HistoryMedia;
 }
 

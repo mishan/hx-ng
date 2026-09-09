@@ -23,11 +23,13 @@ import {
   CAP_HISTORY,
   CAP_INBOX,
   isFingerprint,
+  mediaBlockedReason,
   type BlockParams,
   type ConnState,
   type Credentials,
   type InboxOk,
   type HistoryOk,
+  type Media,
   type MsgParams,
   type RemoteVideo,
   type User,
@@ -53,6 +55,7 @@ import { pickIcon } from './iconpicker';
 import { IdentityPanel } from './identity';
 import { renderRoster } from './roster';
 import { Tiles } from './tiles';
+import { MediaCache } from './media';
 import { appendLine, isAtBottom, renderTranscript, scrollToEnd } from './transcript';
 
 /** Codes that mean "not for you, not now, not ever on this session":
@@ -81,6 +84,16 @@ export class App {
   private url = '';
   /** The store revision the transcript element was last drawn from. */
   private drawnRevision = 0;
+  /** Inline images: one fetch per handle, and the blob URLs to release
+   *  when the session ends. Named for pictures rather than `media`,
+   *  which on this page has meant the voice session since before there
+   *  were any. */
+  private images = new MediaCache();
+  /** An image uploaded and waiting for the line that will carry it.
+   *  Attaching uploads immediately — the server has to see the bytes to
+   *  say whether it will take them, and finding out at send time would
+   *  lose the message with them. */
+  private attached: Media | null = null;
   /** Whether one's own camera is shown back to oneself. A preview is the
    *  only way to find out that a camera is pointed at the ceiling, or
    *  that it is not sending at all, without asking the room. */
@@ -102,6 +115,15 @@ export class App {
     spellcheck: true,
   });
   private composerHint = h('span', { class: 'composer-hint' });
+  private attachBtn = h(
+    'button',
+    { class: 'ghost attach', title: 'Attach an image', hidden: true },
+    '📎',
+  );
+  /** The file picker, kept out of the layout: the paperclip clicks it. */
+  private filePicker = h('input', { type: 'file', hidden: true });
+  /** What is attached, with a way to change your mind before sending. */
+  private attachChip = h('div', { class: 'attach-chip', hidden: true });
   private rosterEl = h('aside', { class: 'roster' });
   private scrim = h('div', { class: 'scrim' });
   private peopleBtn = h(
@@ -231,6 +253,11 @@ export class App {
       onEnded: (reason) => {
         this.say(reason);
         this.media?.teardown();
+        // The handles die with the session, so the blob URLs may as
+        // well: keeping them would leak every picture this page has
+        // seen, and nothing could refetch them anyway.
+        this.images.clear();
+        this.clearAttachment();
         if (this.pingTimer !== null) {
           clearInterval(this.pingTimer);
           this.pingTimer = null;
@@ -238,6 +265,7 @@ export class App {
       },
     });
     this.conn = conn;
+    this.images.attach(conn);
     this.media = new VoiceSession(conn, {
       onLog: (text, bad) => this.say(bad ? `Media error: ${text}` : text),
       onRoom: () => {
@@ -256,6 +284,7 @@ export class App {
     } catch (e) {
       this.conn = null;
       this.media = null;
+      this.images.attach(null);
       throw new Error(
         e instanceof WireFailure ? errorText(e.wire) : e instanceof Error ? e.message : String(e),
       );
@@ -265,6 +294,11 @@ export class App {
     this.shell.hidden = false;
     this.url = d.url;
     this.media.limits = conn.video;
+    // The paperclip appears only where it works: the server offers the
+    // capability, or it does not and inert chrome would be a promise
+    // this client cannot keep.
+    this.attachBtn.hidden = conn.media === null;
+    this.filePicker.accept = conn.media?.types.join(',') ?? '';
     this.renderAll();
     this.composer.focus();
     // Conversations live in memory and die with the page; the mailbox
@@ -330,7 +364,16 @@ export class App {
         from: d.from,
         text: d.text,
         id: d.id,
+        media: d.media,
       });
+    });
+
+    // An image someone posted has been revoked by a moderator. Drop the
+    // bytes we hold and redraw: the line stays, the placeholder says
+    // what happened, and nothing refetches it.
+    conn.on('media_revoked', (d) => {
+      this.images.revoke(d.id);
+      this.renderTranscript();
     });
 
     conn.on('msg', (d) => {
@@ -352,6 +395,7 @@ export class App {
         text: d.text,
         queued: d.queued,
         id: d.id,
+        media: d.media,
       });
       this.renderRail();
       this.renderMail();
@@ -432,6 +476,11 @@ export class App {
     if (!conn) return;
     if (text.startsWith('/')) return this.command(text);
 
+    // Taken before anything is awaited: a second Enter while an upload
+    // is in flight must not send the same image twice.
+    const attached = this.attached;
+    this.clearAttachment();
+
     const conv = this.store.conversation(this.store.active);
     if (conv?.kind === 'pm') {
       const to = addressOf(conv);
@@ -445,8 +494,11 @@ export class App {
       // a double-tap from arriving twice — but it is the field that makes
       // a retry safe at all, and it costs one line.
       const guid = newGuid();
+      const media = attached?.id;
       const params: MsgParams =
-        'to_login' in to ? { to_login: to.to_login, text, guid } : { to: to.to, text, guid };
+        'to_login' in to
+          ? { to_login: to.to_login, text, guid, media }
+          : { to: to.to, text, guid, media };
       const ok = await conn.msg(params);
       // PMs have no echo, so the sender's own half is local.
       const me = this.store.self;
@@ -456,13 +508,63 @@ export class App {
         from: { uid: me?.uid ?? 0, nick: me?.nick ?? 'you' },
         text,
         local: true,
+        media: attached ?? undefined,
       });
       if (ok.queued) {
         this.say(`${conv.title} is not here. The server is holding that for them.`);
       }
       return;
     }
-    await conn.request('chat', { text });
+    // Public chat echoes, so the sender's own copy comes back off the
+    // wire with the image on it; nothing is pushed locally here.
+    await conn.chat({ text, media: attached?.id });
+  }
+
+  // --- attaching an image (docs/inline-media.md §8) ---------------------
+
+  /**
+   * Take a file and hold its handle for the next line.
+   *
+   * The upload happens now rather than at send time, for two reasons.
+   * The server is the only thing that can say whether it will take these
+   * bytes — it re-encodes them and may refuse the format, the size or
+   * the rate — and finding that out at send time would lose the typed
+   * message along with the picture. And a handle in hand makes the send
+   * itself one small frame.
+   */
+  private async attach(file: File): Promise<void> {
+    const conn = this.conn;
+    if (!conn?.media) return;
+    // The local check is for a fast, specific answer; the server checks
+    // everything again and its answer is the one that counts.
+    const blocked = mediaBlockedReason(file, conn.media);
+    if (blocked) return this.say(blocked);
+    this.showAttachment(null, file.name);
+    try {
+      const media = await conn.uploadMedia(file);
+      this.attached = media;
+      this.showAttachment(media, file.name);
+      this.composer.focus();
+    } catch (e) {
+      this.clearAttachment();
+      this.say(e instanceof WireFailure ? errorText(e.wire) : (e as Error).message);
+    }
+  }
+
+  private showAttachment(media: Media | null, name: string): void {
+    const label = media
+      ? `${name} — ${media.width}×${media.height}, ready to send`
+      : `${name} — uploading…`;
+    const remove = h('button', { class: 'ghost', title: 'Remove this image' }, '✕');
+    remove.onclick = () => this.clearAttachment();
+    fill(this.attachChip, h('span', {}, label), remove);
+    this.attachChip.hidden = false;
+  }
+
+  private clearAttachment(): void {
+    this.attached = null;
+    this.attachChip.hidden = true;
+    this.filePicker.value = '';
   }
 
   private async command(raw: string): Promise<void> {
@@ -828,7 +930,7 @@ export class App {
       // Appending one line assumes the DOM still matches the array it was
       // drawn from. A merge rewrites that array, so redraw instead.
       if (this.store.revision !== this.drawnRevision) this.renderTranscript();
-      else appendLine(this.transcript, line, conv, this.store);
+      else appendLine(this.transcript, line, conv, this.store, this.images);
     } else this.renderRail();
     this.renderUnreadTitle();
   }
@@ -927,7 +1029,7 @@ export class App {
 
   private renderTranscript(): void {
     const conv = this.store.conversation(this.store.active);
-    if (conv) renderTranscript(this.transcript, conv, this.store);
+    if (conv) renderTranscript(this.transcript, conv, this.store, this.images);
     this.drawnRevision = this.store.revision;
   }
 
@@ -1070,7 +1172,9 @@ export class App {
       if (e.key === 'Enter' && !e.shiftKey) {
         e.preventDefault();
         const text = this.composer.value.trim();
-        if (!text) return;
+        // An image *is* the message when there is one, so an empty
+        // composer with something attached still sends.
+        if (!text && !this.attached) return;
         this.composer.value = '';
         this.autoGrow();
         this.send(text).catch((err: Error) =>
@@ -1079,6 +1183,27 @@ export class App {
       }
     };
     this.composer.oninput = () => this.autoGrow();
+
+    // Attaching, three ways in. The paperclip opens the picker; the
+    // picker's `accept` list is the server's own, so a phone's photo
+    // roll filters itself. Pasting is the one people reach for without
+    // being told it exists — a screenshot in the clipboard and Ctrl-V —
+    // and it costs six lines.
+    this.attachBtn.onclick = () => this.filePicker.click();
+    this.filePicker.onchange = () => {
+      const file = this.filePicker.files?.[0];
+      if (file) void this.attach(file);
+    };
+    this.composer.addEventListener('paste', (e) => {
+      if (!this.conn?.media) return;
+      const file = [...(e.clipboardData?.items ?? [])]
+        .filter((i) => i.kind === 'file')
+        .map((i) => i.getAsFile())
+        .find((f): f is File => !!f && this.conn!.media!.types.includes(f.type));
+      if (!file) return;
+      e.preventDefault();
+      void this.attach(file);
+    });
 
     // Opening the debug drawer, or any other resize, must not silently
     // scroll the newest line out of view.
@@ -1127,7 +1252,19 @@ export class App {
           // browser needs before it will paint a `<video>`.
           this.tiles.el,
           this.transcript,
-          h('div', { class: 'composer' }, this.composer, this.composerHint),
+          // The chip sits above the composer rather than inside it: the
+          // composer is one row of controls, and an attachment is a
+          // thing already sent to the server that the next line will
+          // carry.
+          this.attachChip,
+          h(
+            'div',
+            { class: 'composer' },
+            this.attachBtn,
+            this.composer,
+            this.composerHint,
+            this.filePicker,
+          ),
         ),
         // Both live inside `.panes` rather than the document, so the
         // slide-in panel is bounded by the pane area and never covers

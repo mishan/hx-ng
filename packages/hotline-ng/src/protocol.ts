@@ -118,6 +118,62 @@ export interface Sender {
   login?: string;
 }
 
+// --- Inline media (docs/inline-media.md §8) -----------------------------
+
+/**
+ * An image on a chat line or a private message.
+ *
+ * The bytes are never here: `id` is an opaque handle, twenty-two
+ * characters of base64url, and the bytes come from `GET /media/{id}`
+ * with the session's own credential. Everything else is the server's
+ * measurement of the image *it* encoded — it decoded whatever was
+ * uploaded and wrote the canonical copy itself — so `width`, `height`
+ * and `bytes` can be trusted to size a placeholder before a byte of it
+ * has arrived.
+ *
+ * `id` is **absent when the bytes have gone**: expired, evicted, or
+ * revoked by a moderator. The rest survives, because "an 800×600 PNG
+ * was here" is worth drawing and an empty line is not.
+ */
+export interface Media {
+  id?: string;
+  /** The canonical MIME type: one of `image/jpeg`, `image/png`,
+   *  `image/gif`, whatever the sender's file was. */
+  type: string;
+  width: number;
+  height: number;
+  bytes: number;
+}
+
+/** What the server will accept, from the login reply. A client checks a
+ *  file against these before spending an upload to be told no. */
+export interface MediaLimits {
+  max_bytes: number;
+  max_dimension: number;
+  max_pixels: number;
+  max_frames: number;
+  max_duration_ms: number;
+  /** The MIME types a file picker should offer. Read rather than
+   *  hard-coded, so a server that one day allows a fourth needs no new
+   *  client. */
+  types: string[];
+}
+
+/** Why a file cannot be sent, in words for the person who picked it, or
+ *  `null` when it can. Checked here so the answer is instant and local;
+ *  the server checks everything again, and its answer is the one that
+ *  counts. */
+export function mediaBlockedReason(file: { type: string; size: number }, limits: MediaLimits): string | null {
+  if (!limits.types.includes(file.type)) {
+    const names = limits.types.map((t) => t.replace('image/', '').toUpperCase()).join(', ');
+    return `This server takes ${names} images only.`;
+  }
+  if (file.size > limits.max_bytes) {
+    return `That image is ${Math.round(file.size / 1024)} KB; this server takes up to ${Math.round(limits.max_bytes / 1024)} KB.`;
+  }
+  return null;
+}
+
 export interface ServerInfo {
   name: string;
   subject: string;
@@ -172,6 +228,9 @@ export interface LoginOk {
   inbox?: InboxCounts;
   /** Present only when the server keeps public-chat history. */
   history?: HistoryConfig;
+  /** Present exactly when `caps` lists `media`. Absent means no images:
+   *  do not draw the paperclip. */
+  media?: MediaLimits;
 }
 
 export interface ResumeParams {
@@ -203,10 +262,20 @@ export interface SyncOk {
  * arrived while its sender was gone — the `msg` event for one carries
  * `uid: 0`.
  */
-export type MsgParams = { text: string; guid?: string } & (
+export type MsgParams = { text: string; guid?: string; media?: string } & (
   | { to: number; to_login?: never }
   | { to_login: string; to?: never }
 );
+
+/** A public chat line. `text` may be empty when `media` is present: the
+ *  image is the message. */
+export interface ChatParams {
+  text: string;
+  style?: ChatStyle;
+  /** A handle from `POST /media`, which must be this session's own
+   *  upload and still live. */
+  media?: string;
+}
 
 /**
  * A fresh `guid` for a `msg`.
@@ -264,6 +333,9 @@ export interface StoredMessage {
   /** Unix seconds, when it was sent. */
   at: number;
   read: boolean;
+  /** The image it was sent with, resolved as of now: with an `id` while
+   *  the bytes are still there, without one when they have gone. */
+  media?: Media;
 }
 
 export interface InboxParams {
@@ -289,13 +361,10 @@ export interface HistorySender {
 }
 
 /** Metadata that remains after the image bytes or handle disappear. */
-export interface HistoryMedia {
-  /** Absent when the handle expired or was revoked. */
-  id?: string;
-  type: string;
-  width: number;
-  height: number;
-  bytes: number;
+export interface HistoryMedia extends Media {
+  /** The line itself was redacted, so the image went with it — as
+   *  against a handle that merely expired, which leaves `id` absent and
+   *  says nothing about why. */
   removed?: boolean;
 }
 
@@ -446,6 +515,8 @@ export interface Events {
     id?: number;
     /** Unix seconds. */
     at: number;
+    /** The image this line carried, when it carried one. */
+    media?: Media;
   };
   notice: { text: string };
   subject: { subject: string };
@@ -454,13 +525,18 @@ export interface Events {
    *  from a guest — and it is the handle `msg_read` takes. `at` is when
    *  it was *sent*, not when it arrived, which is the whole difference
    *  for mail that waited. */
-  msg: { from: Sender; text: string; at: number; queued: boolean; id?: number };
+  msg: { from: Sender; text: string; at: number; queued: boolean; id?: number; media?: Media };
   broadcast: { from: Sender; text: string };
   kicked: Record<string, never>;
   voice_offer: { cid: number; sdp: string };
   voice_ice: { cid: number; candidate: RTCIceCandidateInit | null };
   voice_status: { cid: number; participants: VoiceParticipant[] };
   video_status: { cid: number; publishers: VideoPublication[] };
+  /** A moderator revoked an image. It reaches everyone who could have
+   *  fetched it — which is to say everyone who may have it on screen.
+   *  The line that carried it keeps its metadata, so the right response
+   *  is to drop the picture and leave the placeholder. */
+  media_revoked: { id: string };
   /** The server's placeholder for a domain event this protocol revision
    *  has no mapping for. It exists so `seq` never has holes; a client's
    *  only correct response is to count it and move on. */
@@ -486,6 +562,7 @@ export const CAP_VIDEO = 'video';
 export const CAP_INBOX = 'inbox';
 export const CAP_IDENTITY = 'identity';
 export const CAP_HISTORY = 'history';
+export const CAP_MEDIA = 'media';
 
 /**
  * `resync_required` is not a failure: the session is still alive and the

@@ -129,8 +129,11 @@ function eventLine(line: Line, prev: Line | undefined): HTMLElement {
 function mediaTag(line: Line): HTMLElement | null {
   const media = line.media;
   if (!media) return null;
-  const removed = media.removed || !media.id;
-  const label = removed ? 'image removed' : 'image unavailable';
+  // Three states a reader can tell apart: the server took the image
+  // down, the handle it would be fetched by has expired, or it is still
+  // there and this client cannot draw it yet. The metadata rides in the
+  // title either way — it is what the log keeps once the bytes are gone.
+  const label = media.removed ? 'image removed' : media.id ? 'image' : 'image unavailable';
   const size = `${media.width}×${media.height}, ${media.bytes} bytes, ${media.type}`;
   return h('span', { class: 'media-tag', title: size }, label);
 }

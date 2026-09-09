@@ -410,10 +410,33 @@ export class Store {
     }
     lobby.lines.push(...fresh);
     lobby.lines.sort((a, b) => a.t - b.t || (a.id ?? Number.MAX_SAFE_INTEGER) - (b.id ?? Number.MAX_SAFE_INTEGER));
-    if (lobby.lines.length > MAX_LINES) lobby.lines.splice(0, lobby.lines.length - MAX_LINES);
+    // Trim the end the reader is moving away from. Trimming the front
+    // after prepending a page would throw away the page just fetched —
+    // and, because its ids are recorded, throw it away for good: every
+    // further scroll would fetch a page, discard it, and show nothing.
+    this.trimPublic(lobby, direction === 'older' ? 'newest' : 'oldest');
     if (direction === 'older') this.historyExhausted = !hasMore;
     this.revision++;
     return fresh.length;
+  }
+
+  /** Bound the public transcript, dropping lines from one end and
+   *  forgetting their ids with them.
+   *
+   *  Forgetting is the point: the cap makes a window over the log, not a
+   *  mark on it, so a line that scrolls out of the window has to be
+   *  fetchable again. Keeping the id would have the next page filter it
+   *  out as already seen and leave a hole nothing could fill. Mail is
+   *  the other way round — see `seenMail` — because there the ids are
+   *  how a conversation gets its own mail back. */
+  private trimPublic(lobby: Conversation, from: 'oldest' | 'newest'): void {
+    const excess = lobby.lines.length - MAX_LINES;
+    if (excess <= 0) return;
+    const dropped = from === 'oldest' ? lobby.lines.splice(0, excess) : lobby.lines.splice(MAX_LINES, excess);
+    for (const line of dropped) if (line.id !== undefined) this.seenHistory.delete(line.id);
+    this.oldestHistoryId = undefined;
+    this.newestHistoryId = undefined;
+    for (const id of this.seenHistory) this.recordHistoryId(id);
   }
 
   private recordHistoryId(id: number): void {
@@ -444,7 +467,8 @@ export class Store {
       c.mailIds.add(line.id);
     }
     c.lines.push(line);
-    if (c.lines.length > MAX_LINES) c.lines.splice(0, c.lines.length - MAX_LINES);
+    if (c.kind === 'lobby') this.trimPublic(c, 'oldest');
+    else if (c.lines.length > MAX_LINES) c.lines.splice(0, c.lines.length - MAX_LINES);
     if (fresh && id !== this.active) c.unread++;
     return c;
   }

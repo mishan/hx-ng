@@ -494,6 +494,9 @@ export const CAP_HISTORY = 'history';
  */
 export const RESYNC_REQUIRED = 'resync_required';
 export const SESSION_EXPIRED = 'session_expired';
+/** "Slow down", never "there is nothing more" — a loop that pages on
+ *  the client's behalf has to tell the two apart. */
+export const RATE_LIMITED = 'rate_limited';
 
 /** Human wording for the codes a person can actually act on. Anything
  *  not listed falls back to the server's own `text`, which is always

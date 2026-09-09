@@ -246,8 +246,12 @@ Typed into the composer:
   is loaded after login, reaching the top pages backwards without moving
   the line under the reader's eyes, and an unreplayable resume gap pages
   forward until it catches up. History replies may overlap live events;
-  an id is rendered once. Redacted rows remain as placeholders, and
-  expired or removed image metadata remains visible without inventing
+  an id is rendered once. The transcript is a window over the log rather
+  than a copy of it: paging back past the line cap drops lines off the
+  other end and forgets their ids with them, so what scrolls out can be
+  fetched again. Redacted rows remain as placeholders, and a line that
+  carried an image says which of the three it is — still there and not
+  drawable here yet, its handle expired, or removed — without inventing
   bytes the server no longer has.
 - **A conversation is a person, not a uid.** Mail that waited for you
   arrives with `uid: 0`, because its sender had no session when it was

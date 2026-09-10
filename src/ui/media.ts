@@ -163,23 +163,13 @@ function caption(media: HistoryMedia): string {
 export function mediaEl(media: HistoryMedia, cache: MediaCache): HTMLElement {
   const { width, height } = fit(media);
   const revoked = media.removed || (!!media.id && cache.wasRevoked(media.id));
-  const gone = revoked || !media.id;
+  if (revoked || !media.id) return goneEl(media, revoked);
   const frame = h('div', {
-    class: `media${gone ? ' gone' : ''}`,
+    class: 'media',
     style: { width: `${width}px`, height: `${height}px` },
     title: caption(media),
   });
-  if (gone) {
-    frame.append(
-      h(
-        'span',
-        { class: 'media-note' },
-        revoked ? 'Image removed by a moderator' : 'Image no longer available',
-      ),
-    );
-    return frame;
-  }
-  const id = media.id as string;
+  const id = media.id;
   frame.append(h('span', { class: 'media-note' }, caption(media)));
   // Deferred until the row is near the viewport. The fetch is what
   // costs — an `<img loading="lazy">` defers nothing here, because by
@@ -192,9 +182,10 @@ export function mediaEl(media: HistoryMedia, cache: MediaCache): HTMLElement {
       if (!url) {
         // The third of the three states, and the one that used to look
         // like the first: an image that has gone must not sit there
-        // wearing the caption of one that is still on its way.
-        frame.classList.add('gone');
-        frame.replaceChildren(h('span', { class: 'media-note' }, 'Image no longer available'));
+        // wearing the caption of one that is still on its way. The
+        // *space* goes with it — a placeholder is a promise that a
+        // picture is coming, and there is no longer one to keep.
+        frame.replaceWith(goneEl(media, false));
         return;
       }
       const img = h('img', {
@@ -213,6 +204,29 @@ export function mediaEl(media: HistoryMedia, cache: MediaCache): HTMLElement {
     });
   });
   return frame;
+}
+
+/**
+ * What a line says when the picture is not there: one line of text.
+ *
+ * Not a sized frame. The placeholder a *pending* image gets is drawn at
+ * the server's own measurements so a slow link does not reflow the
+ * conversation around it — but that is a promise the bytes are coming,
+ * and holding a screenshot's worth of blank space open for one that will
+ * never arrive is the promise broken rather than kept. What survives is
+ * the metadata, and the metadata reads as a sentence.
+ *
+ * The dimensions go in the text and not only the `title`, because half
+ * the clients this is written for are phones and a phone cannot hover.
+ */
+function goneEl(media: HistoryMedia, revoked: boolean): HTMLElement {
+  const what = revoked ? 'Image removed by a moderator' : 'Image no longer available';
+  const kind = media.type.replace('image/', '').toUpperCase();
+  return h(
+    'div',
+    { class: 'media gone', title: caption(media) },
+    h('span', { class: 'media-note' }, `${what} — ${kind}, ${media.width}×${media.height}`),
+  );
 }
 
 /** Call `load` once the element is within a screen or so of the

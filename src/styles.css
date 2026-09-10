@@ -627,10 +627,22 @@ button.call:disabled { opacity: 0.45; cursor: default; }
   max-width: 100%;
 }
 
-/* An image that has expired or been taken down keeps its space and says
-   so: the line that carried it is still part of the conversation. */
+/* An image that has expired or been taken down is a remark, not a frame.
+   Sizing it from metadata would hold a screenshot's worth of blank space
+   open for a picture that is never going to arrive — the placeholder
+   promise made to an image still on its way, kept for one that has
+   gone. */
 .media.gone {
-  border-style: dashed;
+  display: block;
+  border: none;
+  background: none;
+  margin-top: 0.15rem;
+}
+
+.media.gone .media-note {
+  padding: 0;
+  text-align: left;
+  font-style: italic;
 }
 
 /* --- roster ----------------------------------------------------------- */

@@ -164,7 +164,6 @@ export class App {
     // An identity login says which account it landed on; a classic one
     // is the account that was typed. A guest is nobody either way.
     me: () => this.conn?.self?.identity?.account ?? this.account,
-    say: (text) => this.say(text),
     onUnread: () => this.renderRail(),
   });
   private newsOpen = false;
@@ -268,6 +267,7 @@ export class App {
     // session, and this one may not be allowed to see it.
     this.news.reset();
     this.newsOpen = false;
+    this.store.covered = false;
     this.chatPane.hidden = false;
     this.account = d.login.trim() || null;
     const creds: Credentials = { ...d };
@@ -296,8 +296,11 @@ export class App {
         this.store.server = server;
         this.store.replaceRoster(users);
         this.renderAll();
-        // A login, or a resync after events were lost: either way the
-        // counts beside what is followed are the server's to restate.
+        // A snapshot after the first is a resync or a fresh login on the
+        // same socket, and either way the news events in between are gone
+        // — and the counts beside what is followed are the server's to
+        // restate.
+        this.news.onReconnected();
         void this.news.refreshFollowing();
       },
       onResumed: (replay) => {
@@ -306,6 +309,9 @@ export class App {
             ? `Reconnected — ${replay} ${replay === 1 ? 'message' : 'messages'} replayed.`
             : 'Reconnected.',
         );
+        // A refresh tried while the socket was down could only say "not
+        // connected", and nothing would ever try again.
+        this.news.onReconnected();
         void this.news.refreshFollowing();
       },
       onMissedMail: (ok) => {
@@ -812,15 +818,27 @@ export class App {
   private select(id: ConvId): void {
     const conv = this.store.conversation(id);
     if (!conv) return;
-    if (this.newsOpen) this.showNews(false);
     this.store.active = id;
-    conv.unread = 0;
+    // Closing the news reader sees what it uncovers, so this one goes
+    // first: the conversation the reader was covering has still not
+    // been looked at.
+    if (this.newsOpen) this.showNews(false);
+    else this.seen(conv);
     this.renderRail();
     this.renderTranscript();
     this.renderComposerHint();
     this.composer.focus();
-    // Reading is a thing the server keeps for us, so tell it. Failure is
-    // worth a line but not worth interrupting the selection over.
+  }
+
+  /** The reader is looking at this conversation now: its badge goes, and
+   *  so does its share of the count in the title. */
+  private seen(conv: Conversation): void {
+    conv.unread = 0;
+    this.renderUnreadTitle();
+    // Reading is a thing the server keeps for us, so tell it — while
+    // there is a session to tell. Failure is worth a line but not worth
+    // interrupting the selection over.
+    if (this.conn?.state !== 'online') return;
     this.markRead(conv).catch((e: Error) =>
       this.say(e instanceof WireFailure ? errorText(e.wire) : e.message),
     );
@@ -839,9 +857,16 @@ export class App {
   /** Swap the chat pane for the news reader, or back. The call bar and the
    *  video tiles sit above both, so a call carries on whichever is shown. */
   private showNews(open: boolean): void {
+    const was = this.newsOpen;
     this.newsOpen = open;
+    // The conversation the reader covers stays the active one, and what
+    // arrives in it while nobody can see it is unread like anywhere else.
+    this.store.covered = open;
     this.chatPane.hidden = open;
     this.news.show(open);
+    // Coming back to it is looking at it, the same as picking it.
+    const conv = this.store.conversation(this.store.active);
+    if (was && !open && conv) this.seen(conv);
     this.renderRail();
   }
 
@@ -1089,7 +1114,10 @@ export class App {
       // drawn from. A merge rewrites that array, so redraw instead.
       if (this.store.revision !== this.drawnRevision) this.renderTranscript();
       else appendLine(this.transcript, line, conv, this.store, this.images, { markdown: this.markdown });
-    } else this.renderRail();
+    }
+    // The active conversation's badge moves too while the news reader
+    // covers it.
+    if (id !== this.store.active || this.store.covered) this.renderRail();
     this.renderUnreadTitle();
   }
 

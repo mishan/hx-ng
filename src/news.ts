@@ -165,12 +165,54 @@ export function notifyText(d: Events['news_notify']): string {
   return words ? `${said} — ${words}` : said;
 }
 
+/**
+ * Is a notification about the thread with this root, the one on screen?
+ * Only a thread-scoped one is: a category-scoped one for the same root
+ * counts against the category, which drawing the thread does not
+ * acknowledge, so it still needs saying.
+ */
+export function notifiesThread(d: Events['news_notify'], root: number | null): boolean {
+  return d.scope === 'thread' && root !== null && d.root === root;
+}
+
+/**
+ * Wrap a fetch so a burst of calls is at most one in flight and one
+ * queued behind it. Every call's promise settles after a fetch that
+ * began after the call did, so a caller that has just changed something
+ * still sees the change; the calls in between share that one fetch.
+ * `run` must not reject.
+ */
+export function coalesced(run: () => Promise<void>): () => Promise<void> {
+  let running: Promise<void> | null = null;
+  let queued: Promise<void> | null = null;
+  const call = (): Promise<void> => {
+    if (!running) {
+      running = run().finally(() => (running = null));
+      return running;
+    }
+    // Chained on the promise whose `finally` clears `running`, so by
+    // the time this runs the slot is free and it starts a fetch.
+    queued ??= running.then(() => {
+      queued = null;
+      return call();
+    });
+    return queued;
+  };
+  return call;
+}
+
 /** A count the server keeps no subscription for: a reply to your own
  *  article in a thread you stopped following still notifies you, and
  *  deserves a badge until you have seen it. */
 interface Loose {
   category: number;
   unread: number;
+  /** The newest article notified, which is what has to be drawn before
+   *  the count is seen. */
+  top: number;
+  /** The highest `up_to` already sent for it, while the list is not
+   *  loaded; a redraw at or below it does not send again. */
+  claimed?: number;
 }
 
 /**
@@ -227,8 +269,13 @@ export class Following {
     }
     // With no cursor the server says 1 every time; the reader has been
     // told once per article all the same.
-    const prev = this.loose.get(key)?.unread ?? 0;
-    this.loose.set(key, { category: d.category, unread: Math.max(prev + 1, d.unread) });
+    const prev = this.loose.get(key);
+    this.loose.set(key, {
+      ...prev,
+      category: d.category,
+      unread: Math.max((prev?.unread ?? 0) + 1, d.unread),
+      top: Math.max(prev?.top ?? 0, d.article),
+    });
     return false;
   }
 
@@ -237,6 +284,12 @@ export class Following {
    * when it would move something — a cursor behind it, or a count above
    * zero — and in that case the count is cleared here and now, so a
    * redraw before the answer lands does not ask twice.
+   *
+   * A loose count clears only once what was drawn reaches the article it
+   * was for: a thread's first page is not the reply on its third. Once
+   * the list has loaded, a loose scope is one the server holds no row
+   * for, where `news_seen` would move nothing, so it clears here and is
+   * never sent.
    */
   claimSeen(scope: NewsScope, upTo: number): boolean {
     const key = scopeKey(scope);
@@ -246,9 +299,16 @@ export class Following {
       this.subs.set(key, { ...sub, last_seen: Math.max(sub.last_seen, upTo), unread: 0 });
       return true;
     }
-    // Sent anyway: the list may be older than a subscription the server
-    // holds, and if it is not, the answer is a harmless zero.
-    return this.loose.delete(key);
+    const loose = this.loose.get(key);
+    if (!loose) return false;
+    if (upTo >= loose.top) this.loose.delete(key);
+    if (this.loaded) return false;
+    // Sent anyway while the list is not in: the server may hold a
+    // subscription it has not been asked about yet, whose cursor this
+    // moves. With no row there, the answer is a harmless zero.
+    if (loose.claimed !== undefined && upTo <= loose.claimed) return false;
+    loose.claimed = upTo;
+    return true;
   }
 
   /** The server's answer to a `news_seen`. An answer to an older claim
@@ -277,10 +337,13 @@ export class Following {
   }
 
   /** The rail's badge. `fallback` is the login reply's total, which
-   *  stands in until the list has been fetched. */
+   *  stands in until the list has been fetched — alone, because it
+   *  already counts every followed scope a loose count might turn out to
+   *  be, and `load` settles which ones are. */
   total(fallback = 0): number {
-    let n = this.loaded ? 0 : fallback;
-    if (this.loaded) for (const s of this.subs.values()) if (!s.muted) n += s.unread;
+    if (!this.loaded) return fallback;
+    let n = 0;
+    for (const s of this.subs.values()) if (!s.muted) n += s.unread;
     for (const l of this.loose.values()) n += l.unread;
     return n;
   }

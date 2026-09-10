@@ -552,7 +552,10 @@ export interface NewsConfig {
   markdown: 'render' | 'source' | 'off';
   body_types: string[];
   max_refs: number;
+  /** Does `news_search` answer? */
   search: boolean;
+  /** The deepest a search pages; a `total` past it comes back `capped`. */
+  search_max_results?: number;
 }
 
 export interface NewsTreeParams {
@@ -628,6 +631,56 @@ export interface NewsNodeOk {
 export interface NewsNodeDeleteOk {
   /** How many articles went with it. */
   articles: number;
+}
+
+/**
+ * A search. `q` is whatever was typed: the server's grammar makes
+ * something of anything, so there is no error for a bad query — only
+ * results or none. `phase 4` is both words, `"phase 4"` the phrase,
+ * `-legacy` excludes, `subject:` and `from:` narrow to a field, and
+ * `sizes*` is a prefix.
+ */
+export interface NewsSearchParams {
+  q: string;
+  /** A category, or a bundle standing for every category under it. */
+  category?: number;
+  /** Only this author's articles; `from:` said as a parameter. */
+  from?: string;
+  /** Unix seconds. */
+  before?: number;
+  after?: number;
+  /** Default `relevance`. */
+  order?: 'relevance' | 'recent';
+  /** Results to skip. Paging is by offset because relevance order is
+   *  not stable enough for a cursor. */
+  offset?: number;
+  /** 1–50, default 20. */
+  limit?: number;
+}
+
+export interface NewsHit {
+  id: number;
+  /** The thread to open, so a hit needs no second request. */
+  root: number;
+  category: number;
+  subject: string;
+  /** The author's nick. */
+  from: string;
+  at: number;
+  /** A stretch of the body around what matched. Text, never markup. */
+  snippet: string;
+  /** `[start, end)` in `snippet`, in UTF-16 code units — what a
+   *  JavaScript string indexes by — so `snippet.slice(start, end)` is
+   *  the match. `markedSpans` turns them into runs to draw. */
+  marks: [number, number][];
+}
+
+export interface NewsSearchOk {
+  hits: NewsHit[];
+  /** Every match, not only the ones this page shows. */
+  total: number;
+  /** More matched than a search may reach; say "500+", not "500". */
+  capped: boolean;
 }
 
 // --- Voice --------------------------------------------------------------
@@ -824,6 +877,7 @@ export const ERROR_TEXT: Record<string, string> = {
   name_taken: 'Something there already has that name.',
   not_empty: 'That bundle still holds something. Empty it first.',
   bad_body_type: 'This server takes plain-text articles only.',
+  not_available: 'This server does not offer that.',
   server_error: 'The server had a problem with that. It has been logged.',
 };
 

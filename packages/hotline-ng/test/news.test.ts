@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { Connection, type Credentials } from '../src/connection';
-import { referenceSpans } from '../src/news';
+import { markedSpans, referenceSpans } from '../src/news';
 import type { LoginOk, NewsConfig, NewsReference, SelfUser } from '../src/protocol';
 
 import { installFakeWire, settle, uninstallFakeWire, type FakeServer } from './fake-wire';
@@ -48,6 +48,49 @@ describe('finding references in a body', () => {
   it('still links a reference whose target was deleted', () => {
     const gone = ref(51, { deleted: true, subject: undefined, from: undefined });
     expect(referenceSpans('see #51', [gone])).toEqual([{ text: 'see ' }, { text: '#51', ref: gone }]);
+  });
+});
+
+describe('marking a search snippet', () => {
+  it('splits the snippet into what matched and what did not', () => {
+    expect(markedSpans('the derivative is a u16', [[4, 14]])).toEqual([
+      { text: 'the ', mark: false },
+      { text: 'derivative', mark: true },
+      { text: ' is a u16', mark: false },
+    ]);
+  });
+
+  it('counts in UTF-16, as the server promises', () => {
+    // The balloon is two code units; an offset counted in bytes or in
+    // code points would land in the middle of the next word.
+    const snippet = 'Ünïcødé 🎈 derivative';
+    const start = snippet.indexOf('derivative');
+    expect(start).toBe(11);
+    const spans = markedSpans(snippet, [[start, start + 10]]);
+    expect(spans.filter((s) => s.mark).map((s) => s.text)).toEqual(['derivative']);
+  });
+
+  it('survives marks that are out of order, overlapping or out of range', () => {
+    const snippet = 'one two three';
+    for (const marks of [
+      [
+        [8, 13],
+        [0, 3],
+      ],
+      [
+        [0, 5],
+        [2, 7],
+      ],
+      [
+        [10, 99],
+        [-4, 2],
+      ],
+      [[5, 5]],
+    ] as [number, number][][]) {
+      const spans = markedSpans(snippet, marks);
+      expect(spans.map((s) => s.text).join(''), JSON.stringify(marks)).toBe(snippet);
+    }
+    expect(markedSpans('', [[0, 3]])).toEqual([]);
   });
 });
 
@@ -158,6 +201,15 @@ describe('the news requests', () => {
     }));
     server.on('news_node_rename', () => ({ ok: {} }));
     server.on('news_node_delete', () => ({ ok: { articles: 4 } }));
+    server.on('news_search', () => ({ ok: { hits: [], total: 0, capped: false } }));
+    await conn.newsSearch({ q: 'phase -legacy', category: 2, order: 'recent', offset: 20, limit: 20 });
+    expect(server.sent('news_search')[0]?.params).toEqual({
+      q: 'phase -legacy',
+      category: 2,
+      order: 'recent',
+      offset: 20,
+      limit: 20,
+    });
 
     await conn.newsTree({ depth: 2 });
     await conn.newsThreads({ category: 2, before: 9, limit: 10 });

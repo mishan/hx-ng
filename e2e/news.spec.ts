@@ -138,6 +138,19 @@ max_depth = 4
     await editor.locator('.news-article').nth(1).locator('.news-ref').click();
     await expect(editor.locator(`#news-${rootId}`)).toHaveClass(/focus/);
 
+    // --- searching finds it, marks it, and opens it where it sits --------
+    await editor.locator('.crumb', { hasText: 'General' }).click();
+    await editor.locator('.news-search').fill('prose finally');
+    await editor.locator('.news-search').press('Enter');
+    await expect(editor.locator('.news-search-head')).toContainText('Nothing matches');
+    await editor.locator('.news-search').fill('finally');
+    await editor.locator('.news-search').press('Enter');
+    await expect(editor.locator('.news-search-head')).toContainText('1 result for “finally” in “General”');
+    await expect(editor.locator('.news-hit mark')).toHaveText(['finally']);
+    await editor.screenshot({ path: testInfo.outputPath('news-search.png'), fullPage: true });
+    await editor.locator('.news-hit').click();
+    await expect(editor.locator(`#news-${rootId}`)).toHaveClass(/focus/);
+
     // --- and back to chat, where the composer is waiting ------------------
     await editor.locator('.rail-item', { hasText: 'Lobby' }).click();
     await expect(editor.locator('.news')).toBeHidden();

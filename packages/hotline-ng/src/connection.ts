@@ -42,6 +42,8 @@ import {
   type NewsPostOk,
   type NewsPostParams,
   type NewsRefsOk,
+  type NewsSearchOk,
+  type NewsSearchParams,
   type NewsThreadOk,
   type NewsThreadParams,
   type NewsThreadsOk,
@@ -780,6 +782,12 @@ export class Connection {
 
   newsNodeDelete(id: number): Promise<NewsNodeDeleteOk> {
     return this.request<NewsNodeDeleteOk>('news_node_delete', { id });
+  }
+
+  /** Full-text search. Rate-limited per session: `rate_limited` means
+   *  wait and ask again, never that nothing matched. */
+  newsSearch(params: NewsSearchParams): Promise<NewsSearchOk> {
+    return this.request<NewsSearchOk>('news_search', params);
   }
 
   async ping(): Promise<number> {

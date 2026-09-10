@@ -17,11 +17,13 @@
 
 import {
   errorText,
+  markedSpans,
   referenceSpans,
   WireFailure,
   type Connection,
   type Events,
   type NewsArticle,
+  type NewsHit,
   type NewsNode,
   type NewsNodeKind,
   type NewsReference,
@@ -36,7 +38,17 @@ type Screen =
   | { at: 'tree'; trail: NewsNode[] }
   | { at: 'category'; trail: NewsNode[]; category: NewsNode }
   /** `focus` is an article to bring into view — the one a reference named. */
-  | { at: 'thread'; trail: NewsNode[]; category: NewsNode; root: number; focus?: number };
+  | { at: 'thread'; trail: NewsNode[]; category: NewsNode; root: number; focus?: number }
+  /** A search, scoped to the category or bundle it was typed in, if any.
+   *  `trail` is the bundles above the scope, for the breadcrumb. */
+  | { at: 'search'; trail: NewsNode[]; q: string; scope: NewsNode | null };
+
+type InCategory = Extract<Screen, { at: 'category' | 'thread' }>;
+
+const inCategory = (s: Screen): s is InCategory => s.at === 'category' || s.at === 'thread';
+
+/** Results per search page: the wire's default. */
+const SEARCH_PAGE = 20;
 
 export interface NewsHooks {
   conn: () => Connection | null;
@@ -81,6 +93,18 @@ export class NewsView {
   readonly el = h('section', { class: 'news', hidden: true });
   private bar = h('div', { class: 'news-bar' });
   private body = h('div', { class: 'news-body' });
+  private crumbsEl = h('nav', { class: 'crumbs' });
+  private actionsEl = h('div', { class: 'news-actions-bar' });
+  /** Built once and never redrawn: the bar is redrawn whenever the news
+   *  changes, and a box rebuilt under someone's typing loses their place
+   *  in it. */
+  private searchBox = h('input', {
+    type: 'search',
+    class: 'news-search',
+    placeholder: 'Search news',
+    spellcheck: false,
+    hidden: true,
+  });
 
   private screen: Screen = { at: 'tree', trail: [] };
   /** The screen's data is out of date and must be fetched when next shown. */
@@ -113,9 +137,20 @@ export class NewsView {
   /** The open name form: creating a node of `kind`, or renaming `node`. */
   private naming: { kind: NewsNodeKind } | { node: NewsNode } | null = null;
   private backlinks = new Map<number, NewsReference[]>();
+  private hits: NewsHit[] = [];
+  private hitsTotal = 0;
+  private hitsCapped = false;
 
   constructor(private hooks: NewsHooks) {
+    this.bar.append(this.crumbsEl, h('span', { class: 'spacer' }), this.searchBox, this.actionsEl);
     this.el.append(this.bar, this.body);
+    this.searchBox.onkeydown = (e) => {
+      if (e.key === 'Enter') {
+        const q = this.searchBox.value.trim();
+        if (q) this.openSearch(q);
+      }
+      if (e.key === 'Escape') this.searchBox.blur();
+    };
   }
 
   get visible(): boolean {
@@ -144,6 +179,8 @@ export class NewsView {
     this.draft = null;
     this.naming = null;
     this.backlinks.clear();
+    this.hits = [];
+    this.searchBox.value = '';
     this.el.hidden = true;
   }
 
@@ -178,7 +215,8 @@ export class NewsView {
     // else; take it straight from the event.
     const renamed = (n: NewsNode): NewsNode => (n.id === node.id ? { ...n, name: node.name } : n);
     s.trail = s.trail.map(renamed);
-    if (s.at !== 'tree') s.category = renamed(s.category);
+    if (inCategory(s)) s.category = renamed(s.category);
+    if (s.at === 'search' && s.scope) s.scope = renamed(s.scope);
     if (s.at === 'tree' && (node.parent === (s.trail.at(-1)?.id ?? null) || this.nodes.some((n) => n.id === node.id))) {
       this.invalidate();
     } else if (this.visible) {
@@ -189,7 +227,8 @@ export class NewsView {
   onNodeDeleted(d: Events['news_node_deleted']): void {
     const s = this.screen;
     const gone = s.trail.findIndex((n) => n.id === d.id);
-    if (gone >= 0 || (s.at !== 'tree' && s.category.id === d.id)) {
+    const current = inCategory(s) ? s.category : s.at === 'search' ? s.scope : null;
+    if (gone >= 0 || current?.id === d.id) {
       // What is on screen, or something above it, no longer exists. Step
       // up to the nearest level that still does and say why.
       const trail = gone >= 0 ? s.trail.slice(0, gone) : s.trail;
@@ -235,6 +274,9 @@ export class NewsView {
     this.threadsMore = false;
     this.articles = [];
     this.articlesMore = false;
+    this.hits = [];
+    this.hitsTotal = 0;
+    this.hitsCapped = false;
     this.draft = null;
     this.naming = null;
     this.backlinks.clear();
@@ -276,7 +318,7 @@ export class NewsView {
    *  itself; anything else takes a tree request deep enough to find it. */
   private async locate(category: number): Promise<{ trail: NewsNode[]; category: NewsNode }> {
     const s = this.screen;
-    if (s.at !== 'tree' && s.category.id === category) return { trail: s.trail, category: s.category };
+    if (inCategory(s) && s.category.id === category) return { trail: s.trail, category: s.category };
     const conn = this.hooks.conn();
     const path = conn ? trailTo(category, indexTree((await conn.newsTree({ depth: 4 })).nodes)) : null;
     const found = path?.at(-1);
@@ -314,6 +356,16 @@ export class NewsView {
         if (gen !== this.generation) return;
         this.threads = ok.threads;
         this.threadsMore = ok.has_more;
+      } else if (s.at === 'search') {
+        // As deep as the reader had already paged, like a category.
+        const limit = Math.max(SEARCH_PAGE, Math.min(50, this.hits.length));
+        const ok = await conn.newsSearch(
+          s.scope ? { q: s.q, category: s.scope.id, limit } : { q: s.q, limit },
+        );
+        if (gen !== this.generation) return;
+        this.hits = ok.hits;
+        this.hitsTotal = ok.total;
+        this.hitsCapped = ok.capped;
       } else {
         const want = Math.max(this.articles.length, THREAD_PAGE);
         let all: NewsArticle[] = [];
@@ -387,7 +439,7 @@ export class NewsView {
     const cfg = conn?.news;
     const d = this.draft;
     const s = this.screen;
-    if (!conn || !cfg || !d || this.busy || s.at === 'tree') return;
+    if (!conn || !cfg || !d || this.busy || !inCategory(s)) return;
     const problem = draftProblem(d.subject, d.body, cfg);
     if (problem) {
       this.error = problem;
@@ -479,13 +531,116 @@ export class NewsView {
     }
   }
 
+  // --- searching --------------------------------------------------------
+
+  /** Search from wherever the reader is: inside a category or a bundle
+   *  the search is scoped to it, and the results offer to widen it. */
+  private openSearch(q: string, everywhere = false): void {
+    const s = this.screen;
+    let trail: NewsNode[] = [];
+    let scope: NewsNode | null = null;
+    if (!everywhere) {
+      if (inCategory(s)) {
+        trail = s.trail;
+        scope = s.category;
+      } else if (s.at === 'tree' && s.trail.length) {
+        trail = s.trail.slice(0, -1);
+        scope = s.trail.at(-1) ?? null;
+      } else if (s.at === 'search') {
+        trail = s.trail;
+        scope = s.scope;
+      }
+    }
+    this.searchBox.value = q;
+    this.error = null;
+    this.go({ at: 'search', trail, q, scope });
+  }
+
+  private async loadMoreHits(): Promise<void> {
+    const conn = this.hooks.conn();
+    const s = this.screen;
+    if (!conn || s.at !== 'search') return;
+    const gen = this.generation;
+    const offset = this.hits.length;
+    try {
+      const ok = await conn.newsSearch(
+        s.scope ? { q: s.q, category: s.scope.id, offset } : { q: s.q, offset },
+      );
+      if (gen !== this.generation) return;
+      // Offset paging over a relevance order shifts when something is
+      // posted between pages; an id seen twice is shown once.
+      this.hits = this.hits.concat(ok.hits.filter((h) => !this.hits.some((x) => x.id === h.id)));
+      this.hitsTotal = ok.total;
+      this.hitsCapped = ok.capped;
+    } catch (e) {
+      this.error = describe(e);
+    }
+    this.render();
+  }
+
+  private async openHit(hit: NewsHit): Promise<void> {
+    try {
+      const where = await this.locate(hit.category);
+      this.openThread(where.trail, where.category, hit.root, hit.id);
+    } catch (e) {
+      this.error = describe(e);
+      this.render();
+    }
+  }
+
+  private searchView(s: Extract<Screen, { at: 'search' }>): (HTMLElement | null)[] {
+    const out: (HTMLElement | null)[] = [];
+    const reachable = this.hooks.conn()?.news?.search_max_results ?? Infinity;
+    if (!this.stale) {
+      const summary = this.hitsTotal
+        ? `${plural(this.hitsTotal, 'result', 'results')} for “${s.q}”`
+        : `Nothing matches “${s.q}”`;
+      const head = h('p', { class: 'news-search-head' }, summary);
+      if (s.scope) {
+        const widen = h('button', { class: 'news-link' }, 'search everywhere');
+        widen.onclick = () => this.openSearch(s.q, true);
+        head.append(` in “${s.scope.name}” · `, widen);
+      }
+      if (this.hitsCapped) {
+        head.append(` · the first ${reachable} can be shown; narrow the search to reach the rest`);
+      }
+      out.push(head);
+    }
+    for (const hit of this.hits) {
+      const snippet = markedSpans(hit.snippet, hit.marks).map((span) =>
+        span.mark ? h('mark', {}, span.text) : span.text,
+      );
+      const row = h(
+        'button',
+        { class: 'news-thread news-hit' },
+        h('span', { class: 'news-thread-subject' }, hit.subject),
+        hit.snippet ? h('span', { class: 'news-hit-snippet' }, ...snippet) : null,
+        h('span', { class: 'news-thread-meta' }, `${hit.from} · `, stamp(hit.at)),
+      );
+      row.onclick = () => void this.openHit(hit);
+      out.push(row);
+    }
+    if (this.hits.length < Math.min(this.hitsTotal, reachable)) {
+      const more = h('button', { class: 'news-more' }, 'More results');
+      more.onclick = () => void this.loadMoreHits();
+      out.push(more);
+    }
+    return out;
+  }
+
   // --- drawing ----------------------------------------------------------
 
   private render(): void {
     this.renderBar();
     const s = this.screen;
     const content =
-      s.at === 'tree' ? this.treeView(s) : s.at === 'category' ? this.categoryView(s) : this.threadView();
+      s.at === 'tree'
+        ? this.treeView(s)
+        : s.at === 'category'
+          ? this.categoryView(s)
+          : s.at === 'search'
+            ? this.searchView(s)
+            : this.threadView();
     fill(this.body, this.error ? h('p', { class: 'news-error' }, this.error) : null, ...content);
 
     const target = this.scrollTo;
@@ -518,10 +673,19 @@ export class NewsView {
       const here = s.at === 'tree' && i === s.trail.length - 1;
       crumb(node.name, here ? null : () => this.openTree(s.trail.slice(0, i + 1)));
     });
-    if (s.at !== 'tree') {
+    if (inCategory(s)) {
       crumb(s.category.name, s.at === 'category' ? null : () => this.openCategory(s.trail, s.category));
     }
     if (s.at === 'thread') crumb(this.articles[0]?.subject || 'Thread', null);
+    if (s.at === 'search') {
+      const scope = s.scope;
+      if (scope) {
+        crumb(scope.name, () =>
+          scope.kind === 'bundle' ? this.openTree([...s.trail, scope]) : this.openCategory(s.trail, scope),
+        );
+      }
+      crumb(`Search: ${s.q}`, null);
+    }
 
     const actions: HTMLElement[] = [];
     const action = (label: string, fn: () => void, opts: { on?: boolean; title?: string; disabled?: boolean } = {}) => {
@@ -550,7 +714,13 @@ export class NewsView {
     }, { on: this.managing, title: 'Create, rename and delete — for those who may' });
     action('↻', () => void this.load(), { title: 'Refresh' });
 
-    fill(this.bar, h('nav', { class: 'crumbs' }, ...crumbs), h('span', { class: 'spacer' }), ...actions);
+    fill(this.crumbsEl, ...crumbs);
+    fill(this.actionsEl, ...actions);
+    // Offered where the server answers it; the placeholder says where a
+    // search typed here will look.
+    this.searchBox.hidden = !this.hooks.conn()?.news?.search;
+    const scope = inCategory(s) ? s.category : s.at === 'tree' ? s.trail.at(-1) : s.at === 'search' ? s.scope : null;
+    this.searchBox.placeholder = scope ? `Search ${scope.name}` : 'Search news';
   }
 
   private treeView(s: Extract<Screen, { at: 'tree' }>): (HTMLElement | null)[] {

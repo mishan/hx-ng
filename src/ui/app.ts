@@ -89,11 +89,17 @@ export class App {
    *  which on this page has meant the voice session since before there
    *  were any. */
   private images = new MediaCache();
-  /** An image uploaded and waiting for the line that will carry it.
-   *  Attaching uploads immediately — the server has to see the bytes to
-   *  say whether it will take them, and finding out at send time would
-   *  lose the message with them. */
-  private attached: Media | null = null;
+  /** An image uploaded and waiting for the line that will carry it, and
+   *  the file name the chip shows it under. Attaching uploads
+   *  immediately — the server has to see the bytes to say whether it
+   *  will take them, and finding out at send time would lose the
+   *  message with them. */
+  private attached: { media: Media; name: string } | null = null;
+  /** Bumped by anything that abandons an attachment. An upload that was
+   *  already in flight lands afterwards and must not resurrect the chip
+   *  or become the image on the next line — the user has removed it,
+   *  picked another file, or lost the session since. */
+  private uploads = 0;
   /** Whether one's own camera is shown back to oneself. A preview is the
    *  only way to find out that a camera is pointed at the ceiling, or
    *  that it is not sending at all, without asking the room. */
@@ -258,6 +264,10 @@ export class App {
         // seen, and nothing could refetch them anyway.
         this.images.clear();
         this.clearAttachment();
+        // The paperclip goes with the session it belonged to. Left up,
+        // it opens a picker whose upload can only fail with "not logged
+        // in" — inert chrome saying something this client cannot do.
+        this.attachBtn.hidden = true;
         if (this.pingTimer !== null) {
           clearInterval(this.pingTimer);
           this.pingTimer = null;
@@ -476,8 +486,11 @@ export class App {
     if (!conn) return;
     if (text.startsWith('/')) return this.command(text);
 
-    // Taken before anything is awaited: a second Enter while an upload
-    // is in flight must not send the same image twice.
+    // Taken before anything is awaited: a second Enter while the send is
+    // in flight must not send the same image twice. Every path below
+    // that does *not* send it puts it back — the bytes are on the
+    // server and the handle is still good, and making someone pick the
+    // file again because the recipient had left is a poor answer.
     const attached = this.attached;
     this.clearAttachment();
 
@@ -485,6 +498,7 @@ export class App {
     if (conv?.kind === 'pm') {
       const to = addressOf(conv);
       if (!to) {
+        this.restoreAttachment(attached);
         return this.say(
           `There is no way to reach ${conv.title}: they have left, and the message they sent named no account to answer.`,
         );
@@ -494,12 +508,15 @@ export class App {
       // a double-tap from arriving twice — but it is the field that makes
       // a retry safe at all, and it costs one line.
       const guid = newGuid();
-      const media = attached?.id;
+      const media = attached?.media.id;
       const params: MsgParams =
         'to_login' in to
           ? { to_login: to.to_login, text, guid, media }
           : { to: to.to, text, guid, media };
-      const ok = await conn.msg(params);
+      const ok = await conn.msg(params).catch((e: unknown) => {
+        this.restoreAttachment(attached);
+        throw e;
+      });
       // PMs have no echo, so the sender's own half is local.
       const me = this.store.self;
       this.push(conv.id, {
@@ -508,7 +525,7 @@ export class App {
         from: { uid: me?.uid ?? 0, nick: me?.nick ?? 'you' },
         text,
         local: true,
-        media: attached ?? undefined,
+        media: attached?.media,
       });
       if (ok.queued) {
         this.say(`${conv.title} is not here. The server is holding that for them.`);
@@ -517,7 +534,10 @@ export class App {
     }
     // Public chat echoes, so the sender's own copy comes back off the
     // wire with the image on it; nothing is pushed locally here.
-    await conn.chat({ text, media: attached?.id });
+    await conn.chat({ text, media: attached?.media.id }).catch((e: unknown) => {
+      this.restoreAttachment(attached);
+      throw e;
+    });
   }
 
   // --- attaching an image (docs/inline-media.md §8) ---------------------
@@ -539,13 +559,21 @@ export class App {
     // everything again and its answer is the one that counts.
     const blocked = mediaBlockedReason(file, conn.media);
     if (blocked) return this.say(blocked);
+    // Whatever was attached is being replaced, which retires anything
+    // still in flight for it as well as the chip.
+    this.clearAttachment();
+    const mine = this.uploads;
     this.showAttachment(null, file.name);
     try {
       const media = await conn.uploadMedia(file);
-      this.attached = media;
+      // Removed, replaced, or the session ended while this was in the
+      // air: the answer is no longer anybody's.
+      if (mine !== this.uploads) return;
+      this.attached = { media, name: file.name };
       this.showAttachment(media, file.name);
       this.composer.focus();
     } catch (e) {
+      if (mine !== this.uploads) return;
       this.clearAttachment();
       this.say(e instanceof WireFailure ? errorText(e.wire) : (e as Error).message);
     }
@@ -565,6 +593,14 @@ export class App {
     this.attached = null;
     this.attachChip.hidden = true;
     this.filePicker.value = '';
+    this.uploads++;
+  }
+
+  /** Put back an attachment a send did not manage to use. */
+  private restoreAttachment(attached: { media: Media; name: string } | null): void {
+    if (!attached) return;
+    this.attached = attached;
+    this.showAttachment(attached.media, attached.name);
   }
 
   private async command(raw: string): Promise<void> {
@@ -812,6 +848,10 @@ export class App {
           text: m.text,
           queued: true,
           id: m.id,
+          // Live `msg` events carry this; a page of the mailbox has to
+          // as well, or a private image disappears on reload and on
+          // every older page.
+          media: m.media,
         },
         !m.read,
       );

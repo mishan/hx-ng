@@ -646,8 +646,10 @@ export class Connection {
    * own, which is why the upload works while detached and stops working
    * the moment the session does.
    *
-   * The returned handle is good for one `chat` or `msg`, from this
-   * session, for as long as the server keeps it.
+   * The returned handle may be named on a `chat` or a `msg` from this
+   * session, for as long as the server keeps it. Each send captures its
+   * own audience, so naming it twice shows it to two sets of people
+   * rather than being refused.
    */
   async uploadMedia(image: Blob): Promise<Media> {
     const res = await fetch(`${this.httpBase()}/media`, {

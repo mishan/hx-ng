@@ -26,13 +26,31 @@ const MAX_WIDTH = 420;
  *  the screen. Click it to see the whole thing. */
 const MAX_HEIGHT = 320;
 
+/** Types a browser paints and does not execute. A blob URL inherits the
+ *  origin of the page that made it, so this is the list that decides
+ *  what clicking an image can do — `image/svg+xml` is a document with
+ *  script in it, and the capability forbids it upstream anyway. */
+const INERT = ['image/jpeg', 'image/png', 'image/gif'];
+
 export class MediaCache {
   private urls = new Map<string, string>();
   private inflight = new Map<string, Promise<string | null>>();
   /** Handles a moderator revoked while this page was open. Held so a
    *  row that has not been drawn yet never fetches one. */
   private revoked = new Set<string>();
+  /** Handles the server would not give us. The 404 is deliberately one
+   *  answer for expired, revoked and never-yours, and none of them will
+   *  become a different answer on this session — so remembering the
+   *  refusal is what keeps a transcript full of expired images from
+   *  issuing an authenticated GET apiece on every redraw. */
+  private missing = new Set<string>();
   private conn: Connection | null = null;
+  /** Bumped by anything that invalidates the maps. A fetch that started
+   *  before the bump lands after it, and must not write into them: a
+   *  blob URL stored after `clear()` is one nothing will ever revoke,
+   *  and one stored after `revoke()` is the image a moderator just took
+   *  down, held for the rest of the session. */
+  private generation = 0;
 
   attach(conn: Connection | null): void {
     if (conn !== this.conn) this.clear();
@@ -46,6 +64,8 @@ export class MediaCache {
     this.urls.clear();
     this.inflight.clear();
     this.revoked.clear();
+    this.missing.clear();
+    this.generation++;
   }
 
   /** A moderator revoked this image: drop what we hold and stop
@@ -57,6 +77,7 @@ export class MediaCache {
     this.urls.delete(id);
     this.inflight.delete(id);
     this.revoked.add(id);
+    this.generation++;
   }
 
   wasRevoked(id: string): boolean {
@@ -65,24 +86,49 @@ export class MediaCache {
 
   /** The blob URL for a handle, fetching it at most once. `null` when
    *  the server would not give it to us — expired, revoked, or a handle
-   *  this session was never shown, which are deliberately one answer. */
-  url(id: string): Promise<string | null> {
+   *  this session was never shown, which are deliberately one answer —
+   *  or when it answered with something this client will not render.
+   *
+   *  `type` is the canonical type off the line's own metadata, and the
+   *  blob is built with it rather than with whatever the response said.
+   *  A blob URL navigated to runs in *this page's* origin, and clicking
+   *  an image opens one, so the type decides whether the browser paints
+   *  a picture or executes a document. `image/svg+xml` is the case that
+   *  matters and the capability forbids it by name; refusing anything
+   *  outside `INERT` costs nothing and does not depend on the server
+   *  having been careful. */
+  url(id: string, type: string): Promise<string | null> {
     const held = this.urls.get(id);
     if (held) return Promise.resolve(held);
-    if (this.revoked.has(id)) return Promise.resolve(null);
+    if (this.revoked.has(id) || this.missing.has(id)) return Promise.resolve(null);
     const running = this.inflight.get(id);
     if (running) return running;
     const conn = this.conn;
     if (!conn) return Promise.resolve(null);
+    const started = this.generation;
     const p = conn
       .fetchMedia(id)
       .then((blob) => {
-        const url = URL.createObjectURL(blob);
+        if (started !== this.generation) {
+          // Cleared or revoked while this was in flight. Nothing may be
+          // stored, so nothing has to be revoked either.
+          return null;
+        }
+        if (!INERT.includes(type)) {
+          this.missing.add(id);
+          return null;
+        }
+        const url = URL.createObjectURL(new Blob([blob], { type }));
         this.urls.set(id, url);
         return url;
       })
-      .catch(() => null)
-      .finally(() => this.inflight.delete(id));
+      .catch(() => {
+        if (started === this.generation) this.missing.add(id);
+        return null;
+      })
+      .finally(() => {
+        if (this.inflight.get(id) === p) this.inflight.delete(id);
+      });
     this.inflight.set(id, p);
     return p;
   }
@@ -135,22 +181,55 @@ export function mediaEl(media: HistoryMedia, cache: MediaCache): HTMLElement {
   }
   const id = media.id as string;
   frame.append(h('span', { class: 'media-note' }, caption(media)));
-  void cache.url(id).then((url) => {
-    if (!url || !frame.isConnected) return;
-    const img = h('img', {
-      class: 'media-img',
-      src: url,
-      alt: caption(media),
-      width,
-      height,
-      loading: 'lazy',
+  // Deferred until the row is near the viewport. The fetch is what
+  // costs — an `<img loading="lazy">` defers nothing here, because by
+  // the time there is an `<img>` the bytes are already in hand — so
+  // paging a month of history must not start a download for every
+  // picture in it.
+  whenNearViewport(frame, () => {
+    void cache.url(id, media.type).then((url) => {
+      if (!frame.isConnected) return;
+      if (!url) {
+        // The third of the three states, and the one that used to look
+        // like the first: an image that has gone must not sit there
+        // wearing the caption of one that is still on its way.
+        frame.classList.add('gone');
+        frame.replaceChildren(h('span', { class: 'media-note' }, 'Image no longer available'));
+        return;
+      }
+      const img = h('img', {
+        class: 'media-img',
+        src: url,
+        alt: caption(media),
+        width,
+        height,
+      });
+      // Click opens the image at its own size, in its own tab: the row
+      // is a preview, and a 2048-pixel photograph deserves better than
+      // a 420-pixel column.
+      img.onclick = () => window.open(url, '_blank', 'noopener');
+      frame.replaceChildren(img);
+      frame.classList.add('loaded');
     });
-    // Click opens the image at its own size, in its own tab: the row is
-    // a preview, and a 2048-pixel photograph deserves better than a
-    // 420-pixel column.
-    img.onclick = () => window.open(url, '_blank', 'noopener');
-    frame.replaceChildren(img);
-    frame.classList.add('loaded');
   });
   return frame;
+}
+
+/** Call `load` once the element is within a screen or so of the
+ *  viewport — or straight away where there is nothing to ask, which is
+ *  every environment without an `IntersectionObserver` and is the safe
+ *  answer rather than the cheap one. */
+function whenNearViewport(el: HTMLElement, load: () => void): void {
+  if (typeof IntersectionObserver === 'undefined') return load();
+  const io = new IntersectionObserver(
+    (entries) => {
+      if (!entries.some((e) => e.isIntersecting)) return;
+      io.disconnect();
+      load();
+    },
+    // A screen's worth of margin, so an image is fetched and decoded
+    // before the row it belongs to is scrolled to rather than after.
+    { rootMargin: '600px' },
+  );
+  io.observe(el);
 }

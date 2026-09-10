@@ -42,7 +42,6 @@ export interface NewsHooks {
   conn: () => Connection | null;
   /** The account this session is, for "is this article mine". */
   me: () => string | null;
-  say: (text: string) => void;
 }
 
 /** The largest thread page the wire allows. */
@@ -82,9 +81,20 @@ export class NewsView {
   private bar = h('div', { class: 'news-bar' });
   private body = h('div', { class: 'news-body' });
 
+  /** Replaced, not edited, by every navigation and by `reset`: an answer
+   *  to something asked from one screen checks this is still that one. */
   private screen: Screen = { at: 'tree', trail: [] };
   /** The screen's data is out of date and must be fetched when next shown. */
   private stale = true;
+  /** The screen is new and its first answer has not come back: what is
+   *  drawn is nothing yet, not an empty category. */
+  private loading = true;
+  /** An "older" or "more" page is out, and a second tap would only ask
+   *  for the same one again. */
+  private paging = false;
+  /** Something this view has to say about what just happened — said
+   *  here, not into the transcript this view is covering. */
+  private notice: string | null = null;
   /** Something changed while a draft was open. Refreshing then would
    *  redraw the form under someone's fingers, so it waits to be asked. */
   private pendingRefresh = false;
@@ -110,8 +120,9 @@ export class NewsView {
   /** The open compose form: a new thread, or a reply to `parent`. Held
    *  here rather than read back off the DOM, so a redraw keeps it. */
   private draft: { parent?: number; subject: string; body: string } | null = null;
-  /** The open name form: creating a node of `kind`, or renaming `node`. */
-  private naming: { kind: NewsNodeKind } | { node: NewsNode } | null = null;
+  /** The open name form: creating a node of `kind`, or renaming `node`.
+   *  `name` is what is typed so far, kept for the same reason as a draft. */
+  private naming: ({ kind: NewsNodeKind } | { node: NewsNode }) & { name: string } | null = null;
   private backlinks = new Map<number, NewsReference[]>();
 
   constructor(private hooks: NewsHooks) {
@@ -126,7 +137,7 @@ export class NewsView {
     this.el.hidden = !on;
     if (!on) return;
     if (this.stale) void this.load();
-    else this.render();
+    this.render();
   }
 
   /** Forget everything: the session this was reading through is gone. */
@@ -135,9 +146,12 @@ export class NewsView {
     this.cancelRefresh();
     this.screen = { at: 'tree', trail: [] };
     this.stale = true;
+    this.loading = true;
+    this.paging = false;
     this.pendingRefresh = false;
     this.managing = false;
     this.error = null;
+    this.notice = null;
     this.nodes = [];
     this.threads = [];
     this.articles = [];
@@ -145,6 +159,15 @@ export class NewsView {
     this.naming = null;
     this.backlinks.clear();
     this.el.hidden = true;
+  }
+
+  /** The session came back from a drop, resynced across a gap, or logged
+   *  in again on the same socket. Whatever happened meanwhile went by
+   *  unseen, and a refresh tried while the socket was down could only
+   *  say "not connected". */
+  onReconnected(): void {
+    this.error = null;
+    this.invalidate();
   }
 
   // --- events: "your copy is stale" ------------------------------------
@@ -214,7 +237,11 @@ export class NewsView {
     if (this.refreshTimer !== null) return;
     this.refreshTimer = setTimeout(() => {
       this.refreshTimer = null;
-      void this.load();
+      // A draft may have opened while this waited, and it waits too.
+      if (this.draft || this.naming) {
+        this.pendingRefresh = true;
+        this.renderBar();
+      } else void this.load();
     }, 150);
   }
 
@@ -238,6 +265,12 @@ export class NewsView {
     this.draft = null;
     this.naming = null;
     this.backlinks.clear();
+    this.notice = null;
+    this.paging = false;
+    // The last screen comes down now rather than when this one's answer
+    // lands, so nothing on it is left to click in the meantime.
+    this.loading = true;
+    this.render();
     this.scrollTo = screen.at === 'thread' && screen.focus !== undefined ? screen.focus : 'top';
     void this.load();
   }
@@ -262,11 +295,17 @@ export class NewsView {
   private async goToArticle(id: number): Promise<void> {
     const conn = this.hooks.conn();
     if (!conn) return;
+    // Checked by screen rather than by generation: a refresh bumps that
+    // too, and a post landing meanwhile is no reason to ignore the click.
+    // A reader who has gone somewhere else is not dragged back.
+    const from = this.screen;
     try {
       const article = await conn.newsArticle(id);
       const where = await this.locate(article.category);
+      if (this.screen !== from) return;
       this.openThread(where.trail, where.category, article.root, id);
     } catch (e) {
+      if (this.screen !== from) return;
       this.error = describe(e);
       this.render();
     }
@@ -343,6 +382,7 @@ export class NewsView {
       }
       this.error = describe(e);
     }
+    this.loading = false;
     this.render();
   }
 
@@ -350,15 +390,19 @@ export class NewsView {
     const conn = this.hooks.conn();
     const s = this.screen;
     const before = this.threads.at(-1)?.article.id;
-    if (!conn || s.at !== 'category' || before === undefined) return;
+    if (!conn || s.at !== 'category' || before === undefined || this.paging) return;
     const gen = this.generation;
+    this.paging = true;
     try {
       const ok = await conn.newsThreads({ category: s.category.id, before });
       if (gen !== this.generation) return;
       this.threads = this.threads.concat(ok.threads.filter((t) => !this.threads.some((x) => x.article.id === t.article.id)));
       this.threadsMore = ok.has_more;
     } catch (e) {
+      if (gen !== this.generation) return;
       this.error = describe(e);
+    } finally {
+      this.paging = false;
     }
     this.render();
   }
@@ -367,15 +411,23 @@ export class NewsView {
     const conn = this.hooks.conn();
     const s = this.screen;
     const after = this.articles.at(-1)?.id;
-    if (!conn || s.at !== 'thread' || after === undefined) return;
+    if (!conn || s.at !== 'thread' || after === undefined || this.paging) return;
     const gen = this.generation;
+    this.paging = true;
     try {
       const page = await conn.newsThread({ root: s.root, after, limit: THREAD_PAGE });
       if (gen !== this.generation) return;
-      this.articles = this.articles.concat(page.articles);
+      // An article already here is not drawn twice, whatever the page
+      // overlapped: two elements with one id is a thread that scrolls to
+      // the wrong place.
+      const have = new Set(this.articles.map((a) => a.id));
+      this.articles = this.articles.concat(page.articles.filter((a) => !have.has(a.id)));
       this.articlesMore = page.has_more;
     } catch (e) {
+      if (gen !== this.generation) return;
       this.error = describe(e);
+    } finally {
+      this.paging = false;
     }
     this.render();
   }
@@ -397,6 +449,9 @@ export class NewsView {
     try {
       const params = { category: s.category.id, subject: d.subject.trim(), body: d.body };
       const { id } = await conn.newsPost(parent ? { ...params, parent: parent.id } : params);
+      // Posted, wherever the reader is now. One who moved on while it
+      // went is left there, along with any draft they started there.
+      if (this.screen !== s) return;
       this.draft = null;
       this.error = null;
       // A new thread opens; a reply is shown where it landed.
@@ -407,6 +462,7 @@ export class NewsView {
         await this.load();
       }
     } catch (e) {
+      if (this.screen !== s) return;
       this.error = describe(e);
       this.render();
     } finally {
@@ -432,9 +488,13 @@ export class NewsView {
     if (this.backlinks.delete(a.id)) return this.render();
     const conn = this.hooks.conn();
     if (!conn) return;
+    const from = this.screen;
     try {
-      this.backlinks.set(a.id, (await conn.newsRefs(a.id)).referenced_by);
+      const refs = (await conn.newsRefs(a.id)).referenced_by;
+      if (this.screen !== from) return;
+      this.backlinks.set(a.id, refs);
     } catch (e) {
+      if (this.screen !== from) return;
       this.error = describe(e);
     }
     this.render();
@@ -470,7 +530,7 @@ export class NewsView {
     if (!confirm(`Delete ${what}? This cannot be undone.`)) return;
     try {
       const { articles } = await conn.newsNodeDelete(node.id);
-      this.hooks.say(`Deleted “${node.name}”${articles ? `, and ${plural(articles, 'article', 'articles')} with it` : ''}.`);
+      this.notice = `Deleted “${node.name}”${articles ? `, and ${plural(articles, 'article', 'articles')} with it` : ''}.`;
       this.error = null;
       await this.load();
     } catch (e) {
@@ -487,6 +547,8 @@ export class NewsView {
     const content =
       s.at === 'tree' ? this.treeView(s) : s.at === 'category' ? this.categoryView(s) : this.threadView();
     fill(this.body, this.error ? h('p', { class: 'news-error' }, this.error) : null, ...content);
+    if (this.notice) this.body.prepend(h('p', { class: 'news-notice' }, this.notice));
+    if (this.loading) this.body.append(h('p', { class: 'news-loading' }, 'Loading…'));
 
     const target = this.scrollTo;
     this.scrollTo = null;
@@ -497,7 +559,11 @@ export class NewsView {
     if (this.focusDraft) {
       this.focusDraft = false;
       const field = this.body.querySelector<HTMLElement>(
-        this.draft?.parent === undefined ? '.news-compose input' : '.news-compose textarea',
+        this.naming
+          ? '.news-name-input'
+          : this.draft?.parent === undefined
+            ? '.news-compose input'
+            : '.news-compose textarea',
       );
       field?.focus();
     }
@@ -526,6 +592,9 @@ export class NewsView {
     const actions: HTMLElement[] = [];
     const action = (label: string, fn: () => void, opts: { on?: boolean; title?: string; disabled?: boolean } = {}) => {
       const b = h('button', { class: `ghost${opts.on ? ' on' : ''}`, title: opts.title ?? label }, label);
+      // A glyph for a label says nothing much read aloud; its title is
+      // what it means.
+      if (!/\p{L}/u.test(label)) b.ariaLabel = opts.title ?? label;
       b.onclick = fn;
       b.disabled = !!opts.disabled;
       actions.push(b);
@@ -559,7 +628,8 @@ export class NewsView {
       const make = (kind: NewsNodeKind, label: string) => {
         const b = h('button', { class: 'ghost' }, label);
         b.onclick = () => {
-          this.naming = { kind };
+          this.naming = { kind, name: '' };
+          this.focusDraft = true;
           this.render();
         };
         return b;
@@ -567,7 +637,7 @@ export class NewsView {
       out.push(h('div', { class: 'news-manage' }, make('category', 'New category'), make('bundle', 'New bundle')));
     }
     if (this.naming && 'kind' in this.naming) out.push(this.nameForm());
-    if (!this.nodes.length && !this.stale) {
+    if (!this.nodes.length && !this.loading) {
       out.push(h('p', { class: 'news-empty' }, s.trail.length ? 'This bundle is empty.' : 'There is no news here yet.'));
     }
     for (const node of this.nodes) {
@@ -592,7 +662,8 @@ export class NewsView {
       if (this.managing) {
         const rename = h('button', { class: 'ghost small' }, 'Rename');
         rename.onclick = () => {
-          this.naming = { node };
+          this.naming = { node, name: node.name };
+          this.focusDraft = true;
           this.render();
         };
         const del = h('button', { class: 'ghost small danger' }, 'Delete');
@@ -607,14 +678,15 @@ export class NewsView {
   private nameForm(): HTMLElement {
     const n = this.naming!;
     const renaming = 'node' in n;
-    const input = h('input', {
-      class: 'news-name-input',
-      placeholder: renaming ? 'New name' : n.kind === 'bundle' ? 'Bundle name' : 'Category name',
-      value: renaming ? n.node.name : '',
-    });
+    const label = renaming ? 'New name' : n.kind === 'bundle' ? 'Bundle name' : 'Category name';
+    // The value comes from state and goes back to it on every keystroke,
+    // so a redraw under someone's typing keeps what they typed. Focus is
+    // the render's to give, once, when the form opens.
+    const input = h('input', { class: 'news-name-input', placeholder: label, ariaLabel: label, value: n.name });
+    input.oninput = () => (n.name = input.value);
     const save = h('button', { class: 'primary' }, renaming ? 'Rename' : 'Create');
     const cancel = h('button', { class: 'ghost' }, 'Cancel');
-    save.onclick = () => void this.saveName(input.value.trim());
+    save.onclick = () => void this.saveName(n.name.trim());
     cancel.onclick = () => {
       this.naming = null;
       if (this.pendingRefresh) void this.load();
@@ -624,14 +696,13 @@ export class NewsView {
       if (e.key === 'Enter') save.click();
       if (e.key === 'Escape') cancel.click();
     };
-    queueMicrotask(() => input.focus());
     return h('div', { class: 'news-name-form' }, input, save, cancel);
   }
 
   private categoryView(s: Extract<Screen, { at: 'category' }>): (HTMLElement | null)[] {
     const out: (HTMLElement | null)[] = [];
     if (this.draft && this.draft.parent === undefined) out.push(this.composer());
-    if (!this.threads.length && !this.stale) {
+    if (!this.threads.length && !this.loading) {
       out.push(h('p', { class: 'news-empty' }, 'No threads here yet.'));
     }
     for (const t of this.threads) {
@@ -653,7 +724,10 @@ export class NewsView {
     }
     if (this.threadsMore) {
       const more = h('button', { class: 'news-more' }, 'Older threads');
-      more.onclick = () => void this.loadOlderThreads();
+      more.onclick = () => {
+        more.disabled = true;
+        void this.loadOlderThreads();
+      };
       out.push(more);
     }
     return out;
@@ -663,7 +737,10 @@ export class NewsView {
     const out: (HTMLElement | null)[] = this.articles.map((a) => this.articleEl(a));
     if (this.articlesMore) {
       const more = h('button', { class: 'news-more' }, 'More of this thread');
-      more.onclick = () => void this.loadMoreArticles();
+      more.onclick = () => {
+        more.disabled = true;
+        void this.loadMoreArticles();
+      };
       out.push(more);
     }
     return out;
@@ -759,12 +836,13 @@ export class NewsView {
 
   private composer(parent?: NewsArticle): HTMLElement {
     const d = this.draft!;
-    const subject = h('input', { class: 'news-subject-input', placeholder: 'Subject', value: d.subject });
+    const subject = h('input', { class: 'news-subject-input', placeholder: 'Subject', ariaLabel: 'Subject', value: d.subject });
     subject.oninput = () => (d.subject = subject.value);
     const text = h('textarea', {
       class: 'news-body-input',
       rows: parent ? 4 : 8,
       placeholder: parent ? `Reply to ${parent.from.nick || 'this'}…` : 'Write something…',
+      ariaLabel: parent ? 'Reply' : 'Article',
       value: d.body,
     });
     text.oninput = () => (d.body = text.value);

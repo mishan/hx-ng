@@ -165,6 +165,7 @@ describe('the news requests', () => {
     expect(await conn.newsArticle(7)).toEqual(article);
     expect(await conn.newsPost({ category: 2, parent: 7, subject: 'Re: s', body: 'hi' })).toEqual({ id: 8 });
     await conn.newsDelete(7);
+    await conn.newsDelete(7, 'off topic');
     await conn.newsRefs(7);
     await conn.newsRefs(7, 5);
     await conn.newsNodeCreate({ kind: 'category', name: 'General' });
@@ -176,7 +177,7 @@ describe('the news requests', () => {
     expect(server.sent('news_thread')[0]?.params).toEqual({ root: 7, after: 7 });
     expect(server.sent('news_article')[0]?.params).toEqual({ id: 7 });
     expect(server.sent('news_post')[0]?.params).toEqual({ category: 2, parent: 7, subject: 'Re: s', body: 'hi' });
-    expect(server.sent('news_delete')[0]?.params).toEqual({ id: 7 });
+    expect(server.sent('news_delete').map((f) => f.params)).toEqual([{ id: 7 }, { id: 7, reason: 'off topic' }]);
     expect(server.sent('news_refs').map((f) => f.params)).toEqual([{ id: 7 }, { id: 7, limit: 5 }]);
     expect(server.sent('news_node_create')[0]?.params).toEqual({ kind: 'category', name: 'General' });
     expect(server.sent('news_node_rename')[0]?.params).toEqual({ id: 3, name: 'Chatter' });

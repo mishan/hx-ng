@@ -12,7 +12,7 @@
  * afterwards — it is this hook, and it sees exactly what the socket saw.
  */
 
-import { wsToHttp } from './identity';
+import { wsToHttp } from './identity.js';
 import {
   isEvent,
   isReply,
@@ -42,7 +42,7 @@ import {
   type User,
   type VideoConfig,
   type WireError,
-} from './protocol';
+} from './protocol.js';
 
 /** Turn a refused media request into the same `WireFailure` every other
  *  call throws, so a caller has one thing to catch. The body is the ng
@@ -199,7 +199,9 @@ export class Connection {
    *  replays events but never re-sends the user list, so a client that
    *  resumed into a session it did not itself log into has to ask. */
   private gotSnapshot = false;
-  private retryTimer: number | null = null;
+  /** `ReturnType<typeof setTimeout>` rather than `number`: a browser
+   *  hands one back and Node the other, and nothing here cares which. */
+  private retryTimer: ReturnType<typeof setTimeout> | null = null;
   private closing = false;
 
   state: ConnState = 'offline';
@@ -554,7 +556,7 @@ export class Connection {
     const delay = Math.min(500 * 2 ** this.retry, 15000);
     this.retry++;
     this.setState('reconnecting', `retrying in ${(delay / 1000).toFixed(1)}s`);
-    this.retryTimer = window.setTimeout(() => {
+    this.retryTimer = setTimeout(() => {
       this.retryTimer = null;
       this.attach().catch((e) => {
         if (e instanceof WireFailure) return this.end(e.wire.text || e.wire.code);

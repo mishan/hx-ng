@@ -2,8 +2,13 @@
   "compilerOptions": {
     "target": "ES2022",
     "lib": ["ES2022", "DOM", "DOM.Iterable"],
-    "module": "ESNext",
-    "moduleResolution": "bundler",
+    // NodeNext, not `bundler`: this config produces the *published*
+    // ESM, and Node's resolver wants a real extension on every relative
+    // specifier. Under `bundler` tsc emits what the source said, so an
+    // extensionless import compiled into a package that only a bundler
+    // could load. NodeNext makes the compiler refuse it instead.
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
     "strict": true,
     "noUncheckedIndexedAccess": true,
     "noImplicitOverride": true,

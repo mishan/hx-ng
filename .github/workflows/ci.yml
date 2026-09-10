@@ -23,6 +23,63 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm test
+      # The library is published, so its build output has to be loadable
+      # by something other than the bundler that happens to sit next to
+      # it here. `node` resolving the built ESM is the cheapest proof of
+      # that, and it is a real regression this catches: extensionless
+      # relative specifiers compile fine and then load nowhere.
+      - run: npm run check:package
       # Last, because it is the slowest and the least likely to be what
       # broke — but it stays, since `dist/` is what a deployment gets.
       - run: npx vite build
+
+  # hxd-ng's end-to-end suite, run against *this* working tree.
+  #
+  # That suite is the server's, and it gates the server's CI — but it
+  # drives the server with this library, so a change here can break it
+  # just as easily as a change there. Running it on both sides is what
+  # makes the arrangement mutual: a server regression reddens hxd-ng, a
+  # client regression reddens this repo, and neither has to wait for the
+  # other to notice.
+  #
+  # It needs cargo and a release build, so it is its own job.
+  server-e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: hx-ng
+
+      - uses: actions/checkout@v4
+        with:
+          repository: mishan/hxd-ng
+          path: hxd-ng
+          ref: main
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: hxd-ng
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      # The suite resolves @hotline-ng/client through a relative path to
+      # a sibling checkout, so the two have to sit beside each other —
+      # which is also how they sit on a development machine.
+      - name: Build this library
+        run: npm ci && npm run build:lib
+        working-directory: hx-ng
+
+      # The same courtesy the Playwright suite extends to `../hxd-ng`:
+      # absence is not a failure. A server revision without an `e2e/`
+      # suite has nothing to run against this library, and the job
+      # says so rather than going red for a reason that is not about
+      # this repo. It starts meaning something the moment one lands.
+      - name: Run the server's e2e suite against it
+        run: |
+          if [ ! -d hxd-ng/e2e ]; then
+            echo "hxd-ng's main has no e2e/ suite yet; nothing to run against this library."
+            exit 0
+          fi
+          cd hxd-ng/e2e && npm install && npm test

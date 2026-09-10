@@ -18,7 +18,7 @@
 
 import { expect, test, type Browser, type Page } from '@playwright/test';
 
-import { buildHxdNg, hxdNgAvailable, startServer, type RunningServer } from './hxd-ng';
+import { buildHxdNg, hxdNgAvailable, loginNews, startServer, type RunningServer } from './hxd-ng';
 
 const NG_PORT = 5710;
 
@@ -163,6 +163,14 @@ max_depth = 4
   });
 
   test('a followed thread tells its follower about a reply, and seeing it clears the badge', async ({ browser }, testInfo) => {
+    // Whether there are subscriptions to test is the server's to say, not
+    // the page's: a Follow button that fails to draw is a failure here,
+    // never a skip. Absent is a server older than them; anything but true
+    // on this config is a server that has them and refused this account.
+    const subscribe = (await loginNews(server, 'reader', 'pw'))?.subscribe;
+    test.skip(subscribe === undefined, 'this hxd-ng predates news subscriptions');
+    expect(subscribe, 'the reader may follow news on this server').toBe(true);
+
     const editor = await logIn(browser, server, 'editor');
     const reader = await logIn(browser, server, 'reader');
 
@@ -186,11 +194,8 @@ max_depth = 4
     await reader.locator('.news-node', { hasText: 'Releases' }).click();
     await reader.locator('.news-thread', { hasText: 'Release notes' }).click();
     await expect(reader.locator('.news-article')).toHaveCount(1);
-    // The bar is drawn with the thread, so by now a server that offers
-    // subscriptions has put the button there, and one that does not
-    // never will.
     const follow = reader.locator('.news-bar').getByRole('button', { name: 'Follow', exact: true });
-    test.skip(!(await follow.isVisible()), 'this hxd-ng predates news subscriptions');
+    await expect(follow).toBeVisible();
     await follow.click();
     await expect(reader.locator('.news-bar').getByRole('button', { name: 'Following', exact: true })).toBeVisible();
 

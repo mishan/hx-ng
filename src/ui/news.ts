@@ -56,6 +56,7 @@ import {
   indexTree,
   isMarkdown,
   isOwn,
+  Jumps,
   markdownOffered,
   nextSearchOffset,
   notifiesThread,
@@ -229,9 +230,9 @@ export class NewsView {
   /** Bumped by `reset`, so a subscription answer that was in flight
    *  across a change of session is not taken for the new one's. */
   private session = 0;
-  /** Bumped by every jump to an article, so of two in flight only the
-   *  newer lands. */
-  private jumps = 0;
+  /** Whether a jump to an article may still land: of two in flight only
+   *  the newer, and neither once the reader has moved on. */
+  private jumps = new Jumps(() => this.screen);
 
   constructor(private hooks: NewsHooks) {
     this.bar.append(this.crumbsEl, h('span', { class: 'spacer' }), this.searchBox, this.actionsEl);
@@ -348,7 +349,8 @@ export class NewsView {
   }
 
   /** Open the thread an article is in, focused on it: where a clicked
-   *  notice leads. Whatever the view was fetching before is dropped. */
+   *  notice leads. Whatever the view was fetching before is dropped, and
+   *  fetched after all if the jump fails. */
   openArticle(id: number): void {
     this.generation++;
     this.cancelRefresh();
@@ -584,15 +586,9 @@ export class NewsView {
   private async goToArticle(id: number): Promise<void> {
     const conn = this.hooks.conn();
     if (!conn) return;
-    // Its answer, or its failure, is dropped when the reader has gone
-    // somewhere since — a reader who has moved on is not dragged back —
-    // when another jump was asked for after it, so two notices clicked in
-    // a row land on the second, or when the session was reset, which
-    // replaces the screen too. Not by generation: a refresh of the screen
-    // bumps that, and a post landing meanwhile should not eat the click.
-    const from = this.screen;
-    const jump = ++this.jumps;
-    const current = () => this.screen === from && jump === this.jumps;
+    // Its answer, or its failure, is dropped once it is no longer the
+    // jump to land; `Jumps` says when that is.
+    const current = this.jumps.begin();
     try {
       const article = await conn.newsArticle(id);
       if (!current()) return;
@@ -602,7 +598,12 @@ export class NewsView {
     } catch (e) {
       if (!current()) return;
       this.error = describe(e);
-      this.render();
+      // A jump from a notice dropped what the screen was fetching. With
+      // nowhere to land — a pruned article, a dropped socket — the screen
+      // it left is fetched after all, and the error drawn over that
+      // rather than over a "Loading…" that never ends.
+      if (this.stale && this.visible) void this.load();
+      else this.render();
     }
   }
 

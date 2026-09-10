@@ -12,6 +12,7 @@ import {
   highestId,
   indexTree,
   isOwn,
+  Jumps,
   nextSearchOffset,
   notifiesThread,
   notifyText,
@@ -132,6 +133,61 @@ describe('the tree', () => {
       [7, node(7, 6, 'b')],
     ]);
     expect(trailTo(6, loop)).toBeNull();
+  });
+});
+
+describe('jumping to an article', () => {
+  /** A view as far as a jump can see it: a screen replaced by every
+   *  navigation and reset, and a generation bumped by every refresh. */
+  const view = () => {
+    const v = { screen: {}, generation: 0, landed: [] as number[] };
+    const jumps = new Jumps(() => v.screen);
+    // One jump: ask, wait for the answer, and land if still current.
+    const jump = (id: number) => {
+      const current = jumps.begin();
+      let answer!: () => void;
+      const done = new Promise<void>((resolve) => (answer = resolve)).then(() => {
+        if (current()) v.landed.push(id);
+      });
+      return { answer: () => (answer(), done) };
+    };
+    return { v, jump };
+  };
+
+  it('lands two jumps in a row on the second, whichever answer comes back first', async () => {
+    const { v, jump } = view();
+    const first = jump(1);
+    const second = jump(2);
+    await second.answer();
+    await first.answer();
+    expect(v.landed).toEqual([2]);
+
+    const { v: w, jump: again } = view();
+    const a = again(1);
+    const b = again(2);
+    await a.answer();
+    await b.answer();
+    expect(w.landed).toEqual([2]);
+  });
+
+  it('is not eaten by a refresh of the screen in between', async () => {
+    const { v, jump } = view();
+    const j = jump(7);
+    v.generation++;
+    await j.answer();
+    expect(v.landed).toEqual([7]);
+  });
+
+  it('is dropped once the reader has gone somewhere else, or the session is reset', async () => {
+    const { v, jump } = view();
+    const moved = jump(7);
+    v.screen = {};
+    await moved.answer();
+    expect(v.landed).toEqual([]);
+    // One begun from the new screen still lands.
+    const fresh = jump(8);
+    await fresh.answer();
+    expect(v.landed).toEqual([8]);
   });
 });
 

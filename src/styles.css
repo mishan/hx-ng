@@ -935,6 +935,146 @@ dialog.picker header input { width: 9rem; }
   gap: 0.4rem;
 }
 
+/* --- news ------------------------------------------------------------- */
+
+/* The chat pane and the news reader take turns in the main column, under
+   the call bar and the tiles. */
+.chat-pane, .news {
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.news-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.45rem 0.75rem;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface);
+  flex: none;
+  min-width: 0;
+}
+.news-bar .spacer { flex: 1; }
+.news-bar button.ghost, .news-manage button.ghost, .news-node-row button.ghost, .news-compose button.ghost, .news-name-form button.ghost {
+  padding: 0.3rem 0.6rem;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.news-bar button.ghost:hover:not(:disabled), .news-manage button.ghost:hover, .news-node-row button.ghost:hover { color: var(--text); }
+.news-bar button.ghost.on { color: var(--accent); border-color: var(--accent); }
+.news-bar button:disabled { opacity: 0.5; cursor: default; }
+button.ghost.small { padding: 0.15rem 0.45rem; font-size: 0.75rem; }
+button.ghost.danger:hover { color: var(--admin); border-color: var(--admin); }
+
+/* The breadcrumb is the navigation: one tap back to any level, and the
+   only thing on the bar allowed to shrink. */
+.crumbs { display: flex; align-items: center; gap: 0.15rem; min-width: 0; overflow: hidden; }
+.crumb {
+  color: var(--muted);
+  padding: 0.2rem 0.35rem;
+  border-radius: 6px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 14rem;
+  min-width: 2rem;
+}
+.crumb:hover:not(:disabled) { color: var(--text); background: var(--surface-2); }
+.crumb.current { color: var(--text); font-weight: 600; cursor: default; }
+.crumb-sep { color: var(--muted); opacity: 0.6; }
+
+.news-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+  padding: 0.75rem 0.9rem 1.5rem;
+  overflow-wrap: anywhere;
+}
+.news-empty { color: var(--muted); font-style: italic; }
+.news-error { color: var(--warn); margin: 0 0 0.6rem; }
+.news-manage, .news-name-form { display: flex; gap: 0.4rem; margin: 0 0 0.6rem; }
+.news-name-form input { flex: 1; min-width: 0; background: var(--bg); }
+.news-name-form button.primary, .news-compose button.primary { margin-top: 0; }
+
+.news-node-row { display: flex; align-items: center; gap: 0.35rem; }
+.news-node {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 0.55rem;
+  padding: 0.5rem 0.6rem;
+  border-radius: 8px;
+  text-align: left;
+}
+.news-node:hover { background: var(--surface-2); }
+.news-node .glyph { color: var(--muted); width: 1rem; text-align: center; }
+.news-node .name { flex: 1; font-weight: 560; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.news-node .count { color: var(--muted); font-size: 0.75rem; white-space: nowrap; }
+
+.news-thread {
+  display: grid;
+  gap: 0.15rem;
+  width: 100%;
+  padding: 0.6rem 0.7rem;
+  border-bottom: 1px solid var(--line-soft);
+  text-align: left;
+}
+.news-thread:hover { background: var(--surface-2); }
+.news-thread-subject { font-weight: 600; }
+.news-thread.deleted .news-thread-subject { color: var(--muted); font-style: italic; font-weight: 400; }
+.news-thread-excerpt { color: var(--muted); font-size: 0.85rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.news-thread-meta { color: var(--muted); font-size: 0.72rem; }
+
+/* A reply sits under what it answers, indented by how deep it is — up to
+   a point, past which indentation only pushes the words off a phone. */
+.news-article {
+  margin: 0 0 0.55rem calc(var(--depth, 0) * 1.1rem);
+  padding: 0.55rem 0.75rem;
+  border: 1px solid var(--line-soft);
+  border-left: 3px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+}
+.news-article.focus { border-left-color: var(--accent); }
+.news-article.deleted { background: transparent; }
+.news-meta { display: flex; gap: 0.5rem; align-items: baseline; font-size: 0.78rem; }
+.news-author { font-weight: 600; }
+.news-id { margin-left: auto; font-variant-numeric: tabular-nums; }
+.news-subject-line { font-weight: 600; margin-top: 0.15rem; }
+.news-text { white-space: pre-wrap; margin-top: 0.3rem; line-height: 1.45; }
+.news-ref { color: var(--link); }
+.news-ref.gone { color: var(--muted); text-decoration: line-through; cursor: default; }
+.news-actions { display: flex; gap: 0.3rem; margin-top: 0.4rem; flex-wrap: wrap; }
+.news-actions button { font-size: 0.75rem; color: var(--muted); padding: 0.15rem 0.45rem; border-radius: 6px; }
+.news-actions button:hover, .news-actions button.on { color: var(--text); background: var(--surface-2); }
+.news-actions button.danger:hover { color: var(--admin); }
+.news-backlinks { margin-top: 0.35rem; font-size: 0.82rem; display: grid; gap: 0.15rem; }
+.news-more { margin: 0.5rem 0; color: var(--link); }
+
+.news-compose { display: grid; gap: 0.45rem; margin: 0.5rem 0 0.8rem; }
+.news-compose input, .news-compose textarea { background: var(--bg); }
+.news-compose textarea { resize: vertical; min-height: 5rem; line-height: 1.45; }
+.news-compose-actions { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
+.news-hint { color: var(--muted); font-size: 0.72rem; }
+
+@media (max-width: 44rem) {
+  .news-article { margin-left: calc(var(--depth, 0) * 0.5rem); padding: 0.5rem 0.6rem; }
+  .crumb { max-width: 8rem; }
+  .news-bar, .news-body {
+    padding-left: max(0.75rem, env(safe-area-inset-left));
+    padding-right: max(0.75rem, env(safe-area-inset-right));
+  }
+  .news-hint { display: none; }
+}
+
 /* --- narrow ----------------------------------------------------------- */
 
 @media (max-width: 60rem) {

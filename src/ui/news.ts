@@ -16,15 +16,22 @@
  * only where the login reply's `news.subscribe` says so, so a server
  * older than subscriptions gets exactly the reader it always did.
  *
- * Bodies are plain text and drawn as text. The only thing turned into a
- * link is what the server said was one: a URL, as in chat, and a `#51`
- * the server resolved to an article.
+ * A body is drawn as its article's `mime` says. `text/plain` is text: the
+ * only things turned into links are a URL, as in chat, and a `#51` the
+ * server resolved to an article. `text/markdown` is parsed by the
+ * library's article dialect and drawn as elements and text nodes — never
+ * as HTML — with the same rule for references: only an id in the
+ * article's `refs` is a link, whether it was written `#51` or
+ * `[text](news:51)`. Search snippets and notification excerpts are the
+ * server's plain text, and stay that.
  */
 
 import {
+  blocksText,
   errorText,
   markedSpans,
   newsScopeOf,
+  parseArticle,
   referenceSpans,
   WireFailure,
   type Connection,
@@ -46,12 +53,40 @@ import {
   Following,
   highestId,
   indexTree,
+  isMarkdown,
   isOwn,
+  markdownOffered,
   nextSearchOffset,
   replySubject,
   trailTo,
 } from '../news';
 import { fill, h, linkify } from './dom';
+import { blockNodes, wrapSelection } from './markdown';
+
+const NEWS_MARKDOWN_KEY = 'hxd-ng.news-markdown';
+
+/** Whether a new draft is markdown, where the server takes it: on unless
+ *  this reader turned it off last time. */
+function readNewsMarkdown(): boolean {
+  try {
+    return localStorage.getItem(NEWS_MARKDOWN_KEY) !== 'off';
+  } catch {
+    return true;
+  }
+}
+
+function writeNewsMarkdown(on: boolean): void {
+  try {
+    localStorage.setItem(NEWS_MARKDOWN_KEY, on ? 'on' : 'off');
+  } catch {
+    /* storage disabled; the choice lasts this page load */
+  }
+}
+
+/** A listing's one line: the words, not the markup around them. */
+function listingText(a: NewsArticle): string {
+  return isMarkdown(a.mime) ? blocksText(parseArticle(a.body, [])) : a.body;
+}
 
 type Screen =
   /** `trail` is the bundles down to the one being shown; empty is the root. */
@@ -159,7 +194,15 @@ export class NewsView {
   private articlesMore = false;
   /** The open compose form: a new thread, or a reply to `parent`. Held
    *  here rather than read back off the DOM, so a redraw keeps it. */
-  private draft: { parent?: number; subject: string; body: string } | null = null;
+  private draft: {
+    parent?: number;
+    subject: string;
+    body: string;
+    /** Send as `text/markdown` — honored only where the server takes it. */
+    markdown: boolean;
+    /** Showing the rendered draft rather than the box. */
+    preview: boolean;
+  } | null = null;
   /** The open name form: creating a node of `kind`, or renaming `node`. */
   private naming: { kind: NewsNodeKind } | { node: NewsNode } | null = null;
   private backlinks = new Map<number, NewsReference[]>();
@@ -643,7 +686,10 @@ export class NewsView {
     }
     this.busy = true;
     try {
-      const params = { category: s.category.id, subject: d.subject.trim(), body: d.body };
+      // The source, verbatim, and its type: the server stores what was
+      // typed and every reader renders it for themselves.
+      const mime = markdownOffered(cfg) && d.markdown ? { mime: 'text/markdown' } : {};
+      const params = { category: s.category.id, subject: d.subject.trim(), body: d.body, ...mime };
       const { id } = await conn.newsPost(parent ? { ...params, parent: parent.id } : params);
       this.draft = null;
       this.error = null;
@@ -914,7 +960,7 @@ export class NewsView {
       action(
         'New thread',
         () => {
-          this.draft = { subject: '', body: '' };
+          this.draft = { subject: '', body: '', markdown: readNewsMarkdown(), preview: false };
           this.focusDraft = true;
           this.render();
         },
@@ -1082,7 +1128,7 @@ export class NewsView {
           h('span', { class: 'news-thread-subject' }, a.deleted ? 'Deleted article' : a.subject),
           unread ? h('span', { class: 'badge', title: plural(unread, 'unread reply', 'unread replies') }, String(unread)) : null,
         ),
-        a.deleted ? null : h('span', { class: 'news-thread-excerpt' }, excerpt(a.body)),
+        a.deleted ? null : h('span', { class: 'news-thread-excerpt' }, excerpt(listingText(a))),
         h(
           'span',
           { class: 'news-thread-meta' },
@@ -1166,14 +1212,17 @@ export class NewsView {
     if (a.deleted) {
       el.append(h('div', { class: 'news-text muted' }, 'This article was deleted.'));
     } else {
-      el.append(h('div', { class: 'news-subject-line' }, a.subject), h('div', { class: 'news-text' }, ...this.bodyNodes(a)));
+      el.append(
+        h('div', { class: 'news-subject-line' }, a.subject),
+        h('div', { class: isMarkdown(a.mime) ? 'news-text md' : 'news-text' }, ...this.bodyNodes(a)),
+      );
     }
 
     const actions: HTMLElement[] = [];
     if (canReply(a, cfg)) {
       const reply = h('button', {}, 'Reply');
       reply.onclick = () => {
-        this.draft = { parent: a.id, subject: replySubject(a.subject), body: '' };
+        this.draft = { parent: a.id, subject: replySubject(a.subject), body: '', markdown: readNewsMarkdown(), preview: false };
         this.focusDraft = true;
         this.render();
       };
@@ -1209,14 +1258,18 @@ export class NewsView {
     return el;
   }
 
-  /** A body as text, with URLs and resolved references as links. */
+  /** A body as its type says: markdown drawn as elements, plain text as
+   *  text — URLs and resolved references as links in both. */
   private bodyNodes(a: NewsArticle): (Node | string)[] {
+    if (isMarkdown(a.mime)) {
+      return blockNodes(parseArticle(a.body, a.refs), { ref: (r, label) => this.refLink(r, label) });
+    }
     return referenceSpans(a.body, a.refs).flatMap((span) =>
       'ref' in span ? [this.refLink(span.ref, span.text)] : linkify(span.text),
     );
   }
 
-  private refLink(r: NewsReference, label: string): HTMLElement {
+  private refLink(r: NewsReference, label: string | (Node | string)[]): HTMLElement {
     const link = h(
       'a',
       {
@@ -1224,7 +1277,7 @@ export class NewsView {
         class: `news-ref${r.deleted ? ' gone' : ''}`,
         title: r.deleted ? 'That article was deleted.' : `${r.subject ?? ''} — ${r.from ?? ''}`,
       },
-      label,
+      ...(typeof label === 'string' ? [label] : label),
     );
     link.onclick = (e) => {
       e.preventDefault();
@@ -1244,12 +1297,23 @@ export class NewsView {
       value: d.body,
     });
     text.oninput = () => (d.body = text.value);
+    // Offered only where the login reply lists `text/markdown`; anywhere
+    // else a draft is plain text whatever the reader chose last time.
+    const offered = markdownOffered(this.hooks.conn()?.news ?? null);
+    const markdown = () => offered && d.markdown;
     const post = h('button', { class: 'primary' }, parent ? 'Post reply' : 'Post');
     post.onclick = () => void this.submit(parent);
     text.onkeydown = (e) => {
       if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
         e.preventDefault();
         post.click();
+      }
+      // The chat composer's shortcuts, where they mean something.
+      if (markdown() && (e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && (e.key === 'b' || e.key === 'i')) {
+        e.preventDefault();
+        const w = wrapSelection(text.value, text.selectionStart, text.selectionEnd, e.key === 'b' ? '**' : '*');
+        text.value = d.body = w.value;
+        text.setSelectionRange(w.start, w.end);
       }
     };
     const cancel = h('button', { class: 'ghost' }, 'Cancel');
@@ -1259,18 +1323,57 @@ export class NewsView {
       if (this.pendingRefresh) void this.load();
       else this.render();
     };
+
+    // The preview is the reader's own renderer over the draft, so what it
+    // shows is what everyone will see — except references, which the
+    // server resolves only once the article is posted, and so are drawn
+    // here as the text they are until then.
+    const preview = h('div', { class: 'news-text md news-preview', hidden: true });
+    const previewBtn = h('button', { class: 'ghost' }, 'Preview');
+    const showPreview = (on: boolean) => {
+      d.preview = on && markdown();
+      text.hidden = d.preview;
+      preview.hidden = !d.preview;
+      previewBtn.textContent = d.preview ? 'Edit' : 'Preview';
+      if (d.preview) {
+        fill(preview, ...(d.body.trim() ? blockNodes(parseArticle(d.body, [])) : [h('p', { class: 'muted' }, 'Nothing to preview yet.')]));
+      }
+    };
+    previewBtn.onclick = () => {
+      showPreview(!d.preview);
+      if (!d.preview) text.focus();
+    };
+    const hint = h('span', { class: 'news-hint' });
+    const paint = () => {
+      previewBtn.hidden = !markdown();
+      hint.textContent = `${markdown() ? 'Markdown' : 'Plain text'} · #123 links to article 123 · Ctrl+Enter posts`;
+    };
+    let toggle: HTMLElement | null = null;
+    if (offered) {
+      const box = h('input', { type: 'checkbox', checked: d.markdown });
+      box.onchange = () => {
+        d.markdown = box.checked;
+        writeNewsMarkdown(box.checked);
+        if (!box.checked) showPreview(false);
+        paint();
+      };
+      toggle = h(
+        'label',
+        { class: 'news-md-toggle', title: 'Post as markdown: headings, lists, **bold**, [links](https://…). Off, the article is plain text, exactly as typed.' },
+        box,
+        'Markdown',
+      );
+    }
+    paint();
+    showPreview(d.preview);
+
     return h(
       'div',
       { class: 'news-compose' },
       subject,
       text,
-      h(
-        'div',
-        { class: 'news-compose-actions' },
-        post,
-        cancel,
-        h('span', { class: 'news-hint' }, 'Plain text · #123 links to article 123 · Ctrl+Enter posts'),
-      ),
+      preview,
+      h('div', { class: 'news-compose-actions' }, post, cancel, previewBtn, toggle, hint),
     );
   }
 }

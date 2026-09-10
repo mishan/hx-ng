@@ -294,6 +294,19 @@ Typed into the composer:
   Your own camera is shown back to you as a mirrored tile — the only way
   to find out that it is pointed at the ceiling, or not sending at all,
   without asking the room. **Self view** in the call bar turns it off.
+- **Markdown is drawn, never sent.** Chat is read as GtkHx's dialect —
+  `**bold**`, `*italic*`, `` `code` ``, `~~strike~~`, `[label](https://…)`,
+  fenced code and `>` quotes, and nothing else, so `# 1` and `---` stay
+  ordinary chat — and a line looks the same here as there. The wire
+  carries exactly what was typed. **Markdown** in the title bar turns the
+  drawing off, for anybody who would rather see a 1997 client's literal
+  asterisks as asterisks. A news article is markdown only when it says
+  `text/markdown`, and then reads as a document: headings, lists,
+  quotes, code, rules and pipe tables, minus raw HTML and images, with
+  `#51` and `[text](news:51)` linked only where the server resolved them.
+  The composer offers it, with a preview, where the server's login reply
+  lists `text/markdown`. Nothing either dialect produces is ever handed
+  to the HTML parser: the library parses, and the page draws text nodes.
 - **Negotiation is serialised, and inbound video is read from the
   transceivers.** Both are the difference between a picture and a black
   rectangle; `packages/hotline-ng/README.md` says why.

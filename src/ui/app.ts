@@ -61,6 +61,7 @@ import { Tiles } from './tiles';
 import { MediaCache } from './media';
 import { NewsView } from './news';
 import { appendLine, isAtBottom, renderTranscript, scrollToEnd } from './transcript';
+import { wrapSelection } from './markdown';
 
 /** Codes that mean "not for you, not now, not ever on this session":
  *  no log configured, no privilege, or a request this server will not
@@ -69,6 +70,7 @@ const HISTORY_REFUSALS = new Set(['not_available', 'access_denied', 'bad_request
 
 const THEME_KEY = 'hxd-ng.theme';
 const SELF_VIEW_KEY = 'hxd-ng.selfview';
+const MARKDOWN_KEY = 'hxd-ng.markdown';
 type Theme = 'auto' | 'dark' | 'light';
 
 export class App {
@@ -110,6 +112,11 @@ export class App {
    *  only way to find out that a camera is pointed at the ceiling, or
    *  that it is not sending at all, without asking the room. */
   private selfView = readSelfView();
+  /** Whether chat is drawn as markdown — GtkHx's "Render markdown", on
+   *  by default. Receiving markdown means a literal `*emphasis*` from a
+   *  1997 client comes out in italics; this is for anybody who would
+   *  rather see exactly what was typed. What is sent never changes. */
+  private markdown = readMarkdown();
 
   // Long-lived DOM.
   private shell = h('div', { class: 'app', hidden: true });
@@ -1081,7 +1088,7 @@ export class App {
       // Appending one line assumes the DOM still matches the array it was
       // drawn from. A merge rewrites that array, so redraw instead.
       if (this.store.revision !== this.drawnRevision) this.renderTranscript();
-      else appendLine(this.transcript, line, conv, this.store, this.images);
+      else appendLine(this.transcript, line, conv, this.store, this.images, { markdown: this.markdown });
     } else this.renderRail();
     this.renderUnreadTitle();
   }
@@ -1203,7 +1210,7 @@ export class App {
 
   private renderTranscript(): void {
     const conv = this.store.conversation(this.store.active);
-    if (conv) renderTranscript(this.transcript, conv, this.store, this.images);
+    if (conv) renderTranscript(this.transcript, conv, this.store, this.images, { markdown: this.markdown });
     this.drawnRevision = this.store.revision;
   }
 
@@ -1335,6 +1342,26 @@ export class App {
       paintTheme(next);
     };
 
+    // Unlike GtkHx, which keeps the rendering a row was built with, this
+    // redraws what is already on screen: every line still holds the text
+    // it arrived as, so there is nothing to keep alive that is not
+    // already kept.
+    const mdBtn = h('button', { class: 'ghost' }, 'Markdown');
+    const paintMarkdown = () => {
+      mdBtn.classList.toggle('on', this.markdown);
+      mdBtn.setAttribute('aria-pressed', String(this.markdown));
+      mdBtn.title = this.markdown
+        ? 'Render markdown: on. Chat is drawn as **bold**, `code` and the rest. Click to show it exactly as typed.'
+        : 'Render markdown: off. Chat is shown exactly as typed. Click to draw markdown.';
+    };
+    paintMarkdown();
+    mdBtn.onclick = () => {
+      this.markdown = !this.markdown;
+      writeMarkdown(this.markdown);
+      paintMarkdown();
+      this.renderTranscript();
+    };
+
     this.pill.onclick = () => this.debug.toggle(true);
     this.meButton.onclick = () => void this.editSelf();
     this.mailBtn.onclick = () =>
@@ -1343,6 +1370,17 @@ export class App {
       );
 
     this.composer.onkeydown = (e) => {
+      // GtkHx's shortcuts: wrap the selection, or put a pair down to type
+      // into. The box then says exactly what will be sent.
+      if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && (e.key === 'b' || e.key === 'i')) {
+        e.preventDefault();
+        const c = this.composer;
+        const w = wrapSelection(c.value, c.selectionStart, c.selectionEnd, e.key === 'b' ? '**' : '*');
+        c.value = w.value;
+        c.setSelectionRange(w.start, w.end);
+        this.autoGrow();
+        return;
+      }
       if (e.key === 'Enter' && !e.shiftKey) {
         e.preventDefault();
         const text = this.composer.value.trim();
@@ -1427,6 +1465,7 @@ export class App {
         this.mailBtn,
         this.peopleBtn,
         themeBtn,
+        mdBtn,
         identityBtn,
         debugBtn,
       ),
@@ -1547,6 +1586,22 @@ function readSelfView(): boolean {
 function writeSelfView(on: boolean): void {
   try {
     localStorage.setItem(SELF_VIEW_KEY, on ? 'on' : 'off');
+  } catch {
+    /* storage disabled; the preference lasts this page load */
+  }
+}
+
+function readMarkdown(): boolean {
+  try {
+    return localStorage.getItem(MARKDOWN_KEY) !== 'off';
+  } catch {
+    return true;
+  }
+}
+
+function writeMarkdown(on: boolean): void {
+  try {
+    localStorage.setItem(MARKDOWN_KEY, on ? 'on' : 'off');
   } catch {
     /* storage disabled; the preference lasts this page load */
   }

@@ -15,7 +15,9 @@
  * a runtime differs by layer — worth knowing before reaching for the
  * bottom one from somewhere that is not a page:
  *
- * - `protocol` is plain data and runs anywhere.
+ * - `protocol` is plain data and runs anywhere, and so are the news
+ *   helpers and `markdown` — the chat and article dialects, parsed into
+ *   styled runs and blocks for a caller to draw as text.
  * - `Connection` needs `WebSocket`, `fetch` and `performance`, all of
  *   which a current Node has too — the class deliberately touches no
  *   `window` and no `document`, so a bot, a test harness or an SSR pass
@@ -39,6 +41,7 @@
 
 export * from './protocol.js';
 export * from './news.js';
+export * from './markdown.js';
 export * from './identity.js';
 export {
   Connection,

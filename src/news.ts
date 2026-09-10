@@ -48,6 +48,19 @@ export function canReply(article: NewsArticle, cfg: NewsConfig | null): boolean 
   return cfg.max_depth === undefined || article.depth < cfg.max_depth;
 }
 
+/** Is this body markdown? Only when its article says so: a `text/plain`
+ *  author did not write markdown, and their asterisks are asterisks. */
+export function isMarkdown(mime: string | undefined): boolean {
+  return (mime ?? '').split(';')[0]!.trim().toLowerCase() === 'text/markdown';
+}
+
+/** May a post say `text/markdown`? Not on a server whose `markdown` is
+ *  `off` — it would answer `bad_body_type` — nor on one that does not
+ *  list it; `render` and `source` are the same thing to a client. */
+export function markdownOffered(cfg: NewsConfig | null): boolean {
+  return !!cfg && cfg.markdown !== 'off' && (cfg.body_types ?? []).includes('text/markdown');
+}
+
 /** The server's limits are in UTF-8 bytes, not characters. */
 export function byteLength(s: string): number {
   return new TextEncoder().encode(s).length;

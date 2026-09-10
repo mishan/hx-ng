@@ -18,22 +18,31 @@ import { continuesRun, type Conversation, type Line } from '../state';
 import type { Store } from '../state';
 import { clock, fill, h, linkify } from './dom';
 import { icon } from './icons';
+import { chatNodes } from './markdown';
 import { mediaEl, type MediaCache } from './media';
 
 /** Chat-gutter icons stay at 1× — at 2× they compete with the text for
  *  attention, and the roster is where you go to look at people. */
 const CHAT_SCALE = 1;
 
+export interface TranscriptOptions {
+  /** Draw what people typed as GtkHx's markdown. Off, a line is the text
+   *  exactly as typed, with only its bare URLs made links. The line keeps
+   *  its source either way, so flipping it redraws what is already here. */
+  markdown: boolean;
+}
+
 export function renderTranscript(
   el: HTMLElement,
   conv: Conversation,
   store: Store,
   media: MediaCache,
+  opts: TranscriptOptions,
 ): void {
   const nodes: HTMLElement[] = [];
   let prev: Line | undefined;
   for (const line of conv.lines) {
-    nodes.push(lineEl(line, prev, store, media));
+    nodes.push(lineEl(line, prev, store, media, opts));
     prev = line;
   }
   fill(el, ...nodes);
@@ -46,10 +55,11 @@ export function appendLine(
   conv: Conversation,
   store: Store,
   media: MediaCache,
+  opts: TranscriptOptions,
 ): void {
   const atBottom = isAtBottom(el);
   const prev = conv.lines[conv.lines.length - 2];
-  el.append(lineEl(line, prev, store, media));
+  el.append(lineEl(line, prev, store, media, opts));
   while (el.childElementCount > conv.lines.length) el.firstElementChild?.remove();
   if (atBottom) scrollToEnd(el);
 }
@@ -75,8 +85,9 @@ function lineEl(
   prev: Line | undefined,
   store: Store,
   media: MediaCache,
+  opts: TranscriptOptions,
 ): HTMLElement {
-  if (line.kind !== 'chat') return eventLine(line, prev, media);
+  if (line.kind !== 'chat') return eventLine(line, prev, media, opts);
 
   const from = line.from;
   const sameSpeaker = continuesRun(prev, line);
@@ -116,7 +127,9 @@ function lineEl(
       // beside the text and the timestamp is already the line's own, in
       // the reader's timezone rather than in UTC.
       line.queued ? h('span', { class: 'tag', title: 'Held by the server until you came back' }, 'queued') : null,
-      ...linkify(line.text),
+      // The body only: the nick is a name, and a name with asterisks in it
+      // is still that name.
+      ...(opts.markdown ? chatNodes(line.text) : linkify(line.text)),
       // An image is a block under the text, not a word in it: a line
       // may carry one with nothing said at all, which is a picture
       // posted rather than an empty message.
@@ -127,13 +140,21 @@ function lineEl(
 
 /** Actions, notices, broadcasts and this client's own remarks all read
  *  as one column of asides rather than as chat with a strange name. */
-function eventLine(line: Line, prev: Line | undefined, media: MediaCache): HTMLElement {
-  const text =
+function eventLine(line: Line, prev: Line | undefined, media: MediaCache, opts: TranscriptOptions): HTMLElement {
+  const prefix =
     line.kind === 'action'
-      ? `${line.from?.nick ?? ''} ${line.text}`
+      ? `${line.from?.nick ?? ''} `
       : line.kind === 'broadcast'
-        ? `${line.from?.nick ?? 'server'}: ${line.text}`
-        : line.text;
+        ? `${line.from?.nick ?? 'server'}: `
+        : '';
+  const text = prefix + line.text;
+  // GtkHx's rule: only a body somebody typed, in one voice, is read as
+  // markdown. A `/me` and a broadcast are that — a person's words behind
+  // a name this client puts there, and the name is left alone. A notice
+  // is the server's (agreement text is often drawn in asterisks), a
+  // system line is this client's, and a news notice is an excerpt the
+  // server cut; all of those are shown as they are.
+  const typed = opts.markdown && (line.kind === 'action' || line.kind === 'broadcast');
   const label =
     line.kind === 'broadcast' ? 'broadcast' : line.kind === 'deleted' ? 'deleted' : '';
   return h(
@@ -149,7 +170,9 @@ function eventLine(line: Line, prev: Line | undefined, media: MediaCache): HTMLE
       // handles the click, since only it can open the reader.
       ...(line.article !== undefined
         ? [h('a', { href: `#news-${line.article}`, class: 'news-notice', dataset: { article: String(line.article) } }, text)]
-        : linkify(text)),
+        : typed
+          ? [prefix, ...chatNodes(line.text)]
+          : linkify(text)),
       // The same renderer a chat line gets. A redacted history row is
       // the *only* line that ever carries `removed`, so drawing it any
       // other way would leave that state with no renderer at all — and

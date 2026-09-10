@@ -227,4 +227,45 @@ max_depth = 4
     await row.click();
     await expect(reader.locator('.news-article')).toHaveCount(2);
   });
+
+  test('markdown is drawn in chat and in an article, and sent as typed', async ({ browser }) => {
+    const editor = await logIn(browser, server, 'editor');
+
+    // Chat needs nothing of the server: the wire carries the text as
+    // typed, and drawing it is this client's business.
+    await editor.locator('.composer-input').fill('**hi** and `code`');
+    await editor.locator('.composer-input').press('Enter');
+    const said = editor.locator('.line.chat').last();
+    await expect(said.locator('strong')).toHaveText('hi');
+    await expect(said.locator('code')).toHaveText('code');
+
+    await openNews(editor);
+    await editor.locator('.news-bar').getByRole('button', { name: 'Manage' }).click();
+    await editor.getByRole('button', { name: 'New category' }).click();
+    await editor.getByPlaceholder('Category name').fill('Notes');
+    await editor.getByPlaceholder('Category name').press('Enter');
+    await expect(editor.locator('.news-node', { hasText: 'Notes' })).toBeVisible();
+    await editor.locator('.news-bar').getByRole('button', { name: 'Manage' }).click();
+    await editor.locator('.news-node', { hasText: 'Notes' }).click();
+    await editor.getByRole('button', { name: 'New thread' }).click();
+
+    // The switch is drawn exactly when the login reply lists
+    // `text/markdown`, which a server with `news.markdown = "off"` does not.
+    const toggle = editor.locator('.news-md-toggle input');
+    test.skip(!(await toggle.isVisible()), 'this server takes plain-text articles only (news.markdown is off, or it predates markdown)');
+    await expect(toggle).toBeChecked();
+
+    await editor.locator('.news-subject-input').fill('Formatting');
+    await editor.locator('.news-body-input').fill('# Heading\n\nSome **bold**, and `#1` in code.\n\n- one\n- two');
+    await editor.getByRole('button', { name: 'Preview', exact: true }).click();
+    await expect(editor.locator('.news-preview h1')).toHaveText('Heading');
+    await editor.getByRole('button', { name: 'Edit', exact: true }).click();
+    await editor.getByRole('button', { name: 'Post', exact: true }).click();
+
+    const body = editor.locator('.news-article').first().locator('.news-text');
+    await expect(body.locator('h1')).toHaveText('Heading');
+    await expect(body.locator('strong')).toHaveText('bold');
+    await expect(body.locator('li')).toHaveText(['one', 'two']);
+    await expect(body.locator('code')).toHaveText('#1');
+  });
 });

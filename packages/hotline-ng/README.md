@@ -54,6 +54,13 @@ grammar the SFU keys tracks on (`sendMid`, `parseRecvMid`). No behaviour
 at all — this is the twin of `crates/hxd-ng-session/src/proto.rs`, and
 when the server's shapes change it is what changes with them.
 
+Beside it, and just as DOM-free, is what a body's text means:
+`referenceSpans` and `markedSpans` for news references and search
+marks, and markdown — `parseChat` for GtkHx's chat dialect,
+`parseArticle` for a `text/markdown` article, `parseInline` for a single
+line of either. They return styled runs and blocks, never HTML; drawing
+them as text nodes is the caller's job, and the only safe way to do it.
+
 ### `Connection` — one session, however many sockets
 
 The protocol's whole point is that a session outlives its connection, so

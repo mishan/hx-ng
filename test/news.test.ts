@@ -5,6 +5,7 @@ import type { Events, NewsArticle, NewsConfig, NewsNode, NewsSub } from '@hotlin
 import {
   byteLength,
   canReply,
+  coalesced,
   draftProblem,
   excerpt,
   Following,
@@ -12,6 +13,7 @@ import {
   indexTree,
   isOwn,
   nextSearchOffset,
+  notifiesThread,
   notifyText,
   replySubject,
   scopeKey,
@@ -229,11 +231,52 @@ describe('following', () => {
     covered.load([sub({ unread: 1 })]);
     expect(covered.total()).toBe(1);
 
-    // Seen, the loose count goes, and the server is asked anyway in case
-    // the list is older than a subscription it holds.
-    expect(f.claimSeen({ thread: 398 }, 413)).toBe(true);
-    expect(f.total()).toBe(0);
+    // Drawn short of the newest reply it was told about, it stays.
+    expect(f.claimSeen({ thread: 398 }, 412)).toBe(false);
+    expect(f.total()).toBe(2);
+    // Drawn as far as that reply, it goes. The list is in and holds no
+    // row for the thread, so there is no cursor to move and nothing is
+    // sent.
     expect(f.claimSeen({ thread: 398 }, 413)).toBe(false);
+    expect(f.total()).toBe(0);
+    expect(f.unreadOf({ thread: 398 })).toBe(0);
+  });
+
+  it('asks the server about a loose count while the list is not in, once per page drawn', () => {
+    const f = new Following();
+    f.notify(notice({ reason: 'reply', article: 413, unread: 1 }));
+    // The server may hold a row this has not heard of yet: ask.
+    expect(f.claimSeen({ thread: 398 }, 405)).toBe(true);
+    // A redraw before the answer does not ask again, nor does less.
+    expect(f.claimSeen({ thread: 398 }, 405)).toBe(false);
+    expect(f.claimSeen({ thread: 398 }, 400)).toBe(false);
+    // Still short of the reply, so still counted when the list lands.
+    f.load([]);
+    expect(f.unreadOf({ thread: 398 })).toBe(1);
+
+    const g = new Following();
+    g.notify(notice({ reason: 'reply', article: 413, unread: 1 }));
+    expect(g.claimSeen({ thread: 398 }, 413)).toBe(true);
+    expect(g.claimSeen({ thread: 398 }, 413)).toBe(false);
+    g.load([]);
+    expect(g.total()).toBe(0);
+  });
+
+  it('does not add a notification to the login total before the list arrives', () => {
+    // The login's count already includes the followed thread this
+    // notification is for.
+    const f = new Following();
+    f.notify(notice({ unread: 3 }));
+    expect(f.total(3)).toBe(3);
+    f.load([sub({ unread: 3 })]);
+    expect(f.total(3)).toBe(3);
+
+    // One the list does not cover counts from then on.
+    const g = new Following();
+    g.notify(notice({ reason: 'reply', target: 9, root: 9, unread: 1 }));
+    expect(g.total(2)).toBe(2);
+    g.load([sub({ unread: 2 })]);
+    expect(g.total(2)).toBe(3);
   });
 
   it('asks the server only when seeing something moves it, and clears the count at once', () => {
@@ -268,6 +311,41 @@ describe('following', () => {
     expect(f.loaded).toBe(false);
     expect(f.list()).toEqual([]);
     expect(f.total()).toBe(0);
+  });
+
+  it('counts only a thread-scoped notification as the thread on screen', () => {
+    expect(notifiesThread(notice(), 398)).toBe(true);
+    expect(notifiesThread(notice(), 399)).toBe(false);
+    expect(notifiesThread(notice(), null)).toBe(false);
+    // A new thread in a followed category counts against the category,
+    // which drawing the thread does not acknowledge.
+    expect(notifiesThread(notice({ scope: 'category', target: 7, article: 398 }), 398)).toBe(false);
+  });
+
+  it('coalesces a burst of refreshes into one in flight and one after it', async () => {
+    const started: (() => void)[] = [];
+    const refresh = coalesced(() => new Promise<void>((resolve) => started.push(resolve)));
+    const settled: number[] = [];
+    const first = refresh().then(() => settled.push(1));
+    const rest = [refresh(), refresh(), refresh()].map((p, i) => p.then(() => settled.push(i + 2)));
+    expect(started.length).toBe(1);
+
+    started[0]!();
+    await first;
+    // Everything asked while the first was out waits for a fetch begun
+    // after it, and shares that one.
+    await Promise.resolve();
+    expect(started.length).toBe(2);
+    expect(settled).toEqual([1]);
+    started[1]!();
+    await Promise.all(rest);
+    expect(settled).toEqual([1, 2, 3, 4]);
+    expect(started.length).toBe(2);
+
+    // Idle again, the next call starts at once.
+    void refresh();
+    expect(started.length).toBe(3);
+    started[2]!();
   });
 
   it('announces a notification by why it is yours', () => {

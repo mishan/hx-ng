@@ -41,6 +41,7 @@ import {
 
 import {
   canReply,
+  coalesced,
   draftProblem,
   excerpt,
   Following,
@@ -48,6 +49,7 @@ import {
   indexTree,
   isOwn,
   nextSearchOffset,
+  notifiesThread,
   replySubject,
   trailTo,
 } from '../news';
@@ -173,6 +175,9 @@ export class NewsView {
   /** Bumped by `reset`, so a subscription answer that was in flight
    *  across a change of session is not taken for the new one's. */
   private session = 0;
+  /** Bumped by every jump to an article, so of two in flight only the
+   *  newer lands. */
+  private jumps = 0;
 
   constructor(private hooks: NewsHooks) {
     this.bar.append(this.crumbsEl, h('span', { class: 'spacer' }), this.searchBox, this.actionsEl);
@@ -242,8 +247,15 @@ export class NewsView {
    *
    * Quiet on failure: the badge keeps what it had, and the Following
    * screen fetches for itself and says what went wrong there.
+   *
+   * Coalesced, because every notification in a scope the list does not
+   * cover asks for it, and a burst of replies should not be a burst of
+   * requests: one in flight, and one more after it for whatever changed
+   * while it was out.
    */
-  async refreshFollowing(): Promise<void> {
+  readonly refreshFollowing = coalesced(() => this.fetchFollowing());
+
+  private async fetchFollowing(): Promise<void> {
     const conn = this.hooks.conn();
     if (!conn || !this.subscribable()) return;
     const session = this.session;
@@ -260,8 +272,8 @@ export class NewsView {
 
   /**
    * A notification: something here is yours. Returns true when it is
-   * already in front of the reader — the thread it is in is on screen —
-   * so the caller need not announce it as well.
+   * already in front of the reader — it counts against the thread on
+   * screen — so the caller need not announce it as well.
    */
   onNotify(d: Events['news_notify']): boolean {
     // Not covered means a subscription made since the list was fetched,
@@ -269,7 +281,7 @@ export class NewsView {
     if (!this.following.notify(d)) void this.refreshFollowing();
     this.hooks.onUnread();
     const s = this.screen;
-    const onScreen = this.visible && s.at === 'thread' && s.root === d.root;
+    const onScreen = this.visible && s.at === 'thread' && notifiesThread(d, s.root);
     // A thread on screen shows no counts. The `news_posted` beside this
     // refetches it, and drawing the new article acknowledges it; this
     // covers the notification arriving after that refetch did.
@@ -338,10 +350,15 @@ export class NewsView {
       scope = { category: s.category.id };
       upTo = highestId(this.threads.map((t) => t.article));
     } else return;
-    if (upTo === null || !this.following.claimSeen(scope, upTo)) return;
+    if (upTo === null) return;
+    // A loose count can clear with nothing sent, so the badge is redrawn
+    // on what changed rather than on whether anything was.
+    const before = this.unread;
+    const send = this.following.claimSeen(scope, upTo);
+    if (this.unread !== before) this.hooks.onUnread();
+    if (!send) return;
     const at = upTo;
     const session = this.session;
-    this.hooks.onUnread();
     conn.newsSeen(scope, at).then(
       (ok) => {
         if (session !== this.session) return;
@@ -491,11 +508,22 @@ export class NewsView {
   private async goToArticle(id: number): Promise<void> {
     const conn = this.hooks.conn();
     if (!conn) return;
+    // Its answer, or its failure, is dropped when the reader has gone
+    // somewhere since, when another jump was asked for after it — two
+    // notices clicked in a row land on the second — or when the session
+    // was reset, which replaces the screen too. Not by generation: a
+    // refresh of the screen bumps that, and should not eat the click.
+    const from = this.screen;
+    const jump = ++this.jumps;
+    const current = () => this.screen === from && jump === this.jumps;
     try {
       const article = await conn.newsArticle(id);
+      if (!current()) return;
       const where = await this.locate(article.category);
+      if (!current()) return;
       this.openThread(where.trail, where.category, article.root, id);
     } catch (e) {
+      if (!current()) return;
       this.error = describe(e);
       this.render();
     }

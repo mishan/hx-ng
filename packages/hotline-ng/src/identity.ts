@@ -24,8 +24,8 @@
  * the docs' prose.
  */
 
-import { cBytes, cMap, cOptMap, cText, cUint, decodeCanonical, encode, mapGet, mapWithout, type CborValue } from './cbor';
-import { hasDeceptiveChar } from './names';
+import { cBytes, cMap, cOptMap, cText, cUint, decodeCanonical, encode, mapGet, mapWithout, type CborValue } from './cbor.js';
+import { hasDeceptiveChar } from './names.js';
 
 const textEncoder = new TextEncoder();
 

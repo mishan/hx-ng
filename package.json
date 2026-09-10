@@ -17,6 +17,7 @@
     "preview": "vite preview",
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.node.json",
     "build:lib": "npm run build -w @hotline-ng/client",
+    "check:package": "npm run build:lib && node -e \"import('./packages/hotline-ng/dist/index.js')\"",
     "icons": "python3 tools/build-icons.py ../gtkhx/icons.rsrc public"
   },
   "devDependencies": {

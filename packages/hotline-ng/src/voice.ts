@@ -34,7 +34,7 @@
  * the one place to change if so.
  */
 
-import type { Connection } from './connection';
+import type { Connection } from './connection.js';
 import {
   CAM_SEND_MID,
   parseRecvMid,
@@ -47,7 +47,7 @@ import {
   type VideoStartOk,
   type VoiceJoinOk,
   type VoiceParticipant,
-} from './protocol';
+} from './protocol.js';
 
 /** One publication arriving on this peer connection, ready to be shown. */
 export interface RemoteVideo {
@@ -110,6 +110,12 @@ const DEFAULTS: Record<VideoKind, VideoLimits> = {
  * reported in words rather than left to surface as a type error.
  */
 export function captureBlockedReason(): string | null {
+  // `typeof`, because the whole job of this function is to answer rather
+  // than throw, and a caller outside a browser is the case where a bare
+  // `window` would throw hardest.
+  if (typeof window === 'undefined') {
+    return 'Voice needs a browser, and this is not one.';
+  }
   if (!window.isSecureContext) {
     return (
       `Voice needs a secure context and ${location.origin} is not one, so this ` +

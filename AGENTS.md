@@ -25,6 +25,14 @@ sibling checkout at `../hxd-ng`. Neither repo depends on the other, but
 the e2e suite builds and runs the real `hxd` and `hlid` from there when
 they are present, and skips rather than fails when they are not.
 
+It runs in the other direction too. hxd-ng's own end-to-end suite
+(`hxd-ng/e2e/`) drives a real server with **this library**, as an
+independent second implementation of its wire, and CI here runs that
+suite against this working tree. So a change in `packages/hotline-ng`
+that breaks the server's tests fails *this* repo's build, without
+waiting for anyone to advance a pin. Worth knowing before changing
+anything in `Connection`'s exported surface.
+
 ## Build and test
 
 ```sh
@@ -36,7 +44,7 @@ npm run test:e2e     # playwright; needs ../hxd-ng and cargo, else skips
 ```
 
 Before calling anything done, run what CI runs — `npm run typecheck`,
-`npm test`, and `npx vite build`, in that order.
+`npm test`, `npm run check:package` and `npx vite build`, in that order.
 
 `dist/` is a build artefact and is not committed. `public/icons.png` and
 `public/icons.json` are, because they change only when gtkhx's
@@ -50,6 +58,23 @@ That is why there is a hand-written CBOR codec in
 objects need deterministic encoding, and pulling in a general codec to get
 it would cost more than it saves. Adding a runtime dependency is a
 decision to argue for, not a convenience.
+
+**Everything below `VoiceSession` runs outside a browser.** `protocol`,
+`cbor`, `identity` and `Connection` touch no `window` and no `document`:
+`Connection` needs `WebSocket`, `fetch` and `performance`, which a current
+Node has, and its `sessionStorage` use sits behind try/catch so resume
+across reloads switches itself off rather than failing. That is not
+housekeeping — it is what lets hxd-ng's end-to-end suite drive a real
+server with this library as an independent second implementation of the
+wire, which is worth more to both projects than any mock. `VoiceSession`
+is the exception and stays one; it may be imported anywhere and called
+only in a page.
+
+Two things defend it, and both are load-bearing. Relative imports carry
+their **`.js` extension** and `tsconfig.build.json` says `NodeNext`, so
+the compiler refuses a specifier Node could not resolve. And
+`npm run check:package` (in CI) loads the built ESM with `node`, because
+a bundler is forgiving in exactly the way that hides this.
 
 **Identity keys are non-extractable and never leave WebCrypto.** The
 device keypairs are generated with `extractable: false` and stored as

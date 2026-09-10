@@ -208,6 +208,25 @@ describe('unread counting', () => {
     expect(c.unread).toBe(1);
   });
 
+  it('leaves a news notice to the News badge, even while the reader covers chat', () => {
+    // A notice arriving with News open lands in the covered conversation,
+    // and is about something else entirely.
+    const s = new Store();
+    const c = s.openPm({ uid: 9, nick: 'Carol' });
+    s.active = c.id;
+    s.covered = true;
+    s.add(c.id, { t: 1, kind: 'notice', text: 'Bob replied to you: “Re: Hello”', article: 412 });
+    expect(c.lines).toHaveLength(1);
+    expect(c.unread).toBe(0);
+    // Nor anywhere else: off screen, it is still not chat.
+    const lobby = s.conversation(LOBBY)!;
+    s.add(LOBBY, { t: 2, kind: 'notice', text: 'Bob posted in “Hello”', article: 413 });
+    expect(lobby.unread).toBe(0);
+    // A line that is chat counts as it always did.
+    s.add(c.id, chat(3, 'are you there?'));
+    expect(c.unread).toBe(1);
+  });
+
   it('does not raise a badge over mail the server calls read', () => {
     // Recovered mail may already have been dealt with, possibly from
     // another client on the same account.

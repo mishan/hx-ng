@@ -188,6 +188,33 @@ export function coalesced(run: () => Promise<void>): () => Promise<void> {
   return call;
 }
 
+/**
+ * Which jump to an article may still land. A jump's answer, or its
+ * failure, is dropped when the reader has gone somewhere since — a
+ * reader who has moved on is not dragged back — when another jump was
+ * asked for after it, so two notices clicked in a row land on the
+ * second whichever answer comes back first, or when the session was
+ * reset, which replaces the screen too.
+ *
+ * Not by the view's generation: a refresh of the screen bumps that, and
+ * a post landing meanwhile should not eat the click.
+ */
+export class Jumps<S> {
+  private latest = 0;
+
+  /** `screen` reads the one on screen now, which the view replaces
+   *  rather than edits on every navigation and every reset. */
+  constructor(private screen: () => S) {}
+
+  /** Begin a jump from wherever the reader is. The check it hands back
+   *  says whether this jump is still the one to land. */
+  begin(): () => boolean {
+    const from = this.screen();
+    const jump = ++this.latest;
+    return () => this.screen() === from && jump === this.latest;
+  }
+}
+
 /** A count the server keeps no subscription for: a reply to your own
  *  article in a thread you stopped following still notifies you, and
  *  deserves a badge until you have seen it. */

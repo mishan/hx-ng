@@ -958,6 +958,18 @@ dialog.picker header input { width: 9rem; }
   min-width: 0;
 }
 .news-bar .spacer { flex: 1; }
+.news-actions-bar { display: flex; align-items: center; gap: 0.35rem; }
+.news-search { width: 12rem; min-width: 0; padding: 0.3rem 0.55rem; background: var(--bg); }
+.news-search-head { color: var(--muted); margin: 0 0 0.5rem; }
+.news-link { color: var(--link); padding: 0; }
+.news-link:hover { text-decoration: underline; }
+.news-hit-snippet { color: var(--muted); font-size: 0.85rem; line-height: 1.4; }
+.news-hit mark {
+  background: var(--accent-soft);
+  color: var(--text);
+  border-radius: 3px;
+  padding: 0 0.1rem;
+}
 .news-bar button.ghost, .news-manage button.ghost, .news-node-row button.ghost, .news-compose button.ghost, .news-name-form button.ghost {
   padding: 0.3rem 0.6rem;
   border: 1px solid var(--line);
@@ -1069,6 +1081,7 @@ button.ghost.danger:hover { color: var(--admin); border-color: var(--admin); }
 @media (max-width: 44rem) {
   .news-article { margin-left: calc(var(--depth, 0) * 0.5rem); padding: 0.5rem 0.6rem; }
   .crumb { max-width: 8rem; }
+  .news-search { width: 7rem; }
   .news-bar, .news-body {
     padding-left: max(0.75rem, env(safe-area-inset-left));
     padding-right: max(0.75rem, env(safe-area-inset-right));

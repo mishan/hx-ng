@@ -78,3 +78,39 @@ export function referenceSpans(body: string, refs: readonly NewsReference[]): Bo
   if (text) out.push({ text });
   return out;
 }
+
+/** A run of a search snippet: matched or not. */
+export interface MarkedSpan {
+  text: string;
+  mark: boolean;
+}
+
+/**
+ * A search hit's snippet as runs to draw, from the `marks` the server
+ * sent — `[start, end)` in UTF-16 code units, which is what a string here
+ * indexes by.
+ *
+ * The server's marks are trusted to mean something and not to be well
+ * formed: a range past the end is cut to it, one that overlaps what came
+ * before starts where that ended, and an empty one is dropped, as is one
+ * whose ends are not numbers at all. The runs concatenate back to the
+ * snippet exactly, whatever the marks said.
+ */
+export function markedSpans(snippet: string, marks: readonly (readonly [number, number])[]): MarkedSpan[] {
+  const out: MarkedSpan[] = [];
+  let at = 0;
+  // Before the sort, which orders nothing sensibly around a NaN.
+  const sorted = marks
+    .filter(([start, end]) => Number.isFinite(start) && Number.isFinite(end))
+    .sort((a, b) => a[0] - b[0]);
+  for (const [rawStart, rawEnd] of sorted) {
+    const start = Math.max(at, Math.min(Math.floor(rawStart), snippet.length));
+    const end = Math.max(start, Math.min(Math.floor(rawEnd), snippet.length));
+    if (end <= start) continue;
+    if (start > at) out.push({ text: snippet.slice(at, start), mark: false });
+    out.push({ text: snippet.slice(start, end), mark: true });
+    at = end;
+  }
+  if (at < snippet.length) out.push({ text: snippet.slice(at), mark: false });
+  return out;
+}

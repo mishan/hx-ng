@@ -62,6 +62,21 @@ export function draftProblem(subject: string, body: string, cfg: NewsConfig): st
   return null;
 }
 
+/**
+ * Where the next page of search results starts, or `null` when there is
+ * nothing more to ask for.
+ *
+ * Counted in what the server has handed out, not in what is shown: pages
+ * over a relevance order shift when something is posted between them,
+ * and a hit shown twice is dropped, so the count on screen can stand
+ * still while the offset must not. An empty page is the end whatever
+ * `total` says, and so is the deepest a search may reach.
+ */
+export function nextSearchOffset(offset: number, got: number, total: number, reachable = Infinity): number | null {
+  const next = offset + got;
+  return got > 0 && next < Math.min(total, reachable) ? next : null;
+}
+
 /** Every node in a tree answer, by id — nested children included. */
 export function indexTree(nodes: readonly NewsNode[], into = new Map<number, NewsNode>()): Map<number, NewsNode> {
   for (const n of nodes) {

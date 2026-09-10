@@ -2,7 +2,17 @@ import { describe, expect, it } from 'vitest';
 
 import type { NewsArticle, NewsConfig, NewsNode } from '@hotline-ng/client';
 
-import { byteLength, canReply, draftProblem, excerpt, indexTree, isOwn, replySubject, trailTo } from '../src/news';
+import {
+  byteLength,
+  canReply,
+  draftProblem,
+  excerpt,
+  indexTree,
+  isOwn,
+  nextSearchOffset,
+  replySubject,
+  trailTo,
+} from '../src/news';
 
 const cfg = (over: Partial<NewsConfig> = {}): NewsConfig => ({
   post: true,
@@ -116,5 +126,21 @@ describe('the tree', () => {
       [7, node(7, 6, 'b')],
     ]);
     expect(trailTo(6, loop)).toBeNull();
+  });
+});
+
+describe('paging a search', () => {
+  it('moves on by what the server handed out, even when none of it was new', () => {
+    expect(nextSearchOffset(0, 20, 137)).toBe(20);
+    // A page that was all hits already shown still moves the offset;
+    // asking from the same place again would get the same page forever.
+    expect(nextSearchOffset(20, 20, 137)).toBe(40);
+  });
+
+  it('stops at the total, at an empty page, and at the deepest a search reaches', () => {
+    expect(nextSearchOffset(120, 17, 137)).toBeNull();
+    expect(nextSearchOffset(40, 0, 137)).toBeNull();
+    expect(nextSearchOffset(480, 20, 500, 500)).toBeNull();
+    expect(nextSearchOffset(20, 20, 9000, 500)).toBe(40);
   });
 });

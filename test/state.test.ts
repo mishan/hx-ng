@@ -197,6 +197,17 @@ describe('unread counting', () => {
     expect(c.unread).toBe(0);
   });
 
+  it('counts the active conversation while something covers it', () => {
+    // The news reader takes the chat pane's place; the conversation it
+    // hid is still the active one, and nobody is reading it.
+    const s = new Store();
+    const c = s.openPm({ uid: 9, nick: 'Alice' });
+    s.active = c.id;
+    s.covered = true;
+    s.add(c.id, chat(1, 'one'));
+    expect(c.unread).toBe(1);
+  });
+
   it('does not raise a badge over mail the server calls read', () => {
     // Recovered mail may already have been dealt with, possibly from
     // another client on the same account.

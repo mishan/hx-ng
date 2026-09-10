@@ -766,9 +766,11 @@ export class Connection {
     return this.request<NewsPostOk>('news_post', params);
   }
 
-  /** Delete an article, leaving its tombstone in the thread. */
-  newsDelete(id: number): Promise<Record<string, never>> {
-    return this.request('news_delete', { id });
+  /** Delete an article, leaving its tombstone in the thread. `reason` is
+   *  for the moderation record, when it is someone else's article; a
+   *  server may take it and not yet keep it. */
+  newsDelete(id: number, reason?: string): Promise<Record<string, never>> {
+    return this.request('news_delete', reason === undefined ? { id } : { id, reason });
   }
 
   /** The articles whose bodies point at this one. */

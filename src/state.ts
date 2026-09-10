@@ -154,6 +154,10 @@ export class Store {
   users = new Map<number, User>();
   conversations = new Map<ConvId, Conversation>();
   active: ConvId = LOBBY;
+  /** The active conversation is behind something else — the news reader
+   *  — and so not being read. Its lines count as unseen like any other
+   *  conversation's until it is back on screen. */
+  covered = false;
   /** Bumped whenever a transcript is rewritten wholesale rather than
    *  appended to — today only a merge. A view that draws incrementally
    *  watches this to know its DOM has gone stale underneath it. */
@@ -475,7 +479,7 @@ export class Store {
     c.lines.push(line);
     if (c.kind === 'lobby') this.trimPublic(c, 'oldest');
     else if (c.lines.length > MAX_LINES) c.lines.splice(0, c.lines.length - MAX_LINES);
-    if (fresh && id !== this.active) c.unread++;
+    if (fresh && (id !== this.active || this.covered)) c.unread++;
     return c;
   }
 

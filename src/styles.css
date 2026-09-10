@@ -1011,7 +1011,8 @@ button.ghost.danger:hover { color: var(--admin); border-color: var(--admin); }
   padding: 0.75rem 0.9rem 1.5rem;
   overflow-wrap: anywhere;
 }
-.news-empty { color: var(--muted); font-style: italic; }
+.news-empty, .news-loading { color: var(--muted); font-style: italic; }
+.news-notice { color: var(--muted); margin: 0 0 0.6rem; }
 .news-error { color: var(--warn); margin: 0 0 0.6rem; }
 .news-manage, .news-name-form { display: flex; gap: 0.4rem; margin: 0 0 0.6rem; }
 .news-name-form input { flex: 1; min-width: 0; background: var(--bg); }
@@ -1093,6 +1094,10 @@ button.ghost.danger:hover { color: var(--admin); border-color: var(--admin); }
     padding-right: max(0.75rem, env(safe-area-inset-right));
   }
   .news-hint { display: none; }
+  /* A phone has no room for the breadcrumb and the buttons side by side:
+     the breadcrumb takes a row of its own and the buttons the next. */
+  .news-bar { flex-wrap: wrap; row-gap: 0.3rem; }
+  .news-bar .crumbs { flex: 1 1 100%; }
 }
 
 /* --- narrow ----------------------------------------------------------- */

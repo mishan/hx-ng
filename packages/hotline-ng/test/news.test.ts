@@ -92,6 +92,20 @@ describe('marking a search snippet', () => {
     }
     expect(markedSpans('', [[0, 3]])).toEqual([]);
   });
+
+  it('drops a mark whose ends are not numbers, and keeps the rest of the snippet', () => {
+    const snippet = 'one two three';
+    for (const bad of [
+      [NaN, 3],
+      [4, undefined],
+      [undefined, undefined],
+      ['4', 7],
+    ]) {
+      const spans = markedSpans(snippet, [bad as unknown as [number, number], [8, 13]]);
+      expect(spans.map((s) => s.text).join(''), String(bad)).toBe(snippet);
+      expect(spans.filter((s) => s.mark).map((s) => s.text), String(bad)).toEqual(['three']);
+    }
+  });
 });
 
 const CREDS: Credentials = {

@@ -30,7 +30,7 @@ import {
   type NewsThread,
 } from '@hotline-ng/client';
 
-import { canReply, draftProblem, excerpt, indexTree, isOwn, replySubject, trailTo } from '../news';
+import { canReply, draftProblem, excerpt, indexTree, isOwn, nextSearchOffset, replySubject, trailTo } from '../news';
 import { fill, h, linkify } from './dom';
 
 type Screen =
@@ -102,6 +102,7 @@ export class NewsView {
     type: 'search',
     class: 'news-search',
     placeholder: 'Search news',
+    ariaLabel: 'Search news',
     spellcheck: false,
     hidden: true,
   });
@@ -140,6 +141,8 @@ export class NewsView {
   private hits: NewsHit[] = [];
   private hitsTotal = 0;
   private hitsCapped = false;
+  /** Where the next page of results starts, or `null` for no more. */
+  private hitsNext: number | null = null;
 
   constructor(private hooks: NewsHooks) {
     this.bar.append(this.crumbsEl, h('span', { class: 'spacer' }), this.searchBox, this.actionsEl);
@@ -180,6 +183,7 @@ export class NewsView {
     this.naming = null;
     this.backlinks.clear();
     this.hits = [];
+    this.hitsNext = null;
     this.searchBox.value = '';
     this.el.hidden = true;
   }
@@ -277,6 +281,7 @@ export class NewsView {
     this.hits = [];
     this.hitsTotal = 0;
     this.hitsCapped = false;
+    this.hitsNext = null;
     this.draft = null;
     this.naming = null;
     this.backlinks.clear();
@@ -366,6 +371,7 @@ export class NewsView {
         this.hits = ok.hits;
         this.hitsTotal = ok.total;
         this.hitsCapped = ok.capped;
+        this.hitsNext = nextSearchOffset(0, ok.hits.length, ok.total, conn.news?.search_max_results);
       } else {
         const want = Math.max(this.articles.length, THREAD_PAGE);
         let all: NewsArticle[] = [];
@@ -391,6 +397,9 @@ export class NewsView {
         this.error = errorText(e.wire);
         if (s.at === 'thread') return this.go({ at: 'category', trail: s.trail, category: s.category });
         if (s.at === 'category') return this.go({ at: 'tree', trail: s.trail });
+        // A search's trail already stops above its scope, so it is the
+        // scope's parent as it stands.
+        if (s.at === 'search') return this.go({ at: 'tree', trail: s.trail });
         if (s.trail.length) return this.go({ at: 'tree', trail: s.trail.slice(0, -1) });
       }
       this.error = describe(e);
@@ -559,9 +568,9 @@ export class NewsView {
   private async loadMoreHits(): Promise<void> {
     const conn = this.hooks.conn();
     const s = this.screen;
-    if (!conn || s.at !== 'search') return;
+    const offset = this.hitsNext;
+    if (!conn || s.at !== 'search' || offset === null) return;
     const gen = this.generation;
-    const offset = this.hits.length;
     try {
       const ok = await conn.newsSearch(
         s.scope ? { q: s.q, category: s.scope.id, offset } : { q: s.q, offset },
@@ -572,17 +581,25 @@ export class NewsView {
       this.hits = this.hits.concat(ok.hits.filter((h) => !this.hits.some((x) => x.id === h.id)));
       this.hitsTotal = ok.total;
       this.hitsCapped = ok.capped;
+      this.hitsNext = nextSearchOffset(offset, ok.hits.length, ok.total, conn.news?.search_max_results);
     } catch (e) {
+      if (gen !== this.generation) return;
       this.error = describe(e);
     }
     this.render();
   }
 
   private async openHit(hit: NewsHit): Promise<void> {
+    // Checked by screen, as a followed reference is: a refresh bumps the
+    // generation and should not eat the click, but a reader who has gone
+    // somewhere else is not dragged back.
+    const from = this.screen;
     try {
       const where = await this.locate(hit.category);
+      if (this.screen !== from) return;
       this.openThread(where.trail, where.category, hit.root, hit.id);
     } catch (e) {
+      if (this.screen !== from) return;
       this.error = describe(e);
       this.render();
     }
@@ -592,9 +609,10 @@ export class NewsView {
     const out: (HTMLElement | null)[] = [];
     const reachable = this.hooks.conn()?.news?.search_max_results ?? Infinity;
     if (!this.stale) {
-      const summary = this.hitsTotal
-        ? `${plural(this.hitsTotal, 'result', 'results')} for “${s.q}”`
-        : `Nothing matches “${s.q}”`;
+      // A capped total is where the counting stopped, not how many there
+      // are.
+      const count = this.hitsCapped ? `${this.hitsTotal}+ results` : plural(this.hitsTotal, 'result', 'results');
+      const summary = this.hitsTotal ? `${count} for “${s.q}”` : `Nothing matches “${s.q}”`;
       const head = h('p', { class: 'news-search-head' }, summary);
       if (s.scope) {
         const widen = h('button', { class: 'news-link' }, 'search everywhere');
@@ -620,9 +638,12 @@ export class NewsView {
       row.onclick = () => void this.openHit(hit);
       out.push(row);
     }
-    if (this.hits.length < Math.min(this.hitsTotal, reachable)) {
+    if (this.hitsNext !== null) {
       const more = h('button', { class: 'news-more' }, 'More results');
-      more.onclick = () => void this.loadMoreHits();
+      more.onclick = () => {
+        more.disabled = true;
+        void this.loadMoreHits();
+      };
       out.push(more);
     }
     return out;
@@ -721,6 +742,7 @@ export class NewsView {
     this.searchBox.hidden = !this.hooks.conn()?.news?.search;
     const scope = inCategory(s) ? s.category : s.at === 'tree' ? s.trail.at(-1) : s.at === 'search' ? s.scope : null;
     this.searchBox.placeholder = scope ? `Search ${scope.name}` : 'Search news';
+    this.searchBox.ariaLabel = this.searchBox.placeholder;
   }
 
   private treeView(s: Extract<Screen, { at: 'tree' }>): (HTMLElement | null)[] {

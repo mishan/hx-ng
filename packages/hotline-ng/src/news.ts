@@ -92,13 +92,17 @@ export interface MarkedSpan {
  *
  * The server's marks are trusted to mean something and not to be well
  * formed: a range past the end is cut to it, one that overlaps what came
- * before starts where that ended, and an empty one is dropped. The runs
- * concatenate back to the snippet exactly, whatever the marks said.
+ * before starts where that ended, and an empty one is dropped, as is one
+ * whose ends are not numbers at all. The runs concatenate back to the
+ * snippet exactly, whatever the marks said.
  */
 export function markedSpans(snippet: string, marks: readonly (readonly [number, number])[]): MarkedSpan[] {
   const out: MarkedSpan[] = [];
   let at = 0;
-  const sorted = [...marks].sort((a, b) => a[0] - b[0]);
+  // Before the sort, which orders nothing sensibly around a NaN.
+  const sorted = marks
+    .filter(([start, end]) => Number.isFinite(start) && Number.isFinite(end))
+    .sort((a, b) => a[0] - b[0]);
   for (const [rawStart, rawEnd] of sorted) {
     const start = Math.max(at, Math.min(Math.floor(rawStart), snippet.length));
     const end = Math.max(start, Math.min(Math.floor(rawEnd), snippet.length));

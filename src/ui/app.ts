@@ -27,6 +27,7 @@ import {
   type BlockParams,
   type ConnState,
   type Credentials,
+  type Events,
   type InboxOk,
   type HistoryOk,
   type Media,
@@ -37,6 +38,7 @@ import {
 } from '@hotline-ng/client';
 
 import type { AppConfig } from '../config';
+import { notifyText } from '../news';
 import {
   addressOf,
   Cursor,
@@ -156,6 +158,7 @@ export class App {
     // is the account that was typed. A guest is nobody either way.
     me: () => this.conn?.self?.identity?.account ?? this.account,
     say: (text) => this.say(text),
+    onUnread: () => this.renderRail(),
   });
   private newsOpen = false;
   /** The account typed at the connect form, or `null` for a guest. */
@@ -286,6 +289,9 @@ export class App {
         this.store.server = server;
         this.store.replaceRoster(users);
         this.renderAll();
+        // A login, or a resync after events were lost: either way the
+        // counts beside what is followed are the server's to restate.
+        void this.news.refreshFollowing();
       },
       onResumed: (replay) => {
         this.say(
@@ -293,6 +299,7 @@ export class App {
             ? `Reconnected — ${replay} ${replay === 1 ? 'message' : 'messages'} replayed.`
             : 'Reconnected.',
         );
+        void this.news.refreshFollowing();
       },
       onMissedMail: (ok) => {
         const n = this.mergeStoredMail(ok);
@@ -474,6 +481,9 @@ export class App {
     conn.on('news_deleted', (d) => this.news.onDeleted(d));
     conn.on('news_node', (d) => this.news.onNode(d));
     conn.on('news_node_deleted', (d) => this.news.onNodeDeleted(d));
+    // This one *is* addressed to you: it goes only to the account being
+    // notified, after the server has decided it should ring.
+    conn.on('news_notify', (d) => this.onNewsNotify(d));
 
     conn.on('notice', (d) => {
       this.push(LOBBY, { t: Date.now(), kind: 'notice', text: d.text });
@@ -828,6 +838,28 @@ export class App {
     this.renderRail();
   }
 
+  /** Something in the news is yours: count it on the rail, and say so
+   *  in the conversation on screen, as a line that opens the article —
+   *  unless the reader has that thread in front of them already. */
+  private onNewsNotify(d: Events['news_notify']): void {
+    const onScreen = this.news.onNotify(d);
+    this.renderRail();
+    if (onScreen) return;
+    this.push(this.store.active, {
+      // When it was posted, as for chat; a replayed one is not new.
+      t: Number.isFinite(d.at) ? d.at * 1000 : Date.now(),
+      kind: 'notice',
+      text: notifyText(d),
+      article: d.article,
+    });
+  }
+
+  private openNewsArticle(id: number): void {
+    if (!this.conn?.news) return;
+    this.showNews(true);
+    this.news.openArticle(id);
+  }
+
   // --- public chat history ---------------------------------------------
 
   private mergeHistory(ok: HistoryOk, direction: 'older' | 'newer'): number {
@@ -1138,11 +1170,19 @@ export class App {
     const conn = this.conn;
     let news: HTMLElement | null = null;
     if (conn?.news && conn.state !== 'offline') {
+      // The badge counts what is followed, from `news_notify` and the
+      // server's own totals — never `news_posted`, which every reader
+      // gets for every post.
+      const unread = this.news.unread;
       news = h(
         'button',
-        { class: `rail-item${this.newsOpen ? ' on' : ''}` },
+        {
+          class: `rail-item${this.newsOpen ? ' on' : ''}${unread ? ' unread' : ''}`,
+          title: unread ? `${unread} unread in what you follow` : 'News',
+        },
         h('span', { class: 'rail-glyph' }, '¶'),
         h('span', { class: 'rail-title' }, 'News'),
+        unread ? h('span', { class: 'badge' }, String(unread)) : null,
       );
       news.onclick = () => this.showNews(true);
     }
@@ -1358,6 +1398,14 @@ export class App {
     new ResizeObserver(() => {
       if (pinned) scrollToEnd(this.transcript);
     }).observe(this.transcript);
+    // A news notice is a link the transcript cannot follow on its own:
+    // opening the article means swapping the chat pane for the reader.
+    this.transcript.addEventListener('click', (e) => {
+      const link = (e.target as Element | null)?.closest<HTMLElement>('a[data-article]');
+      if (!link) return;
+      e.preventDefault();
+      this.openNewsArticle(Number(link.dataset.article));
+    });
 
     this.chatPane.append(
       this.transcript,

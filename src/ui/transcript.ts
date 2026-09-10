@@ -145,7 +145,11 @@ function eventLine(line: Line, prev: Line | undefined, media: MediaCache): HTMLE
     h(
       'span',
       { class: 'text' },
-      ...linkify(text),
+      // A news notice is one link to the article it is about; the shell
+      // handles the click, since only it can open the reader.
+      ...(line.article !== undefined
+        ? [h('a', { href: `#news-${line.article}`, class: 'news-notice', dataset: { article: String(line.article) } }, text)]
+        : linkify(text)),
       // The same renderer a chat line gets. A redacted history row is
       // the *only* line that ever carries `removed`, so drawing it any
       // other way would leave that state with no renderer at all — and

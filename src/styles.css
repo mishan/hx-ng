@@ -523,6 +523,8 @@ button.call:disabled { opacity: 0.45; cursor: default; }
   vertical-align: 1px;
 }
 .line.notice .text, .line.system .text { color: var(--muted); font-style: italic; }
+/* A news notification: the one notice that goes somewhere. */
+.line.notice a.news-notice { color: var(--link); }
 .line.deleted .text { color: var(--muted); font-style: italic; }
 .line.action .text { color: var(--accent); font-style: italic; }
 .line.broadcast .name { color: var(--admin); font-weight: 700; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.05em; padding-top: 0.2rem; }
@@ -1030,6 +1032,9 @@ button.ghost.danger:hover { color: var(--admin); border-color: var(--admin); }
 .news-node .glyph { color: var(--muted); width: 1rem; text-align: center; }
 .news-node .name { flex: 1; font-weight: 560; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .news-node .count { color: var(--muted); font-size: 0.75rem; white-space: nowrap; }
+.news-node .badge { align-self: center; }
+.news-following .glyph { color: var(--accent); }
+.news-node.muted .name { color: var(--muted); font-weight: 400; }
 
 .news-thread {
   display: grid;
@@ -1040,6 +1045,8 @@ button.ghost.danger:hover { color: var(--admin); border-color: var(--admin); }
   text-align: left;
 }
 .news-thread:hover { background: var(--surface-2); }
+.news-thread-head { display: flex; align-items: center; gap: 0.45rem; min-width: 0; }
+.news-thread-head .badge { margin-left: auto; }
 .news-thread-subject { font-weight: 600; }
 .news-thread.deleted .news-thread-subject { color: var(--muted); font-style: italic; font-weight: 400; }
 .news-thread-excerpt { color: var(--muted); font-size: 0.85rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

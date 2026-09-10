@@ -47,6 +47,9 @@ export interface Line {
    *  metadata survives even when the handle does not, which is what a
    *  placeholder is drawn from. */
   media?: HistoryMedia;
+  /** A news article this line announces. The transcript draws the line
+   *  as a link, and following it opens the article where it sits. */
+  article?: number;
 }
 
 export type ConvId = string;

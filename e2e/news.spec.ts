@@ -8,7 +8,8 @@
  * decisions. What only this can show is the view itself: that the
  * breadcrumb, the compose forms and the thread's indentation work in a
  * page, and that `news_posted` reaching another browser refreshes what
- * that browser is showing rather than raising anything.
+ * that browser is showing rather than raising anything — and that
+ * `news_notify`, which is addressed to one account, is what does.
  *
  * Its own port rather than the dev proxy's 5700: news needs no HTTP
  * route, so the page connects to the server directly with `?server=`,
@@ -67,6 +68,8 @@ db = "server.sqlite"
 
 [news]
 max_depth = 4
+
+[news.notify]
 `,
       accounts: {
         editor: account('Editor', EDITOR),
@@ -157,5 +160,71 @@ max_depth = 4
     await expect(editor.locator('.composer-input')).toBeVisible();
 
     await reader.screenshot({ path: testInfo.outputPath('news-reader.png'), fullPage: true });
+  });
+
+  test('a followed thread tells its follower about a reply, and seeing it clears the badge', async ({ browser }, testInfo) => {
+    const editor = await logIn(browser, server, 'editor');
+    const reader = await logIn(browser, server, 'reader');
+
+    // A category of its own, so nothing here leans on the other test.
+    await openNews(editor);
+    await editor.locator('.news-bar').getByRole('button', { name: 'Manage' }).click();
+    await editor.getByRole('button', { name: 'New category' }).click();
+    await editor.getByPlaceholder('Category name').fill('Releases');
+    await editor.getByPlaceholder('Category name').press('Enter');
+    await expect(editor.locator('.news-node', { hasText: 'Releases' })).toBeVisible();
+    await editor.locator('.news-bar').getByRole('button', { name: 'Manage' }).click();
+    await editor.locator('.news-node', { hasText: 'Releases' }).click();
+    await editor.getByRole('button', { name: 'New thread' }).click();
+    await editor.locator('.news-subject-input').fill('Release notes');
+    await editor.locator('.news-body-input').fill('What changed, and why.');
+    await editor.getByRole('button', { name: 'Post', exact: true }).click();
+    await expect(editor.locator('.news-article').first().locator('.news-subject-line')).toHaveText('Release notes');
+
+    // --- the reader follows it -------------------------------------------
+    await openNews(reader);
+    await reader.locator('.news-node', { hasText: 'Releases' }).click();
+    await reader.locator('.news-thread', { hasText: 'Release notes' }).click();
+    await expect(reader.locator('.news-article')).toHaveCount(1);
+    // The bar is drawn with the thread, so by now a server that offers
+    // subscriptions has put the button there, and one that does not
+    // never will.
+    const follow = reader.locator('.news-bar').getByRole('button', { name: 'Follow', exact: true });
+    test.skip(!(await follow.isVisible()), 'this hxd-ng predates news subscriptions');
+    await follow.click();
+    await expect(reader.locator('.news-bar').getByRole('button', { name: 'Following', exact: true })).toBeVisible();
+
+    // Back in chat, where a notice has somewhere to land.
+    await reader.locator('.rail-item', { hasText: 'Lobby' }).click();
+    const newsItem = reader.locator('.rail-item', { hasText: 'News' });
+    await expect(newsItem.locator('.badge')).toHaveCount(0);
+
+    // --- the editor answers their own thread -------------------------------
+    // Nobody is notified about their own article, so the one bell this
+    // rings is the follower's.
+    await editor.locator('.news-article').first().getByRole('button', { name: 'Reply' }).click();
+    await editor.locator('.news-body-input').fill('One more thing.');
+    await editor.getByRole('button', { name: 'Post reply' }).click();
+    await expect(editor.locator('.news-article')).toHaveCount(2);
+    const replyId = Number((await editor.locator('.news-article').nth(1).locator('.news-id').textContent())!.slice(1));
+
+    await expect(newsItem.locator('.badge')).toHaveText('1');
+    const notice = reader.locator('.line.notice a.news-notice');
+    await expect(notice).toContainText('posted in “Re: Release notes”');
+    await reader.screenshot({ path: testInfo.outputPath('news-notified.png'), fullPage: true });
+
+    // --- following the notice opens the reply, and seeing it is seen -----
+    await notice.click();
+    await expect(reader.locator('.news')).toBeVisible();
+    await expect(reader.locator(`#news-${replyId}`)).toHaveClass(/focus/);
+    await expect(newsItem.locator('.badge')).toHaveCount(0);
+
+    // --- and the Following screen lists it, and leads back to it ---------
+    await reader.locator('.crumb', { hasText: 'News' }).click();
+    await reader.locator('.news-following').click();
+    const row = reader.locator('.news-node', { hasText: 'Release notes' });
+    await expect(row).toBeVisible();
+    await row.click();
+    await expect(reader.locator('.news-article')).toHaveCount(2);
   });
 });

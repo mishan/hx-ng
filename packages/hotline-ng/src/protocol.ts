@@ -556,7 +556,103 @@ export interface NewsConfig {
   search: boolean;
   /** The deepest a search pages; a `total` past it comes back `capped`. */
   search_max_results?: number;
+  /** May this session hold subscriptions? False for a guest, which has
+   *  no mailbox to keep them in, and false on a server that keeps none.
+   *  Absent on a server older than subscriptions, which is the same
+   *  answer: offer no Follow button. */
+  subscribe?: boolean;
+  /** What posting does, present when the server keeps subscriptions. */
+  auto_subscribe?: NewsAutoSubscribe;
+  /** Present exactly when `subscribe` is true: unread across every
+   *  subscription that is not muted, so a badge can be drawn before
+   *  `newsSubs` answers — the way `LoginOk.inbox` does for mail. */
+  unread?: number;
 }
+
+// --- News subscriptions (hxd-ng's docs/news.md §10) ---------------------
+
+/** What posting subscribes you to: every thread you write in, only the
+ *  threads you start, or nothing you did not ask for. A subscription it
+ *  made is marked `auto`. */
+export type NewsAutoSubscribe = 'participated' | 'own_thread' | 'off';
+
+/**
+ * What a subscription is to: a thread, named by its starter, or a
+ * category. Exactly one — both or neither is `bad_request`, for the same
+ * reason `MsgParams` takes one address.
+ *
+ * There is deliberately no third scope for "all news": a session that is
+ * attached already hears `news_posted` for everything, and a
+ * notification for every post on a server is one nobody leaves on.
+ */
+export type NewsScope =
+  | { thread: number; category?: never }
+  | { category: number; thread?: never };
+
+/** How a subscription row and a `news_notify` name their scope. */
+export type NewsScopeKind = 'thread' | 'category';
+
+/** Turn a row's `scope` and `target` back into the parameter a request
+ *  takes, so a `news_subs` row or a `news_notify` can be answered with
+ *  `newsSeen` or `newsUnsubscribe` without restating the wire's rule. */
+export function newsScopeOf(x: { scope: NewsScopeKind; target: number }): NewsScope {
+  return x.scope === 'thread' ? { thread: x.target } : { category: x.target };
+}
+
+/**
+ * One subscription, as `news_subs` lists it.
+ *
+ * A muted row is a subscription that says never: muting something not
+ * followed creates one, so posting there does not quietly subscribe you
+ * again and a reply there rings nothing.
+ */
+export interface NewsSub {
+  scope: NewsScopeKind;
+  /** The thread's starter, or the category. */
+  target: number;
+  /** The category it lives in; equal to `target` for a category. */
+  category: number;
+  /** A thread's starter's subject; empty when the starter is a tombstone. */
+  subject?: string;
+  /** A category's name. */
+  name?: string;
+  /** Made by posting rather than asked for. Subscribing again makes it
+   *  explicit. */
+  auto: boolean;
+  muted: boolean;
+  /** For a thread: live articles past the cursor not written by you. For
+   *  a category: new *threads* past it — a category subscription is
+   *  about what was started there, not every reply. */
+  unread: number;
+  /** The highest article id acknowledged with `news_seen`. */
+  last_seen: number;
+}
+
+/** Subscribing to something new starts caught up, so `unread` is 0;
+ *  subscribing to something already followed keeps its cursor. */
+export interface NewsSubscribeOk {
+  unread: number;
+}
+
+export type NewsMuteParams = NewsScope & { muted: boolean };
+
+export interface NewsSubsOk {
+  /** Newest subscription first. */
+  subs: NewsSub[];
+}
+
+/** `up_to` is an article id. The cursor only moves forward and stops at
+ *  the newest article in the scope. */
+export type NewsSeenParams = NewsScope & { up_to: number };
+
+export interface NewsSeenOk {
+  /** What is left in the scope; 0 when it is not subscribed at all. */
+  unread: number;
+}
+
+/** Why a `news_notify` is yours: a reply to your article, a body that
+ *  cited one (`#51`), or something new where you subscribed. */
+export type NewsNotifyReason = 'reply' | 'reference' | 'subscription';
 
 export interface NewsTreeParams {
   /** Absent for the root. */
@@ -801,6 +897,30 @@ export interface Events {
   /** A bundle or category was created or renamed. */
   news_node: { node: NewsNode };
   news_node_deleted: { id: number };
+  /**
+   * An article that is *yours* to hear about. Unlike `news_posted` it
+   * goes only to the sessions of the account being notified, and the
+   * server has already decided it should ring — catch-up, muting and
+   * blocks are applied before it is sent — so a client raises a badge on
+   * this and never on `news_posted`.
+   */
+  news_notify: {
+    reason: NewsNotifyReason;
+    /** The subscription, or cursor, this counts against. */
+    scope: NewsScopeKind;
+    target: number;
+    article: number;
+    root: number;
+    category: number;
+    subject: string;
+    /** The opening of the plain body, cut short by the server. */
+    excerpt: string;
+    from: { nick: string; login?: string };
+    at: number;
+    /** Unread in that scope after this article; 1 when there is no
+     *  cursor, as for a reply in a thread you do not follow. */
+    unread: number;
+  };
   /** The server's placeholder for a domain event this protocol revision
    *  has no mapping for. It exists so `seq` never has holes; a client's
    *  only correct response is to count it and move on. */
@@ -878,6 +998,10 @@ export const ERROR_TEXT: Record<string, string> = {
   not_empty: 'That bundle still holds something. Empty it first.',
   bad_body_type: 'This server takes plain-text articles only.',
   not_available: 'This server does not offer that.',
+  // Subscriptions. `no_mailbox` is about you, as `no_inbox` is: a guest
+  // has nowhere to keep them.
+  no_mailbox: 'You have no mailbox on this server, so there is nowhere to keep what you follow.',
+  too_many_subs: 'You follow as much as this server allows. Unfollow something first.',
   server_error: 'The server had a problem with that. It has been logged.',
 };
 

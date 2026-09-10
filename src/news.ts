@@ -1,7 +1,16 @@
 /** What the news reader decides that has nothing to do with the DOM.
  *  The view in `ui/news.ts` reads from here; nothing here reads from it. */
 
-import type { NewsArticle, NewsAuthor, NewsConfig, NewsNode } from '@hotline-ng/client';
+import {
+  newsScopeOf,
+  type Events,
+  type NewsArticle,
+  type NewsAuthor,
+  type NewsConfig,
+  type NewsNode,
+  type NewsScope,
+  type NewsSub,
+} from '@hotline-ng/client';
 
 /** A reply's default subject: the parent's with one `Re: ` in front, never
  *  a growing stack of them. */
@@ -105,4 +114,161 @@ export function trailTo(id: number, index: ReadonlyMap<number, NewsNode>): NewsN
     cur = index.get(cur.parent);
   }
   return null;
+}
+
+// --- following (hxd-ng's docs/news.md §10) ------------------------------
+
+/** One name for a scope, the way the server spells its collapse key:
+ *  `thread:398`, `category:7`. */
+export function scopeKey(scope: NewsScope): string {
+  return scope.thread !== undefined ? `thread:${scope.thread}` : `category:${scope.category}`;
+}
+
+/**
+ * The `up_to` for what is on screen: the highest article id in it, or
+ * `null` when nothing is. The highest rather than the last, because a
+ * thread reads in reply order and its newest article may sit anywhere
+ * in it.
+ */
+export function highestId(items: readonly { id: number }[]): number | null {
+  let top: number | null = null;
+  for (const { id } of items) if (top === null || id > top) top = id;
+  return top;
+}
+
+/** The line a notification is announced with, for a transcript. */
+export function notifyText(d: Events['news_notify']): string {
+  const who = d.from.nick || 'Someone';
+  const subject = `“${d.subject}”`;
+  const said =
+    d.reason === 'reply'
+      ? `${who} replied to you: ${subject}`
+      : d.reason === 'reference'
+        ? `${who} cited your article in ${subject}`
+        : d.scope === 'category'
+          ? `${who} started ${subject}`
+          : `${who} posted in ${subject}`;
+  const words = excerpt(d.excerpt, 80);
+  return words ? `${said} — ${words}` : said;
+}
+
+/** A count the server keeps no subscription for: a reply to your own
+ *  article in a thread you stopped following still notifies you, and
+ *  deserves a badge until you have seen it. */
+interface Loose {
+  category: number;
+  unread: number;
+}
+
+/**
+ * What this account follows, and how much in each is unread.
+ *
+ * The server's numbers, held between the moments it says them: a
+ * `news_subs` answer replaces the lot, a `news_notify` updates the scope
+ * it counts against, and a `news_seen` answer the scope it acknowledged.
+ * Nothing here counts articles for itself — a badge the client computed
+ * would drift from the one the server computes, and only the server can
+ * leave out what you wrote yourself or what has since been deleted.
+ */
+export class Following {
+  private subs = new Map<string, NewsSub>();
+  private loose = new Map<string, Loose>();
+  /** Has `news_subs` answered since the session began? Until it has,
+   *  the login reply's total is the best number there is. */
+  loaded = false;
+
+  /** A fresh `news_subs` answer. A loose count its list now covers is
+   *  folded into the subscription's, which the server already counted. */
+  load(subs: readonly NewsSub[]): void {
+    this.subs = new Map(subs.map((s) => [scopeKey(newsScopeOf(s)), s]));
+    for (const key of this.loose.keys()) if (this.subs.has(key)) this.loose.delete(key);
+    this.loaded = true;
+  }
+
+  clear(): void {
+    this.subs.clear();
+    this.loose.clear();
+    this.loaded = false;
+  }
+
+  /** Newest subscription first, as the server listed them. */
+  list(): NewsSub[] {
+    return [...this.subs.values()];
+  }
+
+  get(scope: NewsScope): NewsSub | undefined {
+    return this.subs.get(scopeKey(scope));
+  }
+
+  /**
+   * Take in a notification. Returns false when no subscription this
+   * holds covers it — either there is none, or one was made since the
+   * list was fetched, and only asking again says which.
+   */
+  notify(d: Events['news_notify']): boolean {
+    const key = scopeKey(newsScopeOf(d));
+    const sub = this.subs.get(key);
+    if (sub) {
+      this.subs.set(key, { ...sub, unread: d.unread });
+      return true;
+    }
+    // With no cursor the server says 1 every time; the reader has been
+    // told once per article all the same.
+    const prev = this.loose.get(key)?.unread ?? 0;
+    this.loose.set(key, { category: d.category, unread: Math.max(prev + 1, d.unread) });
+    return false;
+  }
+
+  /**
+   * Should the reader's having seen `scope` up to `upTo` be sent? True
+   * when it would move something — a cursor behind it, or a count above
+   * zero — and in that case the count is cleared here and now, so a
+   * redraw before the answer lands does not ask twice.
+   */
+  claimSeen(scope: NewsScope, upTo: number): boolean {
+    const key = scopeKey(scope);
+    const sub = this.subs.get(key);
+    if (sub) {
+      if (upTo <= sub.last_seen && sub.unread === 0) return false;
+      this.subs.set(key, { ...sub, last_seen: Math.max(sub.last_seen, upTo), unread: 0 });
+      return true;
+    }
+    // Sent anyway: the list may be older than a subscription the server
+    // holds, and if it is not, the answer is a harmless zero.
+    return this.loose.delete(key);
+  }
+
+  /** The server's answer to a `news_seen`. An answer to an older claim
+   *  than the newest is out of date and dropped. */
+  seen(scope: NewsScope, upTo: number, unread: number): void {
+    const key = scopeKey(scope);
+    const sub = this.subs.get(key);
+    if (!sub || upTo < sub.last_seen) return;
+    this.subs.set(key, { ...sub, last_seen: upTo, unread });
+  }
+
+  /** Unread in one scope. A muted one has nothing to say. */
+  unreadOf(scope: NewsScope): number {
+    const key = scopeKey(scope);
+    const sub = this.subs.get(key);
+    return (sub && !sub.muted ? sub.unread : 0) + (this.loose.get(key)?.unread ?? 0);
+  }
+
+  /** Unread anywhere in a category: the category itself and every thread
+   *  in it that is followed, so a tree row says where to look. */
+  unreadIn(category: number): number {
+    let n = 0;
+    for (const s of this.subs.values()) if (!s.muted && s.category === category) n += s.unread;
+    for (const l of this.loose.values()) if (l.category === category) n += l.unread;
+    return n;
+  }
+
+  /** The rail's badge. `fallback` is the login reply's total, which
+   *  stands in until the list has been fetched. */
+  total(fallback = 0): number {
+    let n = this.loaded ? 0 : fallback;
+    if (this.loaded) for (const s of this.subs.values()) if (!s.muted) n += s.unread;
+    for (const l of this.loose.values()) n += l.unread;
+    return n;
+  }
 }

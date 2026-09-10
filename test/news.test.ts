@@ -1,16 +1,20 @@
 import { describe, expect, it } from 'vitest';
 
-import type { NewsArticle, NewsConfig, NewsNode } from '@hotline-ng/client';
+import type { Events, NewsArticle, NewsConfig, NewsNode, NewsSub } from '@hotline-ng/client';
 
 import {
   byteLength,
   canReply,
   draftProblem,
   excerpt,
+  Following,
+  highestId,
   indexTree,
   isOwn,
   nextSearchOffset,
+  notifyText,
   replySubject,
+  scopeKey,
   trailTo,
 } from '../src/news';
 
@@ -142,5 +146,134 @@ describe('paging a search', () => {
     expect(nextSearchOffset(40, 0, 137)).toBeNull();
     expect(nextSearchOffset(480, 20, 500, 500)).toBeNull();
     expect(nextSearchOffset(20, 20, 9000, 500)).toBe(40);
+  });
+});
+
+const sub = (over: Partial<NewsSub> = {}): NewsSub => ({
+  scope: 'thread',
+  target: 398,
+  category: 7,
+  subject: 'The derivative and the u16',
+  auto: false,
+  muted: false,
+  unread: 0,
+  last_seen: 400,
+  ...over,
+});
+
+const notice = (over: Partial<Events['news_notify']> = {}): Events['news_notify'] => ({
+  reason: 'subscription',
+  scope: 'thread',
+  target: 398,
+  article: 412,
+  root: 398,
+  category: 7,
+  subject: 'Re: The derivative and the u16',
+  excerpt: 'The part size is a u16, so the full-size PNG…',
+  from: { nick: 'Bob', login: 'bob' },
+  at: 1_789_000_000,
+  unread: 3,
+  ...over,
+});
+
+describe('following', () => {
+  it('names a scope the way the server keys it', () => {
+    expect(scopeKey({ thread: 398 })).toBe('thread:398');
+    expect(scopeKey({ category: 7 })).toBe('category:7');
+  });
+
+  it('acknowledges the highest id on screen, wherever it sits', () => {
+    expect(highestId([{ id: 398 }, { id: 412 }, { id: 405 }])).toBe(412);
+    expect(highestId([])).toBeNull();
+  });
+
+  it('takes the count a notification carries for a scope it follows', () => {
+    const f = new Following();
+    f.load([sub(), sub({ scope: 'category', target: 7, name: 'General', unread: 1 })]);
+    expect(f.total()).toBe(1);
+    expect(f.notify(notice())).toBe(true);
+    expect(f.unreadOf({ thread: 398 })).toBe(3);
+    expect(f.unreadIn(7)).toBe(4);
+    expect(f.total()).toBe(4);
+  });
+
+  it('keeps a muted scope out of every badge', () => {
+    const f = new Following();
+    f.load([sub({ muted: true, unread: 5 })]);
+    expect(f.unreadOf({ thread: 398 })).toBe(0);
+    expect(f.unreadIn(7)).toBe(0);
+    expect(f.total()).toBe(0);
+  });
+
+  it('stands on the login total until the list arrives', () => {
+    const f = new Following();
+    expect(f.total(2)).toBe(2);
+    f.load([]);
+    expect(f.total(2)).toBe(0);
+  });
+
+  it('counts a reply in a thread it does not follow, until the list covers it or it is seen', () => {
+    const f = new Following();
+    f.load([]);
+    // No cursor, so the server says 1 each time; two replies are two.
+    expect(f.notify(notice({ reason: 'reply', unread: 1 }))).toBe(false);
+    f.notify(notice({ reason: 'reply', article: 413, unread: 1 }));
+    expect(f.unreadOf({ thread: 398 })).toBe(2);
+    expect(f.total()).toBe(2);
+
+    // A list that turns out to hold the thread after all has the
+    // server's count for it, which already includes these.
+    const covered = new Following();
+    covered.load([]);
+    covered.notify(notice({ unread: 1 }));
+    covered.load([sub({ unread: 1 })]);
+    expect(covered.total()).toBe(1);
+
+    // Seen, the loose count goes, and the server is asked anyway in case
+    // the list is older than a subscription it holds.
+    expect(f.claimSeen({ thread: 398 }, 413)).toBe(true);
+    expect(f.total()).toBe(0);
+    expect(f.claimSeen({ thread: 398 }, 413)).toBe(false);
+  });
+
+  it('asks the server only when seeing something moves it, and clears the count at once', () => {
+    const f = new Following();
+    f.load([sub({ unread: 2, last_seen: 400 })]);
+    expect(f.claimSeen({ thread: 398 }, 412)).toBe(true);
+    expect(f.unreadOf({ thread: 398 })).toBe(0);
+    // A redraw of the same page before the answer does not ask again.
+    expect(f.claimSeen({ thread: 398 }, 412)).toBe(false);
+    expect(f.claimSeen({ thread: 398 }, 399)).toBe(false);
+    // Nothing followed, nothing counted: nothing to say.
+    expect(f.claimSeen({ thread: 1 }, 5)).toBe(false);
+  });
+
+  it('takes the answer to the newest acknowledgment, not an older one arriving late', () => {
+    const f = new Following();
+    f.load([sub({ unread: 4 })]);
+    f.claimSeen({ thread: 398 }, 410);
+    f.claimSeen({ thread: 398 }, 412);
+    f.seen({ thread: 398 }, 410, 2);
+    expect(f.unreadOf({ thread: 398 })).toBe(0);
+    f.seen({ thread: 398 }, 412, 1);
+    expect(f.unreadOf({ thread: 398 })).toBe(1);
+    expect(f.get({ thread: 398 })?.last_seen).toBe(412);
+  });
+
+  it('forgets everything with the session', () => {
+    const f = new Following();
+    f.load([sub({ unread: 1 })]);
+    f.notify(notice({ target: 9, root: 9, unread: 1 }));
+    f.clear();
+    expect(f.loaded).toBe(false);
+    expect(f.list()).toEqual([]);
+    expect(f.total()).toBe(0);
+  });
+
+  it('announces a notification by why it is yours', () => {
+    expect(notifyText(notice({ reason: 'reply' }))).toMatch(/^Bob replied to you: “Re: The derivative and the u16” — The part size/);
+    expect(notifyText(notice({ reason: 'reference', excerpt: '' }))).toBe('Bob cited your article in “Re: The derivative and the u16”');
+    expect(notifyText(notice({ scope: 'category', target: 7, subject: 'New', excerpt: '' }))).toBe('Bob started “New”');
+    expect(notifyText(notice({ from: { nick: '' }, excerpt: '' }))).toMatch(/^Someone posted in/);
   });
 });

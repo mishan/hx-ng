@@ -302,8 +302,10 @@ Typed into the composer:
   drawing off, for anybody who would rather see a 1997 client's literal
   asterisks as asterisks. A news article is markdown only when it says
   `text/markdown`, and then reads as a document: headings, lists,
-  quotes, code, rules and pipe tables, minus raw HTML and images, with
-  `#51` and `[text](news:51)` linked only where the server resolved them.
+  quotes, code, rules and pipe tables, with raw HTML shown as typed and
+  an image drawn as a link to it, never fetched; `#51` and a link to
+  `news:51`, in any of CommonMark's link forms, are linked only where the
+  server resolved them.
   The composer offers it, with a preview, where the server's login reply
   lists `text/markdown`, and an article written that way is posted
   saying so: the one place this client tells a server a body is markdown. Nothing either dialect produces is ever handed

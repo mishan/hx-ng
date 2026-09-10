@@ -61,6 +61,17 @@ marks, and markdown — `parseChat` for GtkHx's chat dialect,
 line of either. They return styled runs and blocks, never HTML; drawing
 them as text nodes is the caller's job, and the only safe way to do it.
 
+An article is read as the server's parser reads it — CommonMark with
+GitHub's tables and strikethrough, raw HTML opaque and shown as typed,
+an image a link to where it is and never fetched, and a reference in
+every link form that names `news:51` — with two known differences. Of
+HTML's named character references it decodes a common handful (`&amp;`,
+`&lt;`, `&quot;`, `&nbsp;`, `&copy;`, `&mdash;` and their like, and
+`&num;` and `&colon;`) and leaves any other name as typed, where the
+server decodes them all; numeric references are decoded in full, so
+`&#35;51` is a reference on both. And a pipe table wider than any reader
+could use is a paragraph here.
+
 ### `Connection` — one session, however many sockets
 
 The protocol's whole point is that a session outlives its connection, so

@@ -267,5 +267,48 @@ max_depth = 4
     await expect(body.locator('strong')).toHaveText('bold');
     await expect(body.locator('li')).toHaveText(['one', 'two']);
     await expect(body.locator('code')).toHaveText('#1');
+
+    // --- a hostile answer, drawn -----------------------------------------
+    // The library's tests say what the runs are; only a page shows what
+    // they become: which links are elements, what they carry, and what
+    // stays text.
+    const id = Number((await editor.locator('.news-article').first().locator('.news-id').textContent())!.slice(1));
+    await editor.locator('.news-article').first().getByRole('button', { name: 'Reply' }).click();
+    await editor.locator('.news-body-input').fill(
+      [
+        '[click](javascript:alert(1)) and [a `site` here](https://example.com/a) and <https://example.com/b>',
+        '',
+        '<div>',
+        `**not bold** #${id} https://example.com/c`,
+        '</div>',
+        '',
+        `See [the first](news:${id}), ![a picture](news:${id}) and ![pixel](https://tracker.example/p.gif).`,
+      ].join('\n'),
+    );
+    await editor.getByRole('button', { name: 'Post reply' }).click();
+    await expect(editor.locator('.news-article')).toHaveCount(2);
+    const hostile = editor.locator('.news-article').nth(1).locator('.news-text');
+
+    // A refused scheme is no element at all, just what was typed.
+    await expect(hostile).toContainText('[click](javascript:alert(1))');
+    await expect(hostile.locator('a[href^="javascript"]')).toHaveCount(0);
+    // A real link is one element around its whole label, and opens
+    // elsewhere with nothing of this page behind it.
+    const site = hostile.locator('a[href="https://example.com/a"]');
+    await expect(site).toHaveCount(1);
+    await expect(site).toHaveText('a site here');
+    await expect(site.locator('code')).toHaveText('site');
+    await expect(site).toHaveAttribute('target', '_blank');
+    await expect(site).toHaveAttribute('rel', 'noreferrer noopener');
+    await expect(hostile.locator('a[href="https://example.com/b"]')).toHaveText('https://example.com/b');
+    // An HTML block is text: no emphasis, no reference, not even its URL.
+    const block = hostile.locator('.md-html');
+    await expect(block).toContainText(`**not bold** #${id} https://example.com/c`);
+    await expect(block.locator('strong, a')).toHaveCount(0);
+    // References, by link and by image, go to the article; an image by
+    // URL is a link to it, and nothing is fetched.
+    await expect(hostile.locator('.news-ref')).toHaveText(['the first', 'a picture']);
+    await expect(hostile.locator('a[href="https://tracker.example/p.gif"]')).toHaveText('pixel');
+    await expect(hostile.locator('img')).toHaveCount(0);
   });
 });

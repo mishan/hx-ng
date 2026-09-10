@@ -97,10 +97,22 @@ function blockNode(b: MdBlock, hooks: MarkdownHooks, tight: boolean): HTMLElemen
     }
     case 'rule':
       return h('hr', { class: 'md-rule' });
+    // An HTML block is its source, as text: nothing in it is a link, not
+    // even a bare URL.
+    case 'html':
+      return h(tight ? 'div' : 'p', { class: `${tight ? 'md-line' : 'md-p'} md-html` }, b.text);
     case 'table': {
       const cell = (tag: 'th' | 'td', runs: MdRun[], k: number) => {
         const align = b.align[k];
         return h(tag, { style: align ? { textAlign: align } : undefined }, ...inlineNodes(runs, hooks));
+      };
+      // A row the author wrote short ends in one empty cell spanning the
+      // rest, rather than one element for each cell it does not have.
+      const row = (cells: MdRun[][]) => {
+        const tds = cells.map((c, k) => cell('td', c, k));
+        const missing = b.align.length - cells.length;
+        if (missing > 0) tds.push(h('td', { colSpan: missing }));
+        return h('tr', {}, ...tds);
       };
       return h(
         'div',
@@ -109,7 +121,7 @@ function blockNode(b: MdBlock, hooks: MarkdownHooks, tight: boolean): HTMLElemen
           'table',
           { class: 'md-table' },
           h('thead', {}, h('tr', {}, ...b.head.map((c, k) => cell('th', c, k)))),
-          h('tbody', {}, ...b.rows.map((row) => h('tr', {}, ...row.map((c, k) => cell('td', c, k))))),
+          h('tbody', {}, ...b.rows.map(row)),
         ),
       );
     }

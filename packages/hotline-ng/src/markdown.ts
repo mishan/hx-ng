@@ -15,16 +15,20 @@
  *
  * **Articles** are documents, and get CommonMark-ish blocks — headings,
  * lists, quotes, fenced and indented code, rules, GitHub pipe tables —
- * over the same inline scanner, plus the `news:` scheme. Two things
- * CommonMark has are missing on purpose, as they are on the server
- * (hxd-ng's `docs/news.md` §5.2): raw HTML, which is simply text here
- * because nothing is ever interpreted as HTML; and images, because an
+ * over the same inline scanner, with CommonMark's links on top of it:
+ * destinations in `<…>` or with balanced parentheses, titles, autolinks,
+ * reference definitions, character references, and the `news:` scheme
+ * in every one of those forms, because the server records a reference
+ * from each of them. Two things CommonMark has are changed on purpose,
+ * as they are on the server (hxd-ng's `docs/news.md` §5.2). Raw HTML is
+ * opaque: an inline tag or an HTML block is shown as the characters
+ * typed and is never markdown, never linked and never a reference, so
+ * `<a title="#51">` is one piece of literal text. Text *between* tags is
+ * prose like any other. And an image is never fetched, because an
  * article's pictures are its attachments and a body that fetches a URL
- * reports every reader's address to a stranger. `![alt](url)` in an
- * article stays exactly the characters typed. An article still knows a
- * tag when it sees one, as the server's parser does: `<a title="#51">`
- * is one piece of literal text, and nothing inside it is emphasis, a
- * link, a reference or a URL. Text *between* tags is prose like any other.
+ * reports every reader's address to a stranger: `![alt](https://…)` is a
+ * link labeled `alt` to where the picture would have come from, and
+ * `![alt](news:51)` a reference labeled `alt`.
  *
  * **Links go only where a reader can see.** In an article, a
  * `[label](url)` whose scheme is not on the allowlist renders as the
@@ -33,15 +37,16 @@
  * which is not quite that: no link, and the brackets and destination
  * stay as typed, but the label between them is read like any other text.
  *
- * **Pathological input is bounded.** Emphasis nests at most eight deep, so
- * a line of five thousand asterisks cannot recurse into the stack; block
- * containers nest at most sixteen deep, past which the rest is a
- * paragraph; and the searches for a closing delimiter, a bracket's match
- * and a code span's closing run are memoized per string, so a long body
- * scans in roughly linear time rather than retrying the same dead end
- * from every opener. The memoization changes nothing about the answers —
- * a test drives it against a straight port of the Rust — only what they
- * cost.
+ * **Pathological input is bounded.** Emphasis nesting is capped, so a
+ * line of asterisks cannot recurse into the stack; block containers are
+ * capped too, past which the rest is a paragraph; a table has only the
+ * cells its rows hold, and a delimiter row too wide for any reader is
+ * not a table; and the searches for a closing delimiter, a bracket's
+ * match, a destination's end and a code span's closing run are memoized
+ * or precomputed per string, so a long body scans in roughly linear time
+ * rather than retrying the same dead end from every opener. The
+ * memoization changes nothing about the answers — a test drives it
+ * against a straight port of the Rust — only what they cost.
  *
  * Plain data in, plain data out; no DOM. Drawing it is the caller's job,
  * and the only safe way to draw it is as text nodes.
@@ -65,9 +70,10 @@ export interface MdRun {
   /** An article reference the server resolved: a `news:51` link or a
    *  `#51`, in an article only. */
   ref?: NewsReference;
-  /** Raw HTML in an article — a tag, a comment — where CommonMark would
-   *  read one. Drawn as the characters typed, and nothing in it is a
-   *  link: not a `#51`, not a bare URL. */
+  /** Raw HTML inline in an article — a tag, a comment — where CommonMark
+   *  would read one. Drawn as the characters typed, and nothing in it is
+   *  a link: not a `#51`, not a bare URL. A whole HTML block is a block
+   *  of its own. */
   html?: boolean;
 }
 
@@ -86,7 +92,13 @@ export type MdBlock =
    *  so they read as lines rather than as paragraphs. */
   | { type: 'list'; ordered: boolean; start: number; tight: boolean; items: MdBlock[][] }
   | { type: 'rule' }
-  | { type: 'table'; align: MdAlign[]; head: MdRun[][]; rows: MdRun[][][] };
+  /** A row has the cells it was written with, never more than the head
+   *  and possibly fewer: the ones it lacks are empty, and drawing them is
+   *  the caller's business. */
+  | { type: 'table'; align: MdAlign[]; head: MdRun[][]; rows: MdRun[][][] }
+  /** A CommonMark HTML block: its lines exactly as typed, to be drawn as
+   *  text. Never markdown, never linked, never a reference. */
+  | { type: 'html'; text: string };
 
 /** A chat body's block-level pieces, before inline parsing: GtkHx's
  *  `RawBlock`, kept because its shape is what the ported tests pin. */
@@ -102,9 +114,18 @@ const MAX_DEPTH = 8;
 
 /** Cap on block containers — quotes and list items — in an article. Past
  *  it, what is left is one paragraph. Deep enough for any outline
- *  anybody writes; shallow enough that a body of five thousand `>` is a
+ *  anybody writes; shallow enough that a body of nothing but `>` is a
  *  few dozen elements rather than a DOM the browser gives up on. */
 const MAX_BLOCK_DEPTH = 16;
+
+/** Widest delimiter row that makes a table; past it the lines are a
+ *  paragraph. No table anybody reads is near it, on a phone or anywhere
+ *  else. What it bounds is the drawing: a browser lays a table out on a
+ *  grid of rows by columns however few cells the markup holds, so a
+ *  short header of thousands of columns over thousands of one-word rows
+ *  would be a small body with a huge grid behind it. The server's parser
+ *  has no such cap, and reads a wider one as a table. */
+const MAX_TABLE_COLUMNS = 64;
 
 // --- the inline scanner --------------------------------------------------
 
@@ -115,7 +136,9 @@ const STRIKE = 8;
 const HTML = 16;
 
 const BACKSLASH = 0x5c;
+const AMP = 0x26;
 const LT = 0x3c;
+const GT = 0x3e;
 const BACKTICK = 0x60;
 const STAR = 0x2a;
 const UNDERSCORE = 0x5f;
@@ -134,6 +157,131 @@ const isWs = (c: number): boolean => c === 0x20 || c === 0x09 || c === 0x0a || c
 
 const isAlnum = (c: number): boolean =>
   (c >= 0x30 && c <= 0x39) || (c >= 0x41 && c <= 0x5a) || (c >= 0x61 && c <= 0x7a);
+
+/** ASCII punctuation: what a backslash escapes in an article, as in
+ *  CommonMark. */
+const isPunct = (c: number): boolean =>
+  (c >= 0x21 && c <= 0x2f) || (c >= 0x3a && c <= 0x40) || (c >= 0x5b && c <= 0x60) || (c >= 0x7b && c <= 0x7e);
+
+/**
+ * The named character references an article decodes: markup's own, the
+ * typographic ones people actually type, and the two ASCII marks that
+ * change what a body means here — a `#` that makes a reference, a `:`
+ * that makes a scheme. Any other name stays as typed. That is a known
+ * difference from the server, whose parser knows all of HTML's: there,
+ * `&frac12;` is a character, and here it is eight. A table of two
+ * thousand names is not worth carrying for that; numeric references,
+ * which reach every character, are decoded in full.
+ */
+const NAMED = new Map([
+  ['amp', '&'],
+  ['lt', '<'],
+  ['gt', '>'],
+  ['quot', '"'],
+  ['apos', "'"],
+  ['nbsp', '\u00a0'],
+  ['copy', '©'],
+  ['reg', '®'],
+  ['trade', '™'],
+  ['hellip', '…'],
+  ['mdash', '—'],
+  ['ndash', '–'],
+  ['lsquo', '‘'],
+  ['rsquo', '’'],
+  ['ldquo', '“'],
+  ['rdquo', '”'],
+  ['laquo', '«'],
+  ['raquo', '»'],
+  ['bull', '•'],
+  ['middot', '·'],
+  ['deg', '°'],
+  ['plusmn', '±'],
+  ['times', '×'],
+  ['divide', '÷'],
+  ['euro', '€'],
+  ['pound', '£'],
+  ['yen', '¥'],
+  ['cent', '¢'],
+  ['sect', '§'],
+  ['para', '¶'],
+  ['larr', '←'],
+  ['rarr', '→'],
+  ['num', '#'],
+  ['colon', ':'],
+]);
+
+/** A character reference, CommonMark's shapes: `&#35;`, `&#x23;`, `&name;`. */
+const ENTITY = /&(?:#[xX]([0-9A-Fa-f]{1,6})|#([0-9]{1,7})|([A-Za-z][A-Za-z0-9]{1,31}));/y;
+
+/** The character reference at `at`, decoded, and where it ends; or null
+ *  for none, or a name not in `NAMED`. A code point that is no character
+ *  — zero, a surrogate, past Unicode — is U+FFFD, as CommonMark says. */
+function entityAt(s: string, at: number): [text: string, end: number] | null {
+  ENTITY.lastIndex = at;
+  const m = ENTITY.exec(s);
+  if (!m) return null;
+  if (m[3] !== undefined) {
+    const v = NAMED.get(m[3]);
+    return v === undefined ? null : [v, ENTITY.lastIndex];
+  }
+  const cp = m[1] !== undefined ? parseInt(m[1], 16) : Number(m[2]);
+  const ok = cp > 0 && cp <= 0x10ffff && (cp < 0xd800 || cp > 0xdfff);
+  return [String.fromCodePoint(ok ? cp : 0xfffd), ENTITY.lastIndex];
+}
+
+/** A link destination as it is meant: backslash escapes resolved and
+ *  character references decoded. This is what is checked against the
+ *  allowlist, so `&#106;avascript:` is refused as `javascript:` is. */
+function unescapeDest(raw: string): string {
+  let out = '';
+  let k = 0;
+  while (k < raw.length) {
+    const c = raw.charCodeAt(k);
+    if (c === BACKSLASH && isPunct(raw.charCodeAt(k + 1))) {
+      out += raw[k + 1];
+      k += 2;
+      continue;
+    }
+    const e = c === AMP ? entityAt(raw, k) : null;
+    if (e) {
+      out += e[0];
+      k = e[1];
+      continue;
+    }
+    out += raw[k];
+    k++;
+  }
+  return out;
+}
+
+/** Spaces and tabs from `at`, and at most one line ending among them:
+ *  what may separate a link's parts. */
+function skipLinkSpace(s: string, at: number): number {
+  let k = at;
+  let lines = 0;
+  for (;;) {
+    const c = s.charCodeAt(k);
+    if (c === 0x20 || c === 0x09) k++;
+    else if (c === 0x0a && lines++ === 0) k++;
+    else return k;
+  }
+}
+
+/** A link label as a reference definition is looked up by: CommonMark's
+ *  normalization, whitespace collapsed and case folded. Null when it is
+ *  no label at all — blank, too long, or with a bracket of its own. */
+function labelKey(label: string): string | null {
+  if (label.length > 999) return null;
+  for (let k = 0; k < label.length; k++) {
+    const c = label.charCodeAt(k);
+    if (c === BACKSLASH) k++;
+    else if (c === LBRACKET || c === 0x5d) return null;
+  }
+  let key = label.replace(/[ \t\r\n]+/g, ' ');
+  if (key.startsWith(' ')) key = key.slice(1);
+  if (key.endsWith(' ')) key = key.slice(0, -1);
+  return key ? key.toLowerCase().toUpperCase() : null;
+}
 
 /**
  * Schemes a `[label](url)` may point at: what GtkHx's URL detector
@@ -177,9 +325,22 @@ class Builder {
 interface Mode {
   article: boolean;
   refs: ReadonlyMap<number, NewsReference>;
+  /** An article's link reference definitions, by `labelKey`: where each
+   *  goes, unescaped. The first definition of a label wins. */
+  defs: Map<string, string>;
+  /** Inline content waiting for every definition in the body to be seen,
+   *  since a reference may come before the line that defines it. */
+  later: [runs: MdRun[], text: string][];
 }
 
-const CHAT: Mode = { article: false, refs: new Map() };
+const CHAT: Mode = { article: false, refs: new Map(), defs: new Map(), later: [] };
+
+const articleMode = (refs: readonly NewsReference[]): Mode => ({
+  article: true,
+  refs: new Map(refs.map((r) => [r.id, r])),
+  defs: new Map(),
+  later: [],
+});
 
 const UNKNOWN = -2;
 const FAIL = -1;
@@ -190,6 +351,20 @@ const FAIL = -1;
 const OPEN_TAG =
   /<[A-Za-z][A-Za-z0-9-]*(?:[ \t\n\f\r]+[A-Za-z_:][A-Za-z0-9_.:-]*(?:[ \t\n\f\r]*=[ \t\n\f\r]*(?:[^ \t\n\f\r"'=<>`]+|'[^']*'|"[^"]*"))?)*[ \t\n\f\r]*\/?>/y;
 const CLOSE_TAG = /<\/[A-Za-z][A-Za-z0-9-]*[ \t\n\f\r]*>/y;
+
+/** CommonMark's autolinks (spec §6.5): a scheme and no spaces, or an
+ *  address, in angle brackets. Sticky, from the character after the `<`. */
+const AUTOLINK_URI = /[A-Za-z][A-Za-z0-9+.-]{1,31}:[^\x00-\x20<>]*>/y;
+const AUTOLINK_EMAIL =
+  /[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*>/y;
+
+/** A link found in an article: its label's source, where it goes —
+ *  unescaped, not yet checked — and the offset just past it. */
+interface Link {
+  label: string;
+  href: string;
+  end: number;
+}
 
 /**
  * One string the scanner is working through, and what it has learned
@@ -209,9 +384,24 @@ class Source {
   private runs: Map<number, number[]> | null = null;
   private brackets: Int32Array | null = null;
   private found = new Map<string, [from: number, at: number]>();
+  private parens: { next: Int32Array; stop: Int32Array; depth: Int32Array } | null = null;
 
-  constructor(readonly s: string) {
+  /** `article` is the dialect: in an article a tag, an autolink and a
+   *  code span bind tighter than emphasis and brackets, as CommonMark
+   *  has it. */
+  constructor(
+    readonly s: string,
+    readonly article = false,
+  ) {
     this.n = s.length;
+  }
+
+  /** In an article, the end of a raw-HTML tag or an autolink at `at`,
+   *  which nothing may close or open inside; otherwise -1. */
+  private opaque(at: number): number {
+    if (!this.article || this.s.charCodeAt(at) !== LT) return -1;
+    const auto = this.autolink(at);
+    return auto ? auto.end : this.htmlTag(at);
   }
 
   code(i: number): number {
@@ -310,8 +500,10 @@ class Source {
   /**
    * Next unescaped `**` or `~~` at or after `from` that may close, or -1.
    * Skips code spans, so `` **a `b**` c** `` closes at the last `**`; an
-   * unclosed backtick run ends the search. An empty span (`****`) is not
-   * emphasis, which is the start position's special case.
+   * unclosed backtick run ends the search. In an article it skips a tag
+   * or an autolink the same way, so a `**` inside one closes nothing. An
+   * empty span (`****`) is not emphasis, which is the start position's
+   * special case.
    */
   findDelim(from: number, delim: '**' | '~~'): number {
     const s = this.s;
@@ -323,6 +515,8 @@ class Source {
         const span = this.codeSpan(i);
         return span ? span[2] : FAIL;
       }
+      const opaque = this.opaque(i);
+      if (opaque >= 0) return opaque;
       if (s.startsWith(delim, i)) return canClose(this, i) ? -(i + 2) : i + 2;
       return i + 1;
     });
@@ -330,7 +524,8 @@ class Source {
 
   /** Close for single-character emphasis. A doubled run is skipped whole,
    *  so `*a**b*` does not close on the pair; `_` closes only at a word
-   *  boundary. */
+   *  boundary. Code spans, and in an article tags and autolinks, are
+   *  stepped over as `findDelim` steps over them. */
   findItalicClose(from: number, open: number): number {
     const s = this.s;
     const start = s.charCodeAt(from) === open && s.charCodeAt(from + 1) !== open ? from + 1 : from;
@@ -341,6 +536,8 @@ class Source {
         const span = this.codeSpan(i);
         return span ? span[2] : FAIL;
       }
+      const opaque = this.opaque(i);
+      if (opaque >= 0) return opaque;
       if (c === open) {
         if (s.charCodeAt(i + 1) === open) return i + 2;
         if (!canClose(this, i)) return i + 1;
@@ -374,6 +571,166 @@ class Source {
     const href = s.slice(urlStart, urlEnd);
     if (!label || !href) return null;
     return { label, href, end: urlEnd + 1 };
+  }
+
+  /**
+   * A link at `open` in an article, CommonMark's forms: inline —
+   * `[label](dest)`, `[label](<dest>)`, either with a `"title"`,
+   * `'title'` or `(title)` after it — and then, with `defs` to look in,
+   * full `[label][ref]`, collapsed `[label][]` and shortcut `[label]`
+   * references. Null when none of them is here. The title is read to
+   * find where the link ends, and is otherwise dropped: nothing here
+   * shows one.
+   */
+  articleLink(open: number, defs: ReadonlyMap<string, string>): Link | null {
+    const s = this.s;
+    const match = this.bracketMatch();
+    const close = match[open]!;
+    if (close < 0) return null;
+    const label = s.slice(open + 1, close);
+    if (!label) return null;
+    if (s.charCodeAt(close + 1) === LPAREN) {
+      const inline = this.inlineDest(close + 2);
+      if (inline) return { label, ...inline };
+    }
+    if (!defs.size) return null;
+    const lookup = (name: string) => {
+      const key = labelKey(name);
+      return key === null ? undefined : defs.get(key);
+    };
+    // Followed by a label of its own, it is a full or collapsed reference
+    // or nothing: never a shortcut, even when that label is undefined.
+    if (s.charCodeAt(close + 1) === LBRACKET) {
+      const ref = match[close + 1]!;
+      if (ref >= 0) {
+        const href = lookup(ref === close + 2 ? label : s.slice(close + 2, ref));
+        return href === undefined ? null : { label, href, end: ref + 1 };
+      }
+    }
+    const href = lookup(label);
+    return href === undefined ? null : { label, href, end: close + 1 };
+  }
+
+  /** What follows an inline link's `(` at `at`: the destination,
+   *  unescaped, and the offset past the closing `)`. */
+  private inlineDest(at: number): { href: string; end: number } | null {
+    const s = this.s;
+    const dest = this.destination(skipLinkSpace(s, at));
+    if (!dest || !dest.raw) return null;
+    let k = skipLinkSpace(s, dest.end);
+    if (k > dest.end && s.charCodeAt(k) !== RPAREN) {
+      const title = this.title(k);
+      if (title < 0) return null;
+      k = skipLinkSpace(s, title);
+    }
+    if (s.charCodeAt(k) !== RPAREN) return null;
+    return { href: unescapeDest(dest.raw), end: k + 1 };
+  }
+
+  /**
+   * A link destination at `at`: `<…>`, which may be empty and holds no
+   * line break and no unescaped `<`; or a run with no space or control
+   * character in it whose parentheses balance, ending before the `)`
+   * that does not. Its source and the offset past it, or null.
+   *
+   * The bare form's end is looked up rather than walked to: a walk that
+   * counts parentheses is not memoryless, and `[a](b` repeated would
+   * otherwise send every attempt to the end of the body. Unlike the
+   * server's parser, nesting is not capped.
+   */
+  destination(at: number): { raw: string; end: number } | null {
+    const s = this.s;
+    if (s.charCodeAt(at) === LT) {
+      const close = this.walk('<>', at + 1, this.n, (j) => {
+        const c = s.charCodeAt(j);
+        if (c === GT) return -(j + 2);
+        if (c === LT || c === 0x0a) return FAIL;
+        return c === BACKSLASH && isPunct(s.charCodeAt(j + 1)) ? j + 2 : j + 1;
+      });
+      return close < 0 ? null : { raw: s.slice(at + 1, close), end: close + 1 };
+    }
+    const { next, stop, depth } = this.parenIndex();
+    const space = stop[at]!;
+    // The first point after `at` where the depth falls below where it
+    // started is just past the `)` that ends the destination.
+    const paren = next[at]! - 1;
+    if (paren >= at && paren < space) return { raw: s.slice(at, paren), end: paren };
+    if (depth[space] !== depth[at]) return null;
+    return { raw: s.slice(at, space), end: space };
+  }
+
+  /** A link title at `at` — `"…"`, `'…'` or `(…)`, escapes allowed, and
+   *  in the last no unescaped `(` — and the offset past it, or -1. */
+  title(at: number): number {
+    const s = this.s;
+    const open = s.charCodeAt(at);
+    const closer = open === LPAREN ? RPAREN : open;
+    if (open !== 0x22 && open !== 0x27 && open !== LPAREN) return -1;
+    const close = this.walk(`title${s[at]}`, at + 1, this.n, (j) => {
+      const c = s.charCodeAt(j);
+      if (c === closer) return -(j + 2);
+      if (open === LPAREN && c === LPAREN) return FAIL;
+      return c === BACKSLASH && isPunct(s.charCodeAt(j + 1)) ? j + 2 : j + 1;
+    });
+    return close < 0 ? -1 : close + 1;
+  }
+
+  /**
+   * What `destination` looks up, built once per string. `depth[k]` is
+   * the parenthesis depth before `k`, escapes skipped; `next[k]` the
+   * first later point where the depth is below `depth[k]`, or -1; and
+   * `stop[k]` the first space or control character at or after `k`.
+   * A backslash escapes whatever follows it here, as `bracketMatch`'s
+   * does, which is CommonMark's escaping for everything that could be a
+   * parenthesis.
+   */
+  private parenIndex(): { next: Int32Array; stop: Int32Array; depth: Int32Array } {
+    if (this.parens) return this.parens;
+    const s = this.s;
+    const n = this.n;
+    const depth = new Int32Array(n + 1);
+    let d = 0;
+    for (let k = 0; k < n; k++) {
+      depth[k] = d;
+      const c = s.charCodeAt(k);
+      if (c === BACKSLASH && k + 1 < n) {
+        depth[++k] = d;
+        continue;
+      }
+      if (c === LPAREN) d++;
+      else if (c === RPAREN) d--;
+    }
+    depth[n] = d;
+    const next = new Int32Array(n + 1).fill(-1);
+    const stack: number[] = [];
+    for (let k = n; k >= 0; k--) {
+      while (stack.length && depth[stack[stack.length - 1]!]! >= depth[k]!) stack.pop();
+      if (stack.length) next[k] = stack[stack.length - 1]!;
+      stack.push(k);
+    }
+    const stop = new Int32Array(n + 1);
+    stop[n] = n;
+    for (let k = n - 1; k >= 0; k--) stop[k] = s.charCodeAt(k) <= 0x20 ? k : stop[k + 1]!;
+    return (this.parens = { next, stop, depth });
+  }
+
+  /** An autolink at `at` — `<https://…>`, `<news:51>`, `<a@b.example>` —
+   *  as its text, its destination and the offset past it, or null. Its
+   *  text is exactly what was typed: no escapes, no references. */
+  autolink(at: number): { text: string; href: string; end: number } | null {
+    const s = this.s;
+    if (s.charCodeAt(at) !== LT) return null;
+    for (const [re, mailto] of [
+      [AUTOLINK_URI, false],
+      [AUTOLINK_EMAIL, true],
+    ] as const) {
+      re.lastIndex = at + 1;
+      if (re.test(s)) {
+        const text = s.slice(at + 1, re.lastIndex - 1);
+        return { text, href: mailto ? `mailto:${text}` : text, end: re.lastIndex };
+      }
+    }
+    return null;
   }
 
   /**
@@ -418,7 +775,9 @@ class Source {
 
   /** Each `[`'s balancing `]`, or -1. GtkHx counts depth forward from
    *  the bracket with a backslash skipping the next character; a stack
-   *  over the whole string gives the same pairs in one pass. */
+   *  over the whole string gives the same pairs in one pass. In an
+   *  article a code span, a tag or an autolink binds tighter, as in
+   *  CommonMark, and a bracket inside one pairs with nothing outside. */
   private bracketMatch(): Int32Array {
     if (this.brackets) return this.brackets;
     const match = new Int32Array(this.n).fill(-1);
@@ -428,6 +787,16 @@ class Source {
       const c = this.s.charCodeAt(i);
       if (c === BACKSLASH) {
         i += 2;
+        continue;
+      }
+      if (this.article && c === BACKTICK) {
+        const span = this.codeSpan(i);
+        i = span ? span[2] : i + this.backtickRun(i);
+        continue;
+      }
+      const opaque = this.opaque(i);
+      if (opaque >= 0) {
+        i = opaque;
         continue;
       }
       if (c === LBRACKET) stack.push(i);
@@ -478,9 +847,10 @@ function linkTarget(href: string, mode: Mode): Target | null | undefined {
   if (schemeAllowed(href)) return { href };
   if (!mode.article) return undefined;
   // The server's rule for a reference (hxd-ng's `hxd-markdown`): the
-  // `news:` scheme, digits only. Linked only when it resolved; otherwise
-  // the label is the text the author wrote around a pointer to nothing.
-  const m = /^news:(\d{1,10})$/.exec(href);
+  // `news:` scheme, in any case, and digits only. Linked only when it
+  // resolved; otherwise the label is the text the author wrote around a
+  // pointer to nothing.
+  const m = /^news:(\d{1,10})$/i.exec(href);
   if (!m) return undefined;
   const ref = mode.refs.get(Number(m[1]));
   return ref ? { ref } : null;
@@ -501,9 +871,10 @@ function scan(src: Source, base: number, target: Target | null, depth: number, o
     const c = s.charCodeAt(i);
 
     // A backslash escape: the next character is literal, whatever it is.
+    // Chat escapes GtkHx's set; an article, CommonMark's.
     if (c === BACKSLASH && i + 1 < n) {
       const next = s[i + 1]!;
-      if (ESCAPABLE.has(next)) {
+      if (mode.article ? isPunct(s.charCodeAt(i + 1)) : ESCAPABLE.has(next)) {
         flush(i);
         out.push(next, base, target);
         i += 2;
@@ -531,16 +902,44 @@ function scan(src: Source, base: number, target: Target | null, depth: number, o
       continue;
     }
 
-    // Raw HTML in an article: one opaque piece, as the server's parser
-    // reads it, so what is inside a tag is neither markdown nor a `#51`.
-    // It is still drawn as the characters typed. Chat has no such thing;
-    // GtkHx reads a `<` as a `<`.
     if (c === LT && mode.article) {
+      // An autolink — `<https://…>`, `<news:51>` — is a link like any
+      // other, its destination judged the same way, and refused it is the
+      // characters typed. Not in a link's label, where a link is not
+      // markdown.
+      const auto = depth < MAX_DEPTH ? src.autolink(i) : null;
+      if (auto) {
+        const t = linkTarget(auto.href, mode);
+        if (t !== undefined) {
+          flush(i);
+          out.push(auto.text, base, t);
+          lit = auto.end;
+        }
+        i = auto.end;
+        continue;
+      }
+      // Raw HTML: one opaque piece, as the server's parser reads it, so
+      // what is inside a tag is neither markdown nor a `#51`. It is still
+      // drawn as the characters typed. Chat has no such thing; GtkHx
+      // reads a `<` as a `<`.
       const end = src.htmlTag(i);
       if (end >= 0) {
         flush(i);
         out.push(s.slice(i, end), base | HTML, target);
         i = end;
+        lit = i;
+        continue;
+      }
+    }
+
+    // A character reference in an article is the character it names, as
+    // on the server: `&#35;51` is a `#51`, and a reference.
+    if (c === AMP && mode.article) {
+      const e = entityAt(s, i);
+      if (e) {
+        flush(i);
+        out.push(e[0], base, target);
+        i = e[1];
         lit = i;
         continue;
       }
@@ -555,7 +954,7 @@ function scan(src: Source, base: number, target: Target | null, depth: number, o
           const close = src.findDelim(i + 2, two);
           if (close >= 0) {
             flush(i);
-            scan(new Source(s.slice(i + 2, close)), base | (two === '**' ? BOLD : STRIKE), target, depth + 1, out, mode);
+            scan(new Source(s.slice(i + 2, close), mode.article), base | (two === '**' ? BOLD : STRIKE), target, depth + 1, out, mode);
             i = close + 2;
             lit = i;
             continue;
@@ -571,7 +970,7 @@ function scan(src: Source, base: number, target: Target | null, depth: number, o
         const close = src.findItalicClose(i + 1, c);
         if (close >= 0) {
           flush(i);
-          scan(new Source(s.slice(i + 1, close)), base | ITALIC, target, depth + 1, out, mode);
+          scan(new Source(s.slice(i + 1, close), mode.article), base | ITALIC, target, depth + 1, out, mode);
           i = close + 1;
           lit = i;
           continue;
@@ -581,22 +980,22 @@ function scan(src: Source, base: number, target: Target | null, depth: number, o
       }
 
       if (c === LBRACKET) {
-        const link = src.link(i);
+        const link = mode.article ? src.articleLink(i, mode.defs) : src.link(i);
         if (link) {
-          // `![alt](url)` in an article is the characters typed: its
-          // pictures are its attachments. In chat it is GtkHx's answer —
-          // a `!` and then a link — which draws no image either.
-          if (mode.article && i > 0 && s.charCodeAt(i - 1) === BANG) {
-            i = link.end;
-            continue;
-          }
+          // `![alt](url)` in an article — its `!` still in the literal
+          // run, so not escaped — is a link to where the picture would
+          // have come from, as the server has it: an article's pictures
+          // are its attachments, and nothing here is ever fetched. In
+          // chat it is GtkHx's answer, a `!` and then a link, which draws
+          // no image either.
+          const image = mode.article && i > lit && s.charCodeAt(i - 1) === BANG;
           const t = linkTarget(link.href, mode);
           if (t !== undefined) {
-            flush(i);
+            flush(image ? i - 1 : i);
             // At MAX_DEPTH: a label is text, and a link inside a link is
             // not markdown — the balanced brackets would otherwise let
             // the inner one parse.
-            scan(new Source(link.label), base, t, MAX_DEPTH, out, mode);
+            scan(new Source(link.label, mode.article), base, t, MAX_DEPTH, out, mode);
             i = link.end;
             lit = i;
             continue;
@@ -636,7 +1035,7 @@ function toRun(p: Piece): MdRun {
 
 function inline(src: string, mode: Mode): MdRun[] {
   const out = new Builder();
-  scan(new Source(src), 0, null, 0, out, mode);
+  scan(new Source(src, mode.article), 0, null, 0, out, mode);
   if (!mode.article) return out.pieces.map(toRun);
   // The `#51` shorthand, by the server's own rule (`referenceSpans`), in
   // prose only. The server scans each stretch of text between two pieces
@@ -653,14 +1052,16 @@ function inline(src: string, mode: Mode): MdRun[] {
 
 /**
  * Inline markdown: GtkHx's chat dialect by default, or an article's when
- * `article` is given — which adds the `news:` scheme, draws `![]()` as
- * text, and links the references in `article.refs`.
+ * `article` is given — which adds CommonMark's links and the `news:`
+ * scheme, draws `![]()` as a link, and links the references in
+ * `article.refs`. One line has no reference definitions; `parseArticle`
+ * finds those in the body around it.
  *
  * Never fails: anything that does not close renders as the characters
  * that were typed.
  */
 export function parseInline(src: string, article?: { refs: readonly NewsReference[] }): MdRun[] {
-  return inline(src, article ? { article: true, refs: new Map(article.refs.map((r) => [r.id, r])) } : CHAT);
+  return inline(src, article ? articleMode(article.refs) : CHAT);
 }
 
 // --- chat blocks -------------------------------------------------------------
@@ -908,6 +1309,45 @@ function listMarker(t: string): ListMarker | null {
  *  "2011. was a year" stays a sentence. */
 const interrupts = (m: ListMarker): boolean => m.content.trim() !== '' && (!m.ordered || m.start === 1);
 
+/** The tag names that open CommonMark's sixth kind of HTML block, in
+ *  pulldown-cmark's list, which is the server's parser's. */
+const HTML_BLOCK_TAGS = new Set(
+  (
+    'address article aside base basefont blockquote body caption center col colgroup dd details dialog dir div dl dt ' +
+    'fieldset figcaption figure footer form frame frameset h1 h2 h3 h4 h5 h6 head header hr html iframe legend li link ' +
+    'main menu menuitem nav noframes ol optgroup option p param search section summary table tbody td tfoot th thead ' +
+    'title tr track ul'
+  ).split(' '),
+);
+
+/**
+ * The HTML block a line opens, if it opens one: CommonMark's seven kinds
+ * as pulldown-cmark reads them. `end` is what a line must contain to end
+ * the block, that line included, or null for a block that runs to a
+ * blank line. Only the seventh, a complete tag alone on its line, cannot
+ * cut a paragraph short.
+ */
+function htmlBlock(t: string): { end: string | null; interrupts: boolean } | null {
+  if (t.charCodeAt(0) !== LT) return null;
+  // Ended by the closing tag of the one that opened it, in lowercase.
+  // CommonMark takes any of the four in any case; the server's parser
+  // does this, and a block has to end in the same place for both.
+  const raw = /^<(pre|script|style|textarea)(?:[ \t>]|$)/i.exec(t);
+  if (raw) return { end: `</${raw[1]!.toLowerCase()}>`, interrupts: true };
+  if (t.startsWith('<!--')) return { end: '-->', interrupts: true };
+  if (t.startsWith('<?')) return { end: '?>', interrupts: true };
+  if (t.startsWith('<![CDATA[')) return { end: ']]>', interrupts: true };
+  if (/^<![A-Za-z]/.test(t)) return { end: '>', interrupts: true };
+  const block = /^<\/?([A-Za-z0-9]+)(?:[ \t>]|\/>|$)/.exec(t);
+  if (block && HTML_BLOCK_TAGS.has(block[1]!.toLowerCase())) return { end: null, interrupts: true };
+  if (/^<\/?(?:pre|script|style|textarea)(?![A-Za-z0-9-])/i.test(t)) return null;
+  for (const re of [OPEN_TAG, CLOSE_TAG]) {
+    re.lastIndex = 0;
+    if (re.test(t) && isBlank(t.slice(re.lastIndex))) return { end: null, interrupts: false };
+  }
+  return null;
+}
+
 /** Would this line open a block of its own, and so end a lazily
  *  continued paragraph or a table? */
 function startsBlock(line: string): boolean {
@@ -915,7 +1355,7 @@ function startsBlock(line: string): boolean {
   const ind = indentOf(l);
   if (ind >= 4) return false;
   const t = l.slice(ind);
-  if (fenceOpen(t) || atxLevel(t) || t[0] === '>' || isRule(t)) return true;
+  if (fenceOpen(t) || atxLevel(t) || t[0] === '>' || isRule(t) || htmlBlock(t)?.interrupts) return true;
   const m = listMarker(t);
   return !!m && interrupts(m);
 }
@@ -968,15 +1408,79 @@ function joinParagraph(lines: readonly string[]): string {
     .join('\n');
 }
 
+/** The `]` that closes a link label opening at `open`, or -1: the first
+ *  unescaped one, with no `[` before it, within CommonMark's length. */
+function labelEnd(s: string, open: number): number {
+  for (let k = open + 1; k < s.length && k <= open + 1000; k++) {
+    const c = s.charCodeAt(k);
+    if (c === BACKSLASH) k++;
+    else if (c === LBRACKET) return -1;
+    else if (c === 0x5d) return k;
+  }
+  return -1;
+}
+
+/** Past the end of the line `at` is on, when nothing but spaces and tabs
+ *  is left on it; otherwise -1. */
+function lineRest(s: string, at: number): number {
+  let k = at;
+  while (s[k] === ' ' || s[k] === '\t') k++;
+  if (k === s.length) return k;
+  return s[k] === '\n' ? k + 1 : -1;
+}
+
+/**
+ * Link reference definitions — `[label]: dest "title"` — at the start of
+ * a paragraph's text, recorded in `mode.defs` and taken off: what is left
+ * is the paragraph. A definition is not drawn, as CommonMark has it, and
+ * a reference to it resolves anywhere in the body. Where it goes is only
+ * recorded here; the link that uses it is judged like any other.
+ */
+function takeDefinitions(text: string, mode: Mode): string {
+  if (text.charCodeAt(0) !== LBRACKET) return text;
+  const src = new Source(text, true);
+  let at = 0;
+  while (text.charCodeAt(at) === LBRACKET) {
+    const close = labelEnd(text, at);
+    if (close < 0 || text.charCodeAt(close + 1) !== 0x3a) break;
+    const key = labelKey(text.slice(at + 1, close));
+    const from = skipLinkSpace(text, close + 2);
+    const dest = key === null ? null : src.destination(from);
+    // A bare destination has to be something; `<>` may be empty.
+    if (!dest || (!dest.raw && text.charCodeAt(from) !== LT)) break;
+    // A title, when one follows and ends its line; otherwise the
+    // destination has to end its own.
+    let end = lineRest(text, dest.end);
+    const t = skipLinkSpace(text, dest.end);
+    if (t > dest.end) {
+      const title = src.title(t);
+      const after = title < 0 ? -1 : lineRest(text, title);
+      if (after >= 0) end = after;
+    }
+    if (end < 0) break;
+    if (!mode.defs.has(key!)) mode.defs.set(key!, unescapeDest(dest.raw));
+    at = end;
+  }
+  return text.slice(at);
+}
+
+/** Inline content for later: an empty list that `parseArticle` fills
+ *  once every reference definition in the body is known. */
+function later(text: string, mode: Mode): MdRun[] {
+  const runs: MdRun[] = [];
+  mode.later.push([runs, text]);
+  return runs;
+}
+
 function parseBlocks(input: readonly string[], depth: number, mode: Mode): MdBlock[] {
-  const para = (text: string): MdBlock[] => (text ? [{ type: 'paragraph', content: inline(text, mode) }] : []);
+  const para = (text: string): MdBlock[] => (text ? [{ type: 'paragraph', content: later(text, mode) }] : []);
   if (depth > MAX_BLOCK_DEPTH) return para(joinParagraph(input.filter((l) => !isBlank(l))));
 
   const lines = input.map(detab);
   const out: MdBlock[] = [];
   let open: string[] = [];
   const flush = () => {
-    if (open.length) out.push(...para(joinParagraph(open)));
+    if (open.length) out.push(...para(takeDefinitions(joinParagraph(open), mode)));
     open = [];
   };
 
@@ -1026,21 +1530,44 @@ function parseBlocks(input: readonly string[], depth: number, mode: Mode): MdBlo
       continue;
     }
 
+    // An HTML block: opaque, as on the server — its lines drawn as typed,
+    // and nothing in them markdown, a link or a reference.
+    const html = htmlBlock(t);
+    if (html && (html.interrupts || !open.length)) {
+      flush();
+      const block: string[] = [];
+      if (html.end === null) {
+        while (i < lines.length && !isBlank(lines[i]!)) block.push(lines[i++]!);
+      } else {
+        while (i < lines.length) {
+          const l = lines[i++]!;
+          block.push(l);
+          if (l.includes(html.end)) break;
+        }
+      }
+      out.push({ type: 'html', text: block.join('\n') });
+      continue;
+    }
+
     const level = atxLevel(t);
     if (level) {
       flush();
-      out.push({ type: 'heading', level: level as 1, content: inline(headingText(t.slice(level)), mode) });
+      out.push({ type: 'heading', level: level as 1, content: later(headingText(t.slice(level)), mode) });
       i++;
       continue;
     }
 
     // A line of `=` or `-` under a paragraph makes it a heading, and that
-    // takes precedence over `---` being a rule.
+    // takes precedence over `---` being a rule. Under nothing but
+    // reference definitions it is a line like any other.
     if (open.length && /^(?:=+|-+)[ \t]*$/.test(t)) {
-      out.push({ type: 'heading', level: t[0] === '=' ? 1 : 2, content: inline(joinParagraph(open), mode) });
+      const text = takeDefinitions(joinParagraph(open), mode);
       open = [];
-      i++;
-      continue;
+      if (text) {
+        out.push({ type: 'heading', level: t[0] === '=' ? 1 : 2, content: later(text, mode) });
+        i++;
+        continue;
+      }
     }
 
     if (isRule(t)) {
@@ -1112,16 +1639,19 @@ function parseBlocks(input: readonly string[], depth: number, mode: Mode): MdBlo
     }
 
     // A GitHub table: a row with a pipe, then a delimiter row with as many
-    // cells. It may cut a paragraph short, and runs to a blank line or
-    // the next block.
+    // cells, no wider than a reader could use. It may cut a paragraph
+    // short, and runs to a blank line or the next block.
     if (t.includes('|') && i + 1 < lines.length) {
       const d = lines[i + 1]!;
       const di = indentOf(d);
       const align = di < 4 ? delimiterRow(d.slice(di)) : null;
       const head = splitRow(t);
-      if (align && head.length === align.length) {
+      if (align && head.length === align.length && align.length <= MAX_TABLE_COLUMNS) {
         flush();
-        const cells = (row: string[]) => align.map((_, k) => inline(row[k] ?? '', mode));
+        // A row keeps the cells it was written with and no more. Padding
+        // each to the head's width would make every one-word row cost as
+        // much as the widest header anybody can type.
+        const cells = (row: string[]) => row.slice(0, align.length).map((c) => later(c, mode));
         const rows: MdRun[][][] = [];
         i += 2;
         while (i < lines.length && !isBlank(lines[i]!) && !startsBlock(lines[i]!)) rows.push(cells(splitRow(lines[i++]!)));
@@ -1149,7 +1679,10 @@ function parseBlocks(input: readonly string[], depth: number, mode: Mode): MdBlo
  * would read as the client having lost them.
  */
 export function parseArticle(body: string, refs: readonly NewsReference[]): MdBlock[] {
-  return parseBlocks(lf(body).split('\n'), 0, { article: true, refs: new Map(refs.map((r) => [r.id, r])) });
+  const mode = articleMode(refs);
+  const blocks = parseBlocks(lf(body).split('\n'), 0, mode);
+  for (const [runs, text] of mode.later) for (const r of inline(text, mode)) runs.push(r);
+  return blocks;
 }
 
 /** The words of parsed blocks with the markup gone, one block to a line:
@@ -1163,6 +1696,7 @@ export function blocksText(blocks: readonly MdBlock[]): string {
         case 'heading':
           return runs(b.content);
         case 'code':
+        case 'html':
           return b.text;
         case 'quote':
           return blocksText(b.children);

@@ -584,22 +584,41 @@ describe('articles', () => {
         type: 'table',
         align: ['left', 'right'],
         head: [[{ text: 'size' }], [{ text: 'bytes' }]],
-        rows: [
-          [[{ text: 'full' }], [{ text: '412000', bold: true }]],
-          [[{ text: 'a | b' }], []],
-        ],
+        // A short row is as short as it was written; the renderer draws
+        // what it lacks.
+        rows: [[[{ text: 'full' }], [{ text: '412000', bold: true }]], [[{ text: 'a | b' }]]],
       },
     ]);
     // A delimiter row whose count does not match is no table.
     expect(parseArticle('a | b\n--- | --- | ---', []).map((b) => b.type)).toEqual(['paragraph']);
+    // Nor is one wider than any reader could use.
+    const wide = (c: number) => `${'|a'.repeat(c)}|\n${'|-'.repeat(c)}|\nx`;
+    expect(parseArticle(wide(64), [])).toMatchObject([{ type: 'table', rows: [[[{ text: 'x' }]]] }]);
+    expect(parseArticle(wide(65), []).map((b) => b.type)).toEqual(['paragraph']);
   });
 
-  it('draws images and raw HTML as the characters typed', () => {
+  it('stays fast on a wide table over many short rows', () => {
+    // Padding each row to the head's width made this columns times rows,
+    // for every reader of a small body and every listing that showed it.
+    const table = (cols: number, rows: string) => `${'|a'.repeat(cols)}|\n${'|-'.repeat(cols)}|\n${rows}`;
+    const started = performance.now();
+    for (const src of [
+      table(4000, 'x\n'.repeat(4000)),
+      table(64, 'x\n'.repeat(100000)),
+      table(64, `${'|x'.repeat(10000)}|\n`.repeat(20)),
+    ]) {
+      blocksText(parseArticle(src, []));
+    }
+    expect(performance.now() - started).toBeLessThan(2000);
+  });
+
+  it('draws an image as a link to it, and raw HTML as the characters typed', () => {
     expect(parseArticle('![pixel](https://tracker.example/p.gif) <b>x</b>', [])).toEqual([
       {
         type: 'paragraph',
         content: [
-          { text: '![pixel](https://tracker.example/p.gif) ' },
+          { text: 'pixel', href: 'https://tracker.example/p.gif' },
+          { text: ' ' },
           { text: '<b>', html: true },
           { text: 'x' },
           { text: '</b>', html: true },
@@ -618,20 +637,283 @@ describe('articles', () => {
       { text: ' ' },
       { text: '<a title="#51 *x*" href="https://x.example">', html: true },
     ]);
-    // Every inline shape CommonMark has, and each is one piece.
+    // Every inline shape CommonMark has, and each is one piece. After a
+    // word, so that none of them opens an HTML block.
     for (const tag of ['<!-- #51 -->', '<!-->', '<!--->', '<? #51 ?>', '<!DOCTYPE #51>', '<![CDATA[ #51 ]]>', '</a >', '<br/>', "<x a='#51' b=c>"]) {
-      expect(runs(`${tag} #51`), tag).toEqual([{ text: tag, html: true }, { text: ' ' }, { text: '#51', ref: r51 }]);
+      expect(runs(`x ${tag} #51`), tag).toEqual([{ text: 'x ' }, { text: tag, html: true }, { text: ' ' }, { text: '#51', ref: r51 }]);
     }
     // Things that only look like tags are prose, and a `#51` in them is
     // linked as anywhere else.
-    for (const src of ['a < b #51', '<3 #51', '<b #51', '<a title="x #51', '<!-- #51', '<!1 #51>', '<https://x.example> #51']) {
+    for (const src of ['a < b #51', 'x <3 #51', 'x <b #51', 'x <a title="x #51', 'x <!-- #51', 'x <!1 #51>']) {
       const got = runs(src);
       expect(got.some((r) => r.html), src).toBe(false);
       expect(text(got), src).toBe(src);
       expect(got.filter((r) => r.ref).map((r) => r.text), src).toEqual(['#51']);
     }
+    // An autolink is a link, not a tag.
+    expect(runs('<https://x.example> #51')).toEqual([
+      { text: 'https://x.example', href: 'https://x.example' },
+      { text: ' ' },
+      { text: '#51', ref: r51 },
+    ]);
     // Code wins over a tag, as it does over everything.
     expect(runs('`<b>`')).toEqual([{ text: '<b>', code: true }]);
+  });
+
+  it('lets a tag bind tighter than emphasis and brackets, as CommonMark does', () => {
+    const r51 = ref(51);
+    const runs = (src: string) => (parseArticle(src, [r51])[0] as { content: MdRun[] }).content;
+    // The closer inside the attribute closes nothing, and the tag stays
+    // whole: no italic cut off at a quote, no `#51` linked in a title.
+    expect(runs('*x <a title="*#51"> y* and #51')).toEqual([
+      { text: 'x ', italic: true },
+      { text: '<a title="*#51">', italic: true, html: true },
+      { text: ' y', italic: true },
+      { text: ' and ' },
+      { text: '#51', ref: r51 },
+    ]);
+    expect(runs('**x <a title="**#51"> y** and #51')).toEqual([
+      { text: 'x ', bold: true },
+      { text: '<a title="**#51">', bold: true, html: true },
+      { text: ' y', bold: true },
+      { text: ' and ' },
+      { text: '#51', ref: r51 },
+    ]);
+    // A bracket inside a tag pairs with nothing outside it.
+    const href = 'https://x.example';
+    expect(runs(`[x <a title="]"> y](${href})`)).toEqual([
+      { text: 'x ', href },
+      { text: '<a title="]">', html: true, href },
+      { text: ' y', href },
+    ]);
+    // An autolink binds as tightly.
+    expect(runs('*a <https://x.example/*> b*')).toEqual([
+      { text: 'a ', italic: true },
+      { text: 'https://x.example/*', italic: true, href: 'https://x.example/*' },
+      { text: ' b', italic: true },
+    ]);
+    // Chat has no tags, and GtkHx's answer is unchanged.
+    expect(styled(parseInline('*x <a title="*#51"> y*'))).toEqual([['x <a title="', 'italic']]);
+  });
+
+  it('reads an HTML block as the server does: opaque, to where it ends', () => {
+    const r51 = ref(51);
+    expect(parseArticle('<div>\n**bold** #51 https://x.example\n</div>\n\nafter #51', [r51])).toEqual<MdBlock[]>([
+      { type: 'html', text: '<div>\n**bold** #51 https://x.example\n</div>' },
+      { type: 'paragraph', content: [{ text: 'after ' }, { text: '#51', ref: r51 }] },
+    ]);
+    // Each of the seven kinds, and where each ends: the first five at a
+    // line holding their end, blank lines and all; the last two at a
+    // blank line.
+    for (const [src, html] of [
+      ['<script>\n*a*\n\n*b* </script> x\n*c*', '<script>\n*a*\n\n*b* </script> x'],
+      ['<!-- #51\n\n-->\n*c*', '<!-- #51\n\n-->'],
+      ['<?php #51\n\n?>\n*c*', '<?php #51\n\n?>'],
+      ['<!DOCTYPE html>\n*c*', '<!DOCTYPE html>'],
+      ['<![CDATA[\n\n]]>\n*c*', '<![CDATA[\n\n]]>'],
+      ['<TABLE><tr><td>\n#51\n\n*c*', '<TABLE><tr><td>\n#51'],
+      ['<custom-tag a="#51">\n#51\n\n*c*', '<custom-tag a="#51">\n#51'],
+    ]) {
+      const blocks = parseArticle(src!, [r51]);
+      expect(blocks[0], src).toEqual({ type: 'html', text: html });
+      expect(blocks.slice(1), src).toEqual([{ type: 'paragraph', content: [{ text: 'c', italic: true }] }]);
+    }
+    // Unended, it runs to the end of what contains it.
+    expect(parseArticle('<!--\n*a*\n\n*b*', [])).toEqual([{ type: 'html', text: '<!--\n*a*\n\n*b*' }]);
+    // The first six cut a paragraph short. The seventh, a tag alone on its
+    // line, does not, and is an inline tag in the paragraph it is in.
+    expect(parseArticle('text\n<div>\n#51', [r51])).toEqual<MdBlock[]>([
+      { type: 'paragraph', content: [{ text: 'text' }] },
+      { type: 'html', text: '<div>\n#51' },
+    ]);
+    expect(parseArticle('text\n<custom>\n#51', [r51])).toEqual([
+      { type: 'paragraph', content: [{ text: 'text\n' }, { text: '<custom>', html: true }, { text: '\n' }, { text: '#51', ref: r51 }] },
+    ]);
+    // In a container as anywhere else, and in the excerpt as typed.
+    expect(parseArticle('> <div>\n> *x*', [])).toEqual([{ type: 'quote', children: [{ type: 'html', text: '<div>\n*x*' }] }]);
+    expect(blocksText(parseArticle('<p>\nhi\n</p>', []))).toBe('<p>\nhi\n</p>');
+    // Chat has no HTML blocks; GtkHx reads the markdown in them.
+    expect(parseChat('<div>\n**b**')).toEqual([{ type: 'paragraph', content: [{ text: '<div>\n' }, { text: 'b', bold: true }] }]);
+  });
+
+  it('reads CommonMark destinations in an article: parentheses, angle brackets, titles', () => {
+    const runs = (src: string) => (parseArticle(src, [])[0] as { content: MdRun[] }).content;
+    expect(runs('[Foo](https://en.wikipedia.org/wiki/Foo_(bar))')).toEqual([
+      { text: 'Foo', href: 'https://en.wikipedia.org/wiki/Foo_(bar)' },
+    ]);
+    expect(runs('[a](<https://x.example/a b>)')).toEqual([{ text: 'a', href: 'https://x.example/a b' }]);
+    expect(runs(`[a](https://x.example "t") [b](https://y.example 't') [c]( https://z.example\n(t) )`)).toEqual([
+      { text: 'a', href: 'https://x.example' },
+      { text: ' ' },
+      { text: 'b', href: 'https://y.example' },
+      { text: ' ' },
+      { text: 'c', href: 'https://z.example' },
+    ]);
+    // Escapes and character references are resolved in a destination.
+    expect(runs('[a](https://x.example/\\(x&amp;y "a \\" b")')).toEqual([{ text: 'a', href: 'https://x.example/(x&y' }]);
+    // Unbalanced, or with anything after the title, it is no link.
+    for (const src of ['[a](https://x.example/(b)', '[a](https://x.example "t" x)', '[a](<https://x.example)']) {
+      expect(runs(src).some((r) => r.href !== undefined), src).toBe(false);
+    }
+    // Chat keeps GtkHx's reading, which ends at the first `)`.
+    expect(parseInline('[Foo](https://en.wikipedia.org/wiki/Foo_(bar))')).toEqual([
+      { text: 'Foo', href: 'https://en.wikipedia.org/wiki/Foo_(bar' },
+      { text: ')' },
+    ]);
+  });
+
+  it('reads a reference in every form the server records one', () => {
+    const r51 = ref(51);
+    const one = [{ type: 'paragraph', content: [{ text: 't', ref: r51 }] }];
+    for (const src of [
+      '[t](news:51 "t")',
+      '[t](<news:51>)',
+      '[t](NEWS:51)',
+      '![t](news:51)',
+      '[t][1]\n\n[1]: news:51',
+      '[1]: news:51\n[t][1]',
+      '[t][]\n\n[T]: news:51',
+      '[t]\n\n[t]: <news:51> "a title"',
+      '[t]\n\n[t]:\nnews:51\n"a title on its own line"',
+      '[t][x y]\n\n[X  Y]: news:51',
+      '[t]\n\n[t]: news:51\n[t]: https://x.example',
+      '![t][p]\n\n[p]: news:51',
+    ]) {
+      expect(parseArticle(src, [r51]), src).toEqual(one);
+    }
+    const runs = (src: string) => (parseArticle(src, [r51])[0] as { content: MdRun[] }).content;
+    expect(runs('<news:51> and <NEWS:51>')).toEqual([
+      { text: 'news:51', ref: r51 },
+      { text: ' and ' },
+      { text: 'NEWS:51', ref: r51 },
+    ]);
+    expect(runs('&#35;51, &#x23;51 and &num;51')).toEqual([
+      { text: '#51', ref: r51 },
+      { text: ', ' },
+      { text: '#51', ref: r51 },
+      { text: ' and ' },
+      { text: '#51', ref: r51 },
+    ]);
+    // Undefined, a reference is the characters typed; followed by a
+    // label, never a shortcut.
+    expect(runs('[t] [t][nope]\n\n[x]: news:51')).toEqual([{ text: '[t] [t][nope]' }]);
+  });
+
+  it('links the plain URL forms, an image included, and fetches nothing', () => {
+    const runs = (src: string) => (parseArticle(src, [])[0] as { content: MdRun[] }).content;
+    expect(runs('<https://x.example/a> <mailto:a@b.example> <a@b.example>')).toEqual([
+      { text: 'https://x.example/a', href: 'https://x.example/a' },
+      { text: ' ' },
+      { text: 'mailto:a@b.example', href: 'mailto:a@b.example' },
+      { text: ' ' },
+      { text: 'a@b.example', href: 'mailto:a@b.example' },
+    ]);
+    expect(runs('![alt](https://x.example/p.png) and [site][s]\n\n[s]: &#104;ttps://x.example')).toEqual([
+      { text: 'alt', href: 'https://x.example/p.png' },
+      { text: ' and ' },
+      { text: 'site', href: 'https://x.example' },
+    ]);
+    // Escaped, the `!` is text and what follows it an ordinary link.
+    expect(runs('\\![alt](https://x.example/p.png)')).toEqual([{ text: '!' }, { text: 'alt', href: 'https://x.example/p.png' }]);
+  });
+
+  it('decodes numeric character references and a common handful of named ones', () => {
+    const runs = (src: string) => (parseArticle(src, [])[0] as { content: MdRun[] }).content;
+    // `&lt;b&gt;` is the characters of a tag, not one; an unknown name
+    // and one this client does not carry both stay as typed; code is
+    // code.
+    expect(runs('&amp; &lt;b&gt; &copy; &mdash; &#x1F600; &#0; &frac12; &bogus; \\&amp; `&amp;`')).toEqual([
+      { text: '& <b> © — 😀 \uFFFD &frac12; &bogus; &amp; ' },
+      { text: '&amp;', code: true },
+    ]);
+    // Chat has none.
+    expect(parseInline('&amp;')).toEqual([{ text: '&amp;' }]);
+  });
+
+  it('holds every new way to a link to the same allowlist', () => {
+    // Refused, each is exactly what was typed.
+    for (const src of [
+      '<javascript:alert(1)>',
+      'x <JAVASCRIPT:alert(1)>',
+      '![x](javascript:alert(1))',
+      '[x](<javascript:alert(1)>)',
+      '[x](javascript:alert(1) "t")',
+      '[x](&#106;avascript:alert(1))',
+      '[x](&#x6A;avascript&colon;alert(1))',
+      '[x](data:text/html,<script>alert(1)</script>)',
+    ]) {
+      expect(parseArticle(src, []), src).toEqual([{ type: 'paragraph', content: [{ text: src }] }]);
+    }
+    // A definition is not drawn, and a reference to a refused one is the
+    // reference as typed.
+    for (const [src, shown] of [
+      ['[x]\n\n[x]: javascript:alert(1)', '[x]'],
+      ['[x][y]\n\n[y]: &#106;avascript:alert(1)', '[x][y]'],
+      ['[x]\n\n[x]: <java&#115;cript&#58;alert(1)>', '[x]'],
+      ['![x][y]\n\n[y]: data:image/png;base64,AAAA', '![x][y]'],
+      ['[x][]\n\n[x]: vbscript:msgbox', '[x][]'],
+    ]) {
+      expect(parseArticle(src!, []), src).toEqual([{ type: 'paragraph', content: [{ text: shown }] }]);
+    }
+  });
+
+  it('never makes a link the allowlist refuses, on random input', () => {
+    // Seeded, so a failure is the same failure on the next run.
+    let seed = 0x51f00d;
+    const rand = (n: number) => {
+      seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+      return seed % n;
+    };
+    const alphabet = ['[', ']', '(', ')', '<', '>', '!', ':', '\n', ' ', '"', '\\', '&#106;', '&colon;', '&#x', ';', '*', '`', 'java', 'script', 'news', 'https', '//x', '51', '#', 'a', '[a]: '];
+    const runsOf = (blocks: readonly MdBlock[]): MdRun[] =>
+      blocks.flatMap((b): MdRun[] => {
+        switch (b.type) {
+          case 'paragraph':
+          case 'heading':
+            return b.content;
+          case 'quote':
+            return runsOf(b.children);
+          case 'list':
+            return b.items.flatMap(runsOf);
+          case 'table':
+            return [...b.head, ...b.rows.flat()].flat();
+          default:
+            return [];
+        }
+      });
+    const r51 = ref(51);
+    for (let n = 0; n < 20000; n++) {
+      let src = '';
+      const len = 1 + rand(30);
+      for (let k = 0; k < len; k++) src += alphabet[rand(alphabet.length)];
+      for (const r of runsOf(parseArticle(src, [r51]))) {
+        if (r.href !== undefined) expect(schemeAllowed(r.href), JSON.stringify(src)).toBe(true);
+        if (r.ref) expect(r.ref, JSON.stringify(src)).toBe(r51);
+      }
+    }
+  });
+
+  it('stays fast on links and references that never close', () => {
+    const started = performance.now();
+    for (const src of [
+      '[a](<b'.repeat(9000),
+      '[a](b "'.repeat(9000),
+      '[a](b ('.repeat(9000),
+      '[a]((('.repeat(9000),
+      `${'[a]('.repeat(9000)}${')'.repeat(9000)}`,
+      '<a:'.repeat(20000),
+      '<a@'.repeat(20000),
+      '&#'.repeat(20000),
+      '*<a:b>'.repeat(10000),
+      '[<a:b>'.repeat(10000),
+      `${'[a]: b\n'.repeat(5000)}[a]`,
+      `${'[a]'.repeat(20000)}\n\n[a]: https://x.example`,
+      `[a]: b "${'x\n'.repeat(20000)}`,
+    ]) {
+      parseInline(src, { refs: [] });
+      parseArticle(src, []);
+    }
+    expect(performance.now() - started).toBeLessThan(2000);
   });
 
   it('draws a link with a disallowed scheme as it was typed, label and all', () => {

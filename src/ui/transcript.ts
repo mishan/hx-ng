@@ -18,26 +18,38 @@ import { continuesRun, type Conversation, type Line } from '../state';
 import type { Store } from '../state';
 import { clock, fill, h, linkify } from './dom';
 import { icon } from './icons';
+import { mediaEl, type MediaCache } from './media';
 
 /** Chat-gutter icons stay at 1× — at 2× they compete with the text for
  *  attention, and the roster is where you go to look at people. */
 const CHAT_SCALE = 1;
 
-export function renderTranscript(el: HTMLElement, conv: Conversation, store: Store): void {
+export function renderTranscript(
+  el: HTMLElement,
+  conv: Conversation,
+  store: Store,
+  media: MediaCache,
+): void {
   const nodes: HTMLElement[] = [];
   let prev: Line | undefined;
   for (const line of conv.lines) {
-    nodes.push(lineEl(line, prev, store));
+    nodes.push(lineEl(line, prev, store, media));
     prev = line;
   }
   fill(el, ...nodes);
   scrollToEnd(el);
 }
 
-export function appendLine(el: HTMLElement, line: Line, conv: Conversation, store: Store): void {
+export function appendLine(
+  el: HTMLElement,
+  line: Line,
+  conv: Conversation,
+  store: Store,
+  media: MediaCache,
+): void {
   const atBottom = isAtBottom(el);
   const prev = conv.lines[conv.lines.length - 2];
-  el.append(lineEl(line, prev, store));
+  el.append(lineEl(line, prev, store, media));
   while (el.childElementCount > conv.lines.length) el.firstElementChild?.remove();
   if (atBottom) scrollToEnd(el);
 }
@@ -58,8 +70,13 @@ function stamp(line: Line, prev: Line | undefined): string {
   return prev && clock(prev.t) === now ? '' : now;
 }
 
-function lineEl(line: Line, prev: Line | undefined, store: Store): HTMLElement {
-  if (line.kind !== 'chat') return eventLine(line, prev);
+function lineEl(
+  line: Line,
+  prev: Line | undefined,
+  store: Store,
+  media: MediaCache,
+): HTMLElement {
+  if (line.kind !== 'chat') return eventLine(line, prev, media);
 
   const from = line.from;
   const sameSpeaker = continuesRun(prev, line);
@@ -100,14 +117,17 @@ function lineEl(line: Line, prev: Line | undefined, store: Store): HTMLElement {
       // the reader's timezone rather than in UTC.
       line.queued ? h('span', { class: 'tag', title: 'Held by the server until you came back' }, 'queued') : null,
       ...linkify(line.text),
-      mediaTag(line),
+      // An image is a block under the text, not a word in it: a line
+      // may carry one with nothing said at all, which is a picture
+      // posted rather than an empty message.
+      line.media ? mediaEl(line.media, media) : null,
     ),
   );
 }
 
 /** Actions, notices, broadcasts and this client's own remarks all read
  *  as one column of asides rather than as chat with a strange name. */
-function eventLine(line: Line, prev: Line | undefined): HTMLElement {
+function eventLine(line: Line, prev: Line | undefined, media: MediaCache): HTMLElement {
   const text =
     line.kind === 'action'
       ? `${line.from?.nick ?? ''} ${line.text}`
@@ -122,18 +142,16 @@ function eventLine(line: Line, prev: Line | undefined): HTMLElement {
     h('span', { class: 'time' }, stamp(line, prev)),
     h('span', { class: 'gutter' }),
     h('span', { class: 'name' }, label),
-    h('span', { class: 'text' }, ...linkify(text), mediaTag(line)),
+    h(
+      'span',
+      { class: 'text' },
+      ...linkify(text),
+      // The same renderer a chat line gets. A redacted history row is
+      // the *only* line that ever carries `removed`, so drawing it any
+      // other way would leave that state with no renderer at all — and
+      // would say "image removed" in two visual languages depending on
+      // which kind of line it landed on.
+      line.media ? mediaEl(line.media, media) : null,
+    ),
   );
-}
-
-function mediaTag(line: Line): HTMLElement | null {
-  const media = line.media;
-  if (!media) return null;
-  // Three states a reader can tell apart: the server took the image
-  // down, the handle it would be fetched by has expired, or it is still
-  // there and this client cannot draw it yet. The metadata rides in the
-  // title either way — it is what the log keeps once the bytes are gone.
-  const label = media.removed ? 'image removed' : media.id ? 'image' : 'image unavailable';
-  const size = `${media.width}×${media.height}, ${media.bytes} bytes, ${media.type}`;
-  return h('span', { class: 'media-tag', title: size }, label);
 }

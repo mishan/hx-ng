@@ -12,6 +12,7 @@
  * afterwards — it is this hook, and it sees exactly what the socket saw.
  */
 
+import { wsToHttp } from './identity';
 import {
   isEvent,
   isReply,
@@ -26,8 +27,11 @@ import {
   type InboxCounts,
   type InboxOk,
   type InboxParams,
+  type ChatParams,
   type LoginOk,
   type LoginParams,
+  type Media,
+  type MediaLimits,
   type MsgOk,
   type MsgParams,
   type ReplyFrame,
@@ -39,6 +43,22 @@ import {
   type VideoConfig,
   type WireError,
 } from './protocol';
+
+/** Turn a refused media request into the same `WireFailure` every other
+ *  call throws, so a caller has one thing to catch. The body is the ng
+ *  error shape; a proxy's own error page is not, hence the fallback. */
+async function mediaFailure(res: Response): Promise<WireFailure> {
+  const fallback: WireError = {
+    code: res.status === 404 ? 'no_such_media' : 'server_error',
+    text: `The server answered ${res.status}.`,
+  };
+  try {
+    const body = (await res.json()) as { error?: WireError };
+    return new WireFailure(body.error ?? fallback);
+  } catch {
+    return new WireFailure(fallback);
+  }
+}
 
 export type ConnState =
   | 'offline'
@@ -103,6 +123,7 @@ interface Saved {
   grace: number | null;
   video: VideoConfig | null;
   historyId: number;
+  media: MediaLimits | null;
 }
 
 const SAVED_KEY = 'hxd-ng.session';
@@ -195,6 +216,9 @@ export class Connection {
   video: VideoConfig | null = null;
   /** Highest durable public-chat id observed on an event or page. */
   lastHistoryId = 0;
+  /** What this server takes as an image, from the same two places.
+   *  `null` means it takes none: no paperclip. */
+  media: MediaLimits | null = null;
   /** Round-trip time of the last explicit `ping`, in milliseconds. */
   rtt: number | null = null;
 
@@ -224,6 +248,7 @@ export class Connection {
       this.grace = saved.grace ?? null;
       this.video = saved.video ?? null;
       this.lastHistoryId = saved.historyId ?? 0;
+      this.media = saved.media ?? null;
     } else if (opts.resumeOnly) {
       throw new Error('no session to resume');
     }
@@ -344,6 +369,7 @@ export class Connection {
     this.seq = ok.seq ?? 0;
     this.login = ok;
     this.video = ok.video ?? null;
+    this.media = ok.media ?? null;
     // Only a session that may detach is worth remembering: without the
     // permission a resume can only ever answer session_expired, and
     // storing a token we know is useless just invites a confusing
@@ -600,6 +626,72 @@ export class Connection {
     return this.request<InboxCounts>('msg_read', { up_to: upTo });
   }
 
+  // --- inline media (docs/inline-media.md §8) ---------------------------
+
+  /**
+   * Send a public chat line, optionally with an image this session has
+   * already uploaded. `text` may be empty when there is one.
+   */
+  chat(params: ChatParams): Promise<Record<string, never>> {
+    return this.request('chat', params);
+  }
+
+  /**
+   * Upload an image and get its handle back.
+   *
+   * The bytes go over HTTP rather than through the socket: a 200 KB
+   * image base64'd into a JSON frame would be a third larger, would
+   * queue behind every event in the stream, and could not be uploaded at
+   * all by a client that had detached. The credential is this session's
+   * own, which is why the upload works while detached and stops working
+   * the moment the session does.
+   *
+   * The returned handle may be named on a `chat` or a `msg` from this
+   * session, for as long as the server keeps it. Each send captures its
+   * own audience, so naming it twice shows it to two sets of people
+   * rather than being refused.
+   */
+  async uploadMedia(image: Blob): Promise<Media> {
+    const res = await fetch(`${this.httpBase()}/media`, {
+      method: 'POST',
+      headers: { Authorization: this.bearer(), 'Content-Type': image.type },
+      body: image,
+    });
+    if (!res.ok) throw await mediaFailure(res);
+    const body = (await res.json()) as { media: Media };
+    return body.media;
+  }
+
+  /**
+   * Fetch an image's canonical bytes.
+   *
+   * Every failure is a 404 — no such handle, expired, revoked, or one
+   * this session was never shown — because a status that told them
+   * apart would be a way to ask whether a handle exists. A client's only
+   * useful response is the placeholder it was already drawing.
+   */
+  async fetchMedia(id: string): Promise<Blob> {
+    const res = await fetch(`${this.httpBase()}/media/${encodeURIComponent(id)}`, {
+      headers: { Authorization: this.bearer() },
+    });
+    if (!res.ok) throw await mediaFailure(res);
+    return res.blob();
+  }
+
+  /** The session's credential for the media routes: the public session
+   *  id and the secret token, joined by a dot. */
+  private bearer(): string {
+    if (!this.session || !this.token) throw new Error('not logged in');
+    return `Bearer ${this.session}.${this.token}`;
+  }
+
+  /** Where the HTTP routes are. Same origin as the socket — `wsToHttp`
+   *  answers with an empty string when that is the page's own origin,
+   *  which makes the fetch relative and keeps it out of CORS. */
+  private httpBase(): string {
+    return wsToHttp(this.creds.url);
+  }
+
   block(who: BlockParams): Promise<Record<string, never>> {
     return this.request('block', who);
   }
@@ -678,6 +770,7 @@ export class Connection {
       grace: this.grace,
       video: this.video,
       historyId: this.lastHistoryId,
+      media: this.media,
     });
   }
 

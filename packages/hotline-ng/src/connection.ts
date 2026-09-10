@@ -34,6 +34,20 @@ import {
   type MediaLimits,
   type MsgOk,
   type MsgParams,
+  type NewsArticle,
+  type NewsConfig,
+  type NewsNodeCreateParams,
+  type NewsNodeDeleteOk,
+  type NewsNodeOk,
+  type NewsPostOk,
+  type NewsPostParams,
+  type NewsRefsOk,
+  type NewsThreadOk,
+  type NewsThreadParams,
+  type NewsThreadsOk,
+  type NewsThreadsParams,
+  type NewsTreeOk,
+  type NewsTreeParams,
   type ReplyFrame,
   type ResumeOk,
   type SelfUser,
@@ -124,6 +138,7 @@ interface Saved {
   video: VideoConfig | null;
   historyId: number;
   media: MediaLimits | null;
+  news: NewsConfig | null;
 }
 
 const SAVED_KEY = 'hxd-ng.session';
@@ -221,6 +236,9 @@ export class Connection {
   /** What this server takes as an image, from the same two places.
    *  `null` means it takes none: no paperclip. */
   media: MediaLimits | null = null;
+  /** What this session may do with the server's news, from the same two
+   *  places. `null` means the server has none: no News view at all. */
+  news: NewsConfig | null = null;
   /** Round-trip time of the last explicit `ping`, in milliseconds. */
   rtt: number | null = null;
 
@@ -251,6 +269,7 @@ export class Connection {
       this.video = saved.video ?? null;
       this.lastHistoryId = saved.historyId ?? 0;
       this.media = saved.media ?? null;
+      this.news = saved.news ?? null;
     } else if (opts.resumeOnly) {
       throw new Error('no session to resume');
     }
@@ -372,6 +391,7 @@ export class Connection {
     this.login = ok;
     this.video = ok.video ?? null;
     this.media = ok.media ?? null;
+    this.news = ok.news ?? null;
     // Only a session that may detach is worth remembering: without the
     // permission a resume can only ever answer session_expired, and
     // storing a token we know is useless just invites a confusing
@@ -706,6 +726,64 @@ export class Connection {
     return this.request<BlocksOk>('blocks', {});
   }
 
+  // --- news (hxd-ng's docs/news.md §9) ----------------------------------
+  //
+  // Thin on purpose: every one of these is one request and its reply.
+  // What changed while a view was open arrives as `news_posted` and
+  // friends, which say "your copy is stale" and nothing more — whether
+  // to refetch is the caller's decision, because only it knows what it
+  // is showing.
+
+  /** The tree under `parent` (the root when absent), `depth` levels deep. */
+  newsTree(params: NewsTreeParams = {}): Promise<NewsTreeOk> {
+    return this.request<NewsTreeOk>('news_tree', params);
+  }
+
+  /** One category's threads, newest first. */
+  newsThreads(params: NewsThreadsParams): Promise<NewsThreadsOk> {
+    return this.request<NewsThreadsOk>('news_threads', params);
+  }
+
+  /** A thread in reading order, paged forward with `after`. */
+  newsThread(params: NewsThreadParams): Promise<NewsThreadOk> {
+    return this.request<NewsThreadOk>('news_thread', params);
+  }
+
+  async newsArticle(id: number): Promise<NewsArticle> {
+    const ok = await this.request<{ article: NewsArticle }>('news_article', { id });
+    return ok.article;
+  }
+
+  /** Post an article, or a reply when `parent` is set. The article shows
+   *  up for everyone — its author included — through `news_posted`. */
+  newsPost(params: NewsPostParams): Promise<NewsPostOk> {
+    return this.request<NewsPostOk>('news_post', params);
+  }
+
+  /** Delete an article, leaving its tombstone in the thread. `reason` is
+   *  for the moderation record, when it is someone else's article; a
+   *  server may take it and not yet keep it. */
+  newsDelete(id: number, reason?: string): Promise<Record<string, never>> {
+    return this.request('news_delete', reason === undefined ? { id } : { id, reason });
+  }
+
+  /** The articles whose bodies point at this one. */
+  newsRefs(id: number, limit?: number): Promise<NewsRefsOk> {
+    return this.request<NewsRefsOk>('news_refs', limit === undefined ? { id } : { id, limit });
+  }
+
+  newsNodeCreate(params: NewsNodeCreateParams): Promise<NewsNodeOk> {
+    return this.request<NewsNodeOk>('news_node_create', params);
+  }
+
+  newsNodeRename(id: number, name: string): Promise<Record<string, never>> {
+    return this.request('news_node_rename', { id, name });
+  }
+
+  newsNodeDelete(id: number): Promise<NewsNodeDeleteOk> {
+    return this.request<NewsNodeDeleteOk>('news_node_delete', { id });
+  }
+
   async ping(): Promise<number> {
     const t0 = performance.now();
     await this.request('ping', {});
@@ -773,6 +851,7 @@ export class Connection {
       video: this.video,
       historyId: this.lastHistoryId,
       media: this.media,
+      news: this.news,
     });
   }
 

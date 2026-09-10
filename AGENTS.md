@@ -9,7 +9,7 @@
 ## What this is
 
 A browser client for the **Hotline-ng** wire: chat, the user list, private
-messages, voice and video. Static files, no server-side anything, no
+messages, threaded news, voice and video. Static files, no server-side anything, no
 runtime dependencies. It never speaks the legacy wire, and a server cannot
 tell it apart from any other ng client.
 

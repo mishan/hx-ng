@@ -38,6 +38,7 @@
  */
 
 export * from './protocol.js';
+export * from './news.js';
 export * from './identity.js';
 export {
   Connection,

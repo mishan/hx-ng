@@ -231,6 +231,9 @@ export interface LoginOk {
   /** Present exactly when `caps` lists `media`. Absent means no images:
    *  do not draw the paperclip. */
   media?: MediaLimits;
+  /** Present exactly when `caps` lists `news`: what this session may do
+   *  there, and the ceilings it will be held to. */
+  news?: NewsConfig;
 }
 
 export interface ResumeParams {
@@ -441,6 +444,192 @@ export function isFingerprint(s: string): boolean {
   return s.length === FINGERPRINT_CHARS && /^[0-9a-z]+$/i.test(s);
 }
 
+// --- News (hxd-ng's docs/news.md §9) -------------------------------------
+
+/** A bundle holds bundles and categories; a category holds articles and
+ *  nothing else. The 1.5 wire's rules, kept so the two wires are one
+ *  tree. */
+export type NewsNodeKind = 'bundle' | 'category';
+
+export interface NewsNode {
+  id: number;
+  /** `null` for a node at the root of the tree. */
+  parent: number | null;
+  kind: NewsNodeKind;
+  /** Unique among its siblings. */
+  name: string;
+  /** Sub-nodes for a bundle; live articles for a category. */
+  count: number;
+  /** Unix seconds. */
+  created_at: number;
+  /** Present on a bundle the request's `depth` reached into. */
+  children?: NewsNode[];
+}
+
+/** Who wrote an article, as they were when they wrote it: a rename
+ *  later does not rewrite it. `login` and `fingerprint` are absent for a
+ *  guest, and both are absent — with `nick` empty — on a tombstone. */
+export interface NewsAuthor {
+  nick: string;
+  login?: string;
+  /** 52 characters, Crockford base32. */
+  fingerprint?: string;
+}
+
+/**
+ * Where a body's `#51` pointed, resolved once when it was posted and
+ * reported as the target stands now. A deleted target says so and
+ * nothing else — the link stays, and says it leads nowhere.
+ */
+export interface NewsReference {
+  id: number;
+  /** Absent when the target is deleted. */
+  subject?: string;
+  /** The target's author's nick. Absent when the target is deleted. */
+  from?: string;
+  at: number;
+  deleted: boolean;
+}
+
+/** An image on an article. Always an empty list on a server whose news
+ *  takes no attachments (`NewsConfig.attach`). */
+export interface NewsAttachment {
+  id: string;
+  type: string;
+  width: number;
+  height: number;
+  bytes: number;
+  name?: string;
+}
+
+export interface NewsArticle {
+  id: number;
+  category: number;
+  /** `null` for a thread's starter. */
+  parent: number | null;
+  /** Equal to `id` for a starter. */
+  root: number;
+  /** 0 for a starter. */
+  depth: number;
+  from: NewsAuthor;
+  subject: string;
+  /** Exactly as typed, LF line endings. Empty on a tombstone. */
+  body: string;
+  /** How to read `body`: `text/plain`, or `text/markdown` on a server
+   *  whose `NewsConfig.markdown` is not `off`. */
+  mime: string;
+  /** Unix seconds. */
+  at: number;
+  /** A tombstone keeps its id, place and time and loses its words. Its
+   *  replies stay where they are. */
+  deleted: boolean;
+  attachments: NewsAttachment[];
+  refs: NewsReference[];
+  /** How many articles point at this one; `newsRefs` lists them. */
+  referenced_by: number;
+}
+
+/** A thread as a listing shows it: the starter whole, and what happened
+ *  to it since. */
+export interface NewsThread {
+  article: NewsArticle;
+  /** Everything under the starter, tombstones included. */
+  replies: number;
+  last_at: number;
+  last_id: number;
+}
+
+/** The login reply's `news` block, present exactly when `caps` lists
+ *  `news`. `post` and `attach` are *this session's* permissions, so a
+ *  compose button can be grayed out before anyone types. */
+export interface NewsConfig {
+  post: boolean;
+  attach: boolean;
+  max_body: number;
+  max_subject: number;
+  /** Reply nesting. A reply to an article this deep is refused. */
+  max_depth?: number;
+  markdown: 'render' | 'source' | 'off';
+  body_types: string[];
+  max_refs: number;
+  search: boolean;
+}
+
+export interface NewsTreeParams {
+  /** Absent for the root. */
+  parent?: number;
+  /** 1–4, default 1. */
+  depth?: number;
+}
+
+export interface NewsTreeOk {
+  nodes: NewsNode[];
+}
+
+/** One category's threads, **newest first**. `before` pages toward
+ *  older threads and `after` toward newer ones, both exclusive; either
+ *  way `has_more` is about the direction asked. */
+export interface NewsThreadsParams {
+  category: number;
+  before?: number;
+  after?: number;
+  /** 1–200, default 50. */
+  limit?: number;
+}
+
+export interface NewsThreadsOk {
+  threads: NewsThread[];
+  has_more: boolean;
+}
+
+/** A thread in reading order: every reply directly under the article it
+ *  answers, siblings oldest first. `after` is an article in the thread. */
+export interface NewsThreadParams {
+  root: number;
+  after?: number;
+  /** 1–100, default 25. */
+  limit?: number;
+}
+
+export interface NewsThreadOk {
+  articles: NewsArticle[];
+  has_more: boolean;
+}
+
+export interface NewsPostParams {
+  category: number;
+  /** The article this replies to, which must be in the same category. */
+  parent?: number;
+  subject: string;
+  body: string;
+  /** Default `text/plain`. */
+  mime?: string;
+}
+
+export interface NewsPostOk {
+  id: number;
+}
+
+export interface NewsRefsOk {
+  /** The articles pointing at this one, newest first. */
+  referenced_by: NewsReference[];
+}
+
+export interface NewsNodeCreateParams {
+  parent?: number;
+  kind: NewsNodeKind;
+  name: string;
+}
+
+export interface NewsNodeOk {
+  node: NewsNode;
+}
+
+export interface NewsNodeDeleteOk {
+  /** How many articles went with it. */
+  articles: number;
+}
+
 // --- Voice --------------------------------------------------------------
 
 export interface VoiceParticipant {
@@ -537,6 +726,28 @@ export interface Events {
    *  The line that carried it keeps its metadata, so the right response
    *  is to drop the picture and leave the placeholder. */
   media_revoked: { id: string };
+  /**
+   * An article was posted somewhere this session may read. **Cache
+   * invalidation, not a notification**: it goes to every reader, so a
+   * view holding that category or thread refreshes and nothing raises a
+   * badge. It carries a header rather than the article because the
+   * cheap refresh is usually no refetch at all.
+   */
+  news_posted: {
+    id: number;
+    category: number;
+    root: number;
+    parent: number | null;
+    subject: string;
+    from: { nick: string };
+    at: number;
+    attachments: number;
+  };
+  /** An article became a tombstone. */
+  news_deleted: { id: number; category: number };
+  /** A bundle or category was created or renamed. */
+  news_node: { node: NewsNode };
+  news_node_deleted: { id: number };
   /** The server's placeholder for a domain event this protocol revision
    *  has no mapping for. It exists so `seq` never has holes; a client's
    *  only correct response is to count it and move on. */
@@ -563,6 +774,7 @@ export const CAP_INBOX = 'inbox';
 export const CAP_IDENTITY = 'identity';
 export const CAP_HISTORY = 'history';
 export const CAP_MEDIA = 'media';
+export const CAP_NEWS = 'news';
 
 /**
  * `resync_required` is not a failure: the session is still alive and the
@@ -601,6 +813,17 @@ export const ERROR_TEXT: Record<string, string> = {
   blocked: 'That user is not accepting messages from you.',
   denied: 'This server would not admit you.',
   name_reserved: 'That name is reserved for somebody else on this server.',
+  // News. `no_news` is about the server and `access_denied` about you,
+  // which is the difference between hiding the button and graying it.
+  no_news: 'This server has no news.',
+  no_such_node: 'That bundle or category is gone.',
+  no_such_article: 'That article is gone.',
+  not_a_category: 'Articles go in categories, and categories hold only articles.',
+  wrong_category: 'A reply goes in the category of the article it answers.',
+  too_deep: 'That is nested as deep as this server allows.',
+  name_taken: 'Something there already has that name.',
+  not_empty: 'That bundle still holds something. Empty it first.',
+  bad_body_type: 'This server takes plain-text articles only.',
   server_error: 'The server had a problem with that. It has been logged.',
 };
 

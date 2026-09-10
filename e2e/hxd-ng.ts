@@ -67,10 +67,20 @@ async function waitForPort(url: string, timeoutMs: number): Promise<void> {
   throw new Error(`${url} did not answer within ${timeoutMs}ms: ${String(lastError)}`);
 }
 
-/** Starts a freshly built `hxd` in a throwaway directory: a guest-only,
- *  unattested identity server — enough to exercise enrollment and login
- *  without also needing a registrar or an existing account. */
-export async function startServer(ngPort: number): Promise<RunningServer> {
+export interface ServerOptions {
+  /** The config sections after `[server]`, `[paths]` and `[ng]`. Absent,
+   *  the server is the guest-only identity one described below. */
+  sections?: string;
+  /** Account files by login, written once the server has bootstrapped
+   *  its own directory — it reads that directory on every login, so
+   *  they are live for the first one. */
+  accounts?: Record<string, string>;
+}
+
+/** Starts a freshly built `hxd` in a throwaway directory. By default a
+ *  guest-only, unattested identity server — enough to exercise enrollment
+ *  and login without also needing a registrar or an existing account. */
+export async function startServer(ngPort: number, opts: ServerOptions = {}): Promise<RunningServer> {
   const dir = mkdtempSync(join(tmpdir(), 'hxd-ng-e2e-'));
   writeFileSync(
     join(dir, 'hxd-ng.toml'),
@@ -84,7 +94,34 @@ accounts = "accounts"
 
 [ng]
 bind = "127.0.0.1:${ngPort}"
+${opts.sections ?? IDENTITY_SECTIONS}`,
+  );
+  const proc: ChildProcessWithoutNullStreams = spawn(bin('hxd'), ['--config', 'hxd-ng.toml'], {
+    cwd: dir,
+    stdio: 'pipe',
+  });
+  let log = '';
+  proc.stdout.on('data', (d: Buffer) => (log += d.toString()));
+  proc.stderr.on('data', (d: Buffer) => (log += d.toString()));
+  proc.on('exit', (code) => {
+    if (code !== null && code !== 0) console.error(`hxd exited ${code}:\n${log}`);
+  });
 
+  const httpBase = `http://127.0.0.1:${ngPort}`;
+  await waitForPort(`${httpBase}/.well-known/hotline`, 10_000);
+  for (const [login, toml] of Object.entries(opts.accounts ?? {})) {
+    writeFileSync(join(dir, 'accounts', `${login}.toml`), toml);
+  }
+
+  return {
+    wsUrl: `${httpBase.replace('http://', 'ws://')}/ng`,
+    httpBase,
+    hlidDir: dir,
+    stop: () => proc.kill(),
+  };
+}
+
+const IDENTITY_SECTIONS = `
 [identity]
 key = "identity-server.key"
 new_accounts = "guest"
@@ -103,29 +140,7 @@ web = "http://localhost:5701/"
 # worked around, because the alternative — a server per test — would
 # cost more than it proves.
 enroll_per_address = 64
-`,
-  );
-  const proc: ChildProcessWithoutNullStreams = spawn(bin('hxd'), ['--config', 'hxd-ng.toml'], {
-    cwd: dir,
-    stdio: 'pipe',
-  });
-  let log = '';
-  proc.stdout.on('data', (d: Buffer) => (log += d.toString()));
-  proc.stderr.on('data', (d: Buffer) => (log += d.toString()));
-  proc.on('exit', (code) => {
-    if (code !== null && code !== 0) console.error(`hxd exited ${code}:\n${log}`);
-  });
-
-  const httpBase = `http://127.0.0.1:${ngPort}`;
-  await waitForPort(`${httpBase}/.well-known/hotline`, 10_000);
-
-  return {
-    wsUrl: `${httpBase.replace('http://', 'ws://')}/ng`,
-    httpBase,
-    hlidDir: dir,
-    stop: () => proc.kill(),
-  };
-}
+`;
 
 /**
  * `hlid enroll`, which does not exit until a device asks — so unlike

@@ -57,6 +57,7 @@ import { takeScanFragment, type Scanned } from '../identity/scan';
 import { renderRoster } from './roster';
 import { Tiles } from './tiles';
 import { MediaCache } from './media';
+import { NewsView } from './news';
 import { appendLine, isAtBottom, renderTranscript, scrollToEnd } from './transcript';
 
 /** Codes that mean "not for you, not now, not ever on this session":
@@ -146,6 +147,18 @@ export class App {
    *  cannot write each other's answers. */
   private readCursor = new Cursor();
   private meButton = h('button', { class: 'identity', title: 'Change your icon' });
+  /** Transcript, attachment chip and composer: the half of the main
+   *  column the news reader takes the place of while it is open. */
+  private chatPane = h('div', { class: 'chat-pane' });
+  private news = new NewsView({
+    conn: () => this.conn,
+    // An identity login says which account it landed on; a classic one
+    // is the account that was typed. A guest is nobody either way.
+    me: () => this.conn?.self?.identity?.account ?? this.account,
+  });
+  private newsOpen = false;
+  /** The account typed at the connect form, or `null` for a guest. */
+  private account: string | null = null;
 
   constructor(
     private root: HTMLElement,
@@ -240,6 +253,13 @@ export class App {
     // the last one left on the strip belongs to a peer connection that
     // no longer exists.
     this.tiles.clear();
+    // Likewise the news reader: what it held was read through the last
+    // session, and this one may not be allowed to see it.
+    this.news.reset();
+    this.newsOpen = false;
+    this.store.covered = false;
+    this.chatPane.hidden = false;
+    this.account = d.login.trim() || null;
     const creds: Credentials = { ...d };
     const conn = new Connection(creds, {
       onTrace: (e) => this.debug.push(e),
@@ -266,6 +286,9 @@ export class App {
         this.store.server = server;
         this.store.replaceRoster(users);
         this.renderAll();
+        // A snapshot after the first is a resync or a fresh login on the
+        // same socket, and either way the news events in between are gone.
+        this.news.onReconnected();
       },
       onResumed: (replay) => {
         this.say(
@@ -273,6 +296,9 @@ export class App {
             ? `Reconnected — ${replay} ${replay === 1 ? 'message' : 'messages'} replayed.`
             : 'Reconnected.',
         );
+        // A refresh tried while the socket was down could only say "not
+        // connected", and nothing would ever try again.
+        this.news.onReconnected();
       },
       onMissedMail: (ok) => {
         const n = this.mergeStoredMail(ok);
@@ -295,6 +321,10 @@ export class App {
         // seen, and nothing could refetch them anyway.
         this.images.clear();
         this.clearAttachment();
+        // The news reader goes with the session it read through, and the
+        // chat pane comes back so the reason just said is on screen.
+        this.news.reset();
+        this.showNews(false);
         // The paperclip goes with the session it belonged to. Left up,
         // it opens a picker whose upload can only fail with "not logged
         // in" — inert chrome saying something this client cannot do.
@@ -441,6 +471,15 @@ export class App {
       this.renderRail();
       this.renderMail();
     });
+
+    // News events say "your copy is stale", to every reader. They are not
+    // notifications — nothing here raises a badge — so all they do is
+    // have the reader refresh what it shows, or remember to when next
+    // opened.
+    conn.on('news_posted', (d) => this.news.onPosted(d));
+    conn.on('news_deleted', (d) => this.news.onDeleted(d));
+    conn.on('news_node', (d) => this.news.onNode(d));
+    conn.on('news_node_deleted', (d) => this.news.onNodeDeleted(d));
 
     conn.on('notice', (d) => {
       this.push(LOBBY, { t: Date.now(), kind: 'notice', text: d.text });
@@ -660,6 +699,9 @@ export class App {
       }
       case 'mail':
         return this.loadMail();
+      case 'news':
+        if (!conn.news) return this.say('This server has no news.');
+        return this.showNews(true);
       case 'history':
         if (!conn.hasCap(CAP_HISTORY)) return this.say('This server does not keep chat history.');
         if (this.historyRefused) return this.say('This server will not show you its chat history.');
@@ -738,7 +780,7 @@ export class App {
         return;
       case 'help':
         return this.say(
-          '/me · /msg <nick or account> <text> · /history · /mail · /block <who> · /unblock <who> · /blocks · ' +
+          '/me · /msg <nick or account> <text> · /history · /mail · /news · /block <who> · /unblock <who> · /blocks · ' +
             '/nick <name> · /icon <n> · /clear · /close · /drop · /debug · /logout',
         );
       default:
@@ -760,13 +802,26 @@ export class App {
     const conv = this.store.conversation(id);
     if (!conv) return;
     this.store.active = id;
-    conv.unread = 0;
+    // Closing the news reader sees what it uncovers, so this one goes
+    // first: the conversation the reader was covering has still not
+    // been looked at.
+    if (this.newsOpen) this.showNews(false);
+    else this.seen(conv);
     this.renderRail();
     this.renderTranscript();
     this.renderComposerHint();
     this.composer.focus();
-    // Reading is a thing the server keeps for us, so tell it. Failure is
-    // worth a line but not worth interrupting the selection over.
+  }
+
+  /** The reader is looking at this conversation now: its badge goes, and
+   *  so does its share of the count in the title. */
+  private seen(conv: Conversation): void {
+    conv.unread = 0;
+    this.renderUnreadTitle();
+    // Reading is a thing the server keeps for us, so tell it — while
+    // there is a session to tell. Failure is worth a line but not worth
+    // interrupting the selection over.
+    if (this.conn?.state !== 'online') return;
     this.markRead(conv).catch((e: Error) =>
       this.say(e instanceof WireFailure ? errorText(e.wire) : e.message),
     );
@@ -778,6 +833,24 @@ export class App {
     this.renderRail();
     this.renderTranscript();
     this.renderComposerHint();
+  }
+
+  // --- news -------------------------------------------------------------
+
+  /** Swap the chat pane for the news reader, or back. The call bar and the
+   *  video tiles sit above both, so a call carries on whichever is shown. */
+  private showNews(open: boolean): void {
+    const was = this.newsOpen;
+    this.newsOpen = open;
+    // The conversation the reader covers stays the active one, and what
+    // arrives in it while nobody can see it is unread like anywhere else.
+    this.store.covered = open;
+    this.chatPane.hidden = open;
+    this.news.show(open);
+    // Coming back to it is looking at it, the same as picking it.
+    const conv = this.store.conversation(this.store.active);
+    if (was && !open && conv) this.seen(conv);
+    this.renderRail();
   }
 
   // --- public chat history ---------------------------------------------
@@ -1002,7 +1075,10 @@ export class App {
       // drawn from. A merge rewrites that array, so redraw instead.
       if (this.store.revision !== this.drawnRevision) this.renderTranscript();
       else appendLine(this.transcript, line, conv, this.store, this.images);
-    } else this.renderRail();
+    }
+    // The active conversation's badge moves too while the news reader
+    // covers it.
+    if (id !== this.store.active || this.store.covered) this.renderRail();
     this.renderUnreadTitle();
   }
 
@@ -1059,7 +1135,7 @@ export class App {
 
   private renderRail(): void {
     const items = [...this.store.conversations.values()].map((c) => {
-      const active = c.id === this.store.active;
+      const active = !this.newsOpen && c.id === this.store.active;
       // Only a conversation whose other half is on the roster has a face
       // to show. One carried by an account alone — mail from someone who
       // is not here — falls back to the default icon.
@@ -1084,7 +1160,22 @@ export class App {
       }
       return el;
     });
-    fill(this.rail, h('div', { class: 'rail-head' }, 'Conversations'), ...items);
+    // News sits under the lobby: it is the server's, like the lobby, and
+    // not a conversation with anyone. Only where the server has some and
+    // the session is still there to read it through.
+    const conn = this.conn;
+    let news: HTMLElement | null = null;
+    if (conn?.news && conn.state !== 'offline') {
+      news = h(
+        'button',
+        { class: `rail-item${this.newsOpen ? ' on' : ''}` },
+        h('span', { class: 'rail-glyph' }, '¶'),
+        h('span', { class: 'rail-title' }, 'News'),
+      );
+      news.onclick = () => this.showNews(true);
+    }
+    const [lobby, ...rest] = items;
+    fill(this.rail, h('div', { class: 'rail-head' }, 'Conversations'), lobby, news, ...rest);
   }
 
   private renderRoster(): void {
@@ -1296,6 +1387,15 @@ export class App {
       if (pinned) scrollToEnd(this.transcript);
     }).observe(this.transcript);
 
+    this.chatPane.append(
+      this.transcript,
+      // The chip sits above the composer rather than inside it: the
+      // composer is one row of controls, and an attachment is a thing
+      // already sent to the server that the next line will carry.
+      this.attachChip,
+      h('div', { class: 'composer' }, this.attachBtn, this.composer, this.composerHint, this.filePicker),
+    );
+
     this.shell.append(
       h(
         'header',
@@ -1322,20 +1422,10 @@ export class App {
           // the tile renderer, which is the only thing that knows what a
           // browser needs before it will paint a `<video>`.
           this.tiles.el,
-          this.transcript,
-          // The chip sits above the composer rather than inside it: the
-          // composer is one row of controls, and an attachment is a
-          // thing already sent to the server that the next line will
-          // carry.
-          this.attachChip,
-          h(
-            'div',
-            { class: 'composer' },
-            this.attachBtn,
-            this.composer,
-            this.composerHint,
-            this.filePicker,
-          ),
+          // The chat pane and the news reader take turns in the rest of
+          // the column; exactly one of them is shown.
+          this.chatPane,
+          this.news.el,
         ),
         // Both live inside `.panes` rather than the document, so the
         // slide-in panel is bounded by the pane area and never covers
@@ -1406,6 +1496,7 @@ export class App {
       'detach grace': c?.grace !== null && c?.grace !== undefined ? `${c.grace}s` : 'not permitted',
       caps: c?.caps ?? [],
       'video limits': c?.video ?? null,
+      news: c?.news ?? null,
       server: this.store.server.name,
       subject: this.store.server.subject,
       roster: this.store.users.size,

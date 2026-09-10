@@ -9,8 +9,9 @@
  * screen, in chat and in an article alike.
  *
  * Bare URLs are still `linkify`'s, and only in plain prose: never inside
- * code, where a URL is being shown rather than offered, and never inside
- * a link's own label.
+ * code, where a URL is being shown rather than offered, never inside a
+ * link's own label, and never inside an article's raw-HTML tag, which is
+ * no more prose here than it is to the server.
  */
 
 import { parseChat, type MdBlock, type MdRun, type NewsReference } from '@hotline-ng/client';
@@ -43,7 +44,7 @@ function withBreaks(parts: (Node | string)[]): (Node | string)[] {
 function styled(r: MdRun, autolink: boolean): (Node | string)[] {
   let nodes: (Node | string)[] = r.code
     ? [h('code', { class: 'md-code' }, r.text)]
-    : withBreaks(autolink ? linkify(r.text) : [r.text]);
+    : withBreaks(autolink && !r.html ? linkify(r.text) : [r.text]);
   if (r.strike) nodes = [h('s', {}, ...nodes)];
   if (r.italic) nodes = [h('em', {}, ...nodes)];
   if (r.bold) nodes = [h('strong', {}, ...nodes)];

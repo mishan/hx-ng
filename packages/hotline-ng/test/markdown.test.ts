@@ -121,6 +121,16 @@ describe('chat inline, as GtkHx has it', () => {
     ]) {
       expect(parseInline(src), src).toEqual([{ text: src }]);
     }
+    // GtkHx steps past the `[` and reads on, so a label's emphasis is
+    // still drawn between the literal brackets. Its chat-view.md says
+    // the whole construct is literal; its scanner, which this ports,
+    // does this.
+    expect(parseInline('[**x**](javascript:y)')).toEqual([{ text: '[' }, { text: 'x', bold: true }, { text: '](javascript:y)' }]);
+  });
+
+  it('has no raw HTML: a tag is characters, and markdown inside it is read', () => {
+    expect(styled(parseInline('<b title="**x**">'))).toEqual([['x', 'bold']]);
+    expect(parseInline('<b>').some((r) => r.html)).toBe(false);
   });
 
   it('keeps a label and a destination that disagree, for the reader to see', () => {
@@ -586,8 +596,58 @@ describe('articles', () => {
 
   it('draws images and raw HTML as the characters typed', () => {
     expect(parseArticle('![pixel](https://tracker.example/p.gif) <b>x</b>', [])).toEqual([
-      { type: 'paragraph', content: [{ text: '![pixel](https://tracker.example/p.gif) <b>x</b>' }] },
+      {
+        type: 'paragraph',
+        content: [
+          { text: '![pixel](https://tracker.example/p.gif) ' },
+          { text: '<b>', html: true },
+          { text: 'x' },
+          { text: '</b>', html: true },
+        ],
+      },
     ]);
+  });
+
+  it('reads a tag as the server does: prose between tags, nothing inside one', () => {
+    const r51 = ref(51);
+    const runs = (src: string) => (parseArticle(src, [r51])[0] as { content: MdRun[] }).content;
+    expect(runs('<b>#51</b> <a title="#51 *x*" href="https://x.example">')).toEqual([
+      { text: '<b>', html: true },
+      { text: '#51', ref: r51 },
+      { text: '</b>', html: true },
+      { text: ' ' },
+      { text: '<a title="#51 *x*" href="https://x.example">', html: true },
+    ]);
+    // Every inline shape CommonMark has, and each is one piece.
+    for (const tag of ['<!-- #51 -->', '<!-->', '<!--->', '<? #51 ?>', '<!DOCTYPE #51>', '<![CDATA[ #51 ]]>', '</a >', '<br/>', "<x a='#51' b=c>"]) {
+      expect(runs(`${tag} #51`), tag).toEqual([{ text: tag, html: true }, { text: ' ' }, { text: '#51', ref: r51 }]);
+    }
+    // Things that only look like tags are prose, and a `#51` in them is
+    // linked as anywhere else.
+    for (const src of ['a < b #51', '<3 #51', '<b #51', '<a title="x #51', '<!-- #51', '<!1 #51>', '<https://x.example> #51']) {
+      const got = runs(src);
+      expect(got.some((r) => r.html), src).toBe(false);
+      expect(text(got), src).toBe(src);
+      expect(got.filter((r) => r.ref).map((r) => r.text), src).toEqual(['#51']);
+    }
+    // Code wins over a tag, as it does over everything.
+    expect(runs('`<b>`')).toEqual([{ text: '<b>', code: true }]);
+  });
+
+  it('draws a link with a disallowed scheme as it was typed, label and all', () => {
+    expect(parseArticle('[**x**](javascript:y), [*y*](news:99) and [#51](data:z)', [ref(51)])).toEqual([
+      // An unresolved `news:` link is its label, as typed; a label is
+      // never read for emphasis.
+      { type: 'paragraph', content: [{ text: '[**x**](javascript:y), *y* and [' }, { text: '#51', ref: ref(51) }, { text: '](data:z)' }] },
+    ]);
+  });
+
+  it('stays fast on raw HTML that never closes', () => {
+    const started = performance.now();
+    for (const src of ['<!--'.repeat(15000), '<?'.repeat(30000), '<!x'.repeat(20000), '<![CDATA['.repeat(7000), '<a b="'.repeat(10000), '<a b=c '.repeat(9000)]) {
+      expect(text(parseInline(src, { refs: [] }))).toBe(src);
+    }
+    expect(performance.now() - started).toBeLessThan(2000);
   });
 
   it('links a news: reference only when the server resolved it', () => {

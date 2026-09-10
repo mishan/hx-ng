@@ -21,11 +21,17 @@
  * because nothing is ever interpreted as HTML; and images, because an
  * article's pictures are its attachments and a body that fetches a URL
  * reports every reader's address to a stranger. `![alt](url)` in an
- * article stays exactly the characters typed.
+ * article stays exactly the characters typed. An article still knows a
+ * tag when it sees one, as the server's parser does: `<a title="#51">`
+ * is one piece of literal text, and nothing inside it is emphasis, a
+ * link, a reference or a URL. Text *between* tags is prose like any other.
  *
- * **Links go only where a reader can see.** A `[label](url)` whose scheme
- * is not on the allowlist renders as the literal characters, brackets and
- * all, rather than as a link whose destination nobody can inspect.
+ * **Links go only where a reader can see.** In an article, a
+ * `[label](url)` whose scheme is not on the allowlist renders as the
+ * literal characters, brackets, label and all, rather than as a link
+ * whose destination nobody can inspect. In chat it is GtkHx's answer,
+ * which is not quite that: no link, and the brackets and destination
+ * stay as typed, but the label between them is read like any other text.
  *
  * **Pathological input is bounded.** Emphasis nests at most eight deep, so
  * a line of five thousand asterisks cannot recurse into the stack; block
@@ -59,6 +65,10 @@ export interface MdRun {
   /** An article reference the server resolved: a `news:51` link or a
    *  `#51`, in an article only. */
   ref?: NewsReference;
+  /** Raw HTML in an article — a tag, a comment — where CommonMark would
+   *  read one. Drawn as the characters typed, and nothing in it is a
+   *  link: not a `#51`, not a bare URL. */
+  html?: boolean;
 }
 
 export type MdAlign = 'left' | 'center' | 'right' | null;
@@ -102,8 +112,10 @@ const BOLD = 1;
 const ITALIC = 2;
 const CODE = 4;
 const STRIKE = 8;
+const HTML = 16;
 
 const BACKSLASH = 0x5c;
+const LT = 0x3c;
 const BACKTICK = 0x60;
 const STAR = 0x2a;
 const UNDERSCORE = 0x5f;
@@ -126,8 +138,9 @@ const isAlnum = (c: number): boolean =>
 /**
  * Schemes a `[label](url)` may point at: what GtkHx's URL detector
  * accepts, minus its bare-host autolink forms. Anything else —
- * `javascript:`, `data:`, `file:`, a scheme nobody recognizes — makes the
- * whole construct render as the literal characters typed.
+ * `javascript:`, `data:`, `file:`, a scheme nobody recognizes — is no
+ * link: in an article the whole construct is the literal characters
+ * typed, and in chat it is what GtkHx makes of it (see `scan`).
  */
 export function schemeAllowed(url: string): boolean {
   const lower = url.trim().toLowerCase();
@@ -171,6 +184,13 @@ const CHAT: Mode = { article: false, refs: new Map() };
 const UNKNOWN = -2;
 const FAIL = -1;
 
+/** CommonMark's open and closing tags (spec §6.6), whitespace spelled
+ *  out rather than `\s`, which would take Unicode spaces too. Sticky, so
+ *  a match starts where it is asked to. */
+const OPEN_TAG =
+  /<[A-Za-z][A-Za-z0-9-]*(?:[ \t\n\f\r]+[A-Za-z_:][A-Za-z0-9_.:-]*(?:[ \t\n\f\r]*=[ \t\n\f\r]*(?:[^ \t\n\f\r"'=<>`]+|'[^']*'|"[^"]*"))?)*[ \t\n\f\r]*\/?>/y;
+const CLOSE_TAG = /<\/[A-Za-z][A-Za-z0-9-]*[ \t\n\f\r]*>/y;
+
 /**
  * One string the scanner is working through, and what it has learned
  * about it.
@@ -188,6 +208,7 @@ class Source {
   private memos = new Map<string, Int32Array>();
   private runs: Map<number, number[]> | null = null;
   private brackets: Int32Array | null = null;
+  private found = new Map<string, [from: number, at: number]>();
 
   constructor(readonly s: string) {
     this.n = s.length;
@@ -355,6 +376,46 @@ class Source {
     return { label, href, end: urlEnd + 1 };
   }
 
+  /**
+   * The end of a raw-HTML tag at `at`, or -1: CommonMark's inline shapes
+   * — an open or closing tag, a comment, a processing instruction, a
+   * declaration, a CDATA section — which is what the server's parser
+   * sets apart as HTML and does not scan for `#51`. Nothing is made of
+   * it but that; it is drawn as typed.
+   */
+  htmlTag(at: number): number {
+    const s = this.s;
+    const after = (term: string, from: number) => {
+      const k = this.find(term, from);
+      return k < 0 ? -1 : k + term.length;
+    };
+    if (s.startsWith('<!--', at)) {
+      // `<!-->` and `<!--->` are whole comments, as CommonMark has it.
+      if (s.startsWith('>', at + 4)) return at + 5;
+      if (s.startsWith('->', at + 4)) return at + 6;
+      return after('-->', at + 4);
+    }
+    if (s.startsWith('<?', at)) return after('?>', at + 2);
+    if (s.startsWith('<![CDATA[', at)) return after(']]>', at + 9);
+    if (s.startsWith('<!', at)) return /[A-Za-z]/.test(s[at + 2] ?? '') ? after('>', at + 3) : -1;
+    for (const re of [OPEN_TAG, CLOSE_TAG]) {
+      re.lastIndex = at;
+      if (re.test(s)) return re.lastIndex;
+    }
+    return -1;
+  }
+
+  /** The next `term` at or after `from`, or -1. A scan asks with `from`
+   *  rising, so the last answer usually still holds, and a body of
+   *  unclosed `<!--` is not one search to the end for each. */
+  private find(term: string, from: number): number {
+    const last = this.found.get(term);
+    if (last && last[0] <= from && (last[1] < 0 || last[1] >= from)) return last[1];
+    const at = this.s.indexOf(term, from);
+    this.found.set(term, [from, at]);
+    return at;
+  }
+
   /** Each `[`'s balancing `]`, or -1. GtkHx counts depth forward from
    *  the bracket with a backslash skipping the next character; a stack
    *  over the whole string gives the same pairs in one pass. */
@@ -470,6 +531,21 @@ function scan(src: Source, base: number, target: Target | null, depth: number, o
       continue;
     }
 
+    // Raw HTML in an article: one opaque piece, as the server's parser
+    // reads it, so what is inside a tag is neither markdown nor a `#51`.
+    // It is still drawn as the characters typed. Chat has no such thing;
+    // GtkHx reads a `<` as a `<`.
+    if (c === LT && mode.article) {
+      const end = src.htmlTag(i);
+      if (end >= 0) {
+        flush(i);
+        out.push(s.slice(i, end), base | HTML, target);
+        i = end;
+        lit = i;
+        continue;
+      }
+    }
+
     if (depth < MAX_DEPTH) {
       // **bold** and ~~strike~~ — the two-character delimiters first, so
       // `**` is never an empty `*` pair.
@@ -525,9 +601,16 @@ function scan(src: Source, base: number, target: Target | null, depth: number, o
             lit = i;
             continue;
           }
-          // A scheme nobody can vouch for: the whole construct stays as
-          // typed, so the reader sees what was written rather than a
-          // link they cannot inspect.
+          // A scheme nobody can vouch for, so no link: the reader sees
+          // what was written rather than a link they cannot inspect. In
+          // an article the whole construct stays as typed, label and
+          // all. In chat this is GtkHx's answer, which steps past the
+          // `[` and reads on, so emphasis in the label is still drawn —
+          // a line has to look the same in both clients.
+          if (mode.article) {
+            i = link.end;
+            continue;
+          }
         }
         i += 1;
         continue;
@@ -545,6 +628,7 @@ function toRun(p: Piece): MdRun {
   if (p.attrs & ITALIC) run.italic = true;
   if (p.attrs & STRIKE) run.strike = true;
   if (p.attrs & CODE) run.code = true;
+  if (p.attrs & HTML) run.html = true;
   if (p.target?.href !== undefined) run.href = p.target.href;
   if (p.target?.ref) run.ref = p.target.ref;
   return run;
@@ -557,11 +641,12 @@ function inline(src: string, mode: Mode): MdRun[] {
   // The `#51` shorthand, by the server's own rule (`referenceSpans`), in
   // prose only. The server scans each stretch of text between two pieces
   // of markup on its own — never across an emphasis boundary, a link or a
-  // code span — which is exactly what one run is here.
+  // code span — which is exactly what one run is here. A raw-HTML tag is
+  // not prose to the server, and is not scanned.
   const refs = [...mode.refs.values()];
   return out.pieces.flatMap((p) => {
     const run = toRun(p);
-    if (run.code || p.target || refs.length === 0) return [run];
+    if (run.code || run.html || p.target || refs.length === 0) return [run];
     return referenceSpans(run.text, refs).map((span) => ({ ...run, text: span.text, ...('ref' in span ? { ref: span.ref } : {}) }));
   });
 }

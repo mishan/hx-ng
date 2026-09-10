@@ -128,7 +128,10 @@ function lineEl(
       // the reader's timezone rather than in UTC.
       line.queued ? h('span', { class: 'tag', title: 'Held by the server until you came back' }, 'queued') : null,
       // The body only: the nick is a name, and a name with asterisks in it
-      // is still that name.
+      // is still that name. Your own lines are drawn like anyone's, a
+      // private message's local echo included, so they look as they do
+      // to whoever reads them; what stays literal is this client's own
+      // notices and status lines, which are drawn in `eventLine`.
       ...(opts.markdown ? chatNodes(line.text) : linkify(line.text)),
       // An image is a block under the text, not a word in it: a line
       // may carry one with nothing said at all, which is a picture

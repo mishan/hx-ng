@@ -40,7 +40,9 @@ jobs:
   # just as easily as a change there. Running it on both sides is what
   # makes the arrangement mutual: a server regression reddens hxd-ng, a
   # client regression reddens this repo, and neither has to wait for the
-  # other to notice.
+  # other to notice. hxd-ng's own CI runs the suite against the client
+  # commit it pins (`e2e/hx-ng.rev`), so this job is where a client
+  # change first meets the server's current suite.
   #
   # It needs cargo and a release build, so it is its own job.
   server-e2e:

@@ -523,6 +523,8 @@ button.call:disabled { opacity: 0.45; cursor: default; }
   vertical-align: 1px;
 }
 .line.notice .text, .line.system .text { color: var(--muted); font-style: italic; }
+/* A news notification: the one notice that goes somewhere. */
+.line.notice a.news-notice { color: var(--link); }
 .line.deleted .text { color: var(--muted); font-style: italic; }
 .line.action .text { color: var(--accent); font-style: italic; }
 .line.broadcast .name { color: var(--admin); font-weight: 700; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.05em; padding-top: 0.2rem; }
@@ -532,6 +534,42 @@ button.call:disabled { opacity: 0.45; cursor: default; }
   padding: 0.05rem 0.4rem;
   margin: 0 -0.4rem;
 }
+
+/* --- markdown ----------------------------------------------------------- */
+
+/* Code needs a box, not a font (GtkHx learned it first): a monospace face
+   alone is easy to miss, and a span that only lost its backticks reads as
+   text that lost its backticks. Every tint is the theme's own text color
+   at low strength, so light and dark need no second palette to keep in
+   step. */
+.md-code {
+  font-family: var(--mono);
+  font-size: 0.88em;
+  padding: 0.05em 0.3em;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--text) 9%, transparent);
+}
+.md-pre {
+  font-family: var(--mono);
+  font-size: 0.85em;
+  line-height: 1.4;
+  margin: 0.2rem 0;
+  padding: 0.4rem 0.6rem;
+  border: 1px solid color-mix(in srgb, var(--text) 14%, transparent);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--text) 6%, transparent);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.md-pre code { font: inherit; }
+.md-quote {
+  margin: 0.15rem 0;
+  padding: 0 0 0 0.65rem;
+  border-left: 3px solid color-mix(in srgb, var(--text) 22%, transparent);
+  color: var(--muted);
+}
+.line .text a { color: var(--link); }
+.topbar button.ghost.on { border-color: var(--accent); color: var(--accent); }
 
 /* --- composer --------------------------------------------------------- */
 
@@ -1031,6 +1069,9 @@ button.ghost.danger:hover { color: var(--admin); border-color: var(--admin); }
 .news-node .glyph { color: var(--muted); width: 1rem; text-align: center; }
 .news-node .name { flex: 1; font-weight: 560; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .news-node .count { color: var(--muted); font-size: 0.75rem; white-space: nowrap; }
+.news-node .badge { align-self: center; }
+.news-following .glyph { color: var(--accent); }
+.news-node.muted .name { color: var(--muted); font-weight: 400; }
 
 .news-thread {
   display: grid;
@@ -1041,6 +1082,8 @@ button.ghost.danger:hover { color: var(--admin); border-color: var(--admin); }
   text-align: left;
 }
 .news-thread:hover { background: var(--surface-2); }
+.news-thread-head { display: flex; align-items: center; gap: 0.45rem; min-width: 0; }
+.news-thread-head .badge { margin-left: auto; }
 .news-thread-subject { font-weight: 600; }
 .news-thread.deleted .news-thread-subject { color: var(--muted); font-style: italic; font-weight: 400; }
 .news-thread-excerpt { color: var(--muted); font-size: 0.85rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -1065,6 +1108,31 @@ button.ghost.danger:hover { color: var(--admin); border-color: var(--admin); }
 .news-text { white-space: pre-wrap; margin-top: 0.3rem; line-height: 1.45; }
 .news-ref { color: var(--link); }
 .news-ref.gone { color: var(--muted); text-decoration: line-through; cursor: default; }
+/* A markdown article breaks its own lines, with `<br>` and blocks, so the
+   plain body's pre-wrap would only add the indentation markdown strips. */
+.news-text.md { white-space: normal; }
+.news-text.md > :first-child { margin-top: 0; }
+.news-text.md > :last-child { margin-bottom: 0; }
+.news-text .md-p { margin: 0 0 0.65em; }
+.news-text .md-h { margin: 0.9em 0 0.4em; line-height: 1.25; font-weight: 650; }
+.news-text h1.md-h { font-size: 1.35em; }
+.news-text h2.md-h { font-size: 1.2em; }
+.news-text h3.md-h { font-size: 1.08em; }
+.news-text h4.md-h, .news-text h5.md-h, .news-text h6.md-h { font-size: 1em; }
+.news-text .md-list { margin: 0 0 0.65em; padding-left: 1.6em; }
+.news-text .md-list .md-list { margin-bottom: 0; }
+.news-text li > .md-p:last-child { margin-bottom: 0.3em; }
+.news-text .md-quote { margin: 0 0 0.65em; }
+/* An article's code is a document's: kept to its own lines and scrolled
+   sideways rather than wrapped, where chat wraps to fit the column. */
+.news-text .md-pre { margin: 0 0 0.65em; white-space: pre; overflow-x: auto; overflow-wrap: normal; }
+.news-text .md-rule { border: 0; border-top: 1px solid var(--line); margin: 0.9em 0; }
+/* An HTML block is shown as typed, its line breaks and indentation too. */
+.news-text .md-html { white-space: pre-wrap; }
+.md-table-wrap { overflow-x: auto; margin: 0 0 0.65em; }
+.md-table { border-collapse: collapse; font-size: 0.92em; }
+.md-table th, .md-table td { border: 1px solid var(--line); padding: 0.2rem 0.5rem; vertical-align: top; }
+.md-table th { background: var(--surface-2); font-weight: 600; text-align: left; }
 .news-actions { display: flex; gap: 0.3rem; margin-top: 0.4rem; flex-wrap: wrap; }
 .news-actions button { font-size: 0.75rem; color: var(--muted); padding: 0.15rem 0.45rem; border-radius: 6px; }
 .news-actions button:hover, .news-actions button.on { color: var(--text); background: var(--surface-2); }
@@ -1077,6 +1145,14 @@ button.ghost.danger:hover { color: var(--admin); border-color: var(--admin); }
 .news-compose textarea { resize: vertical; min-height: 5rem; line-height: 1.45; }
 .news-compose-actions { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
 .news-hint { color: var(--muted); font-size: 0.72rem; }
+.news-md-toggle { display: inline-flex; align-items: center; gap: 0.3rem; color: var(--muted); font-size: 0.8rem; cursor: pointer; }
+.news-preview {
+  min-height: 5rem;
+  padding: 0.5rem 0.65rem;
+  border: 1px dashed var(--line);
+  border-radius: 6px;
+  background: var(--bg);
+}
 
 @media (max-width: 44rem) {
   .news-article { margin-left: calc(var(--depth, 0) * 0.5rem); padding: 0.5rem 0.6rem; }
@@ -1167,6 +1243,9 @@ button.ghost.danger:hover { color: var(--admin); border-color: var(--admin); }
   .line .gutter { display: inline-flex; margin-right: 0.3rem; vertical-align: -3px; }
   .line .name { display: inline; text-align: left; margin-right: 0.4rem; }
   .line .text { display: inline; }
+  /* A quote or a code block cannot run on beside the name; a body with
+     one starts on a line of its own. */
+  .line .text.md-blocks { display: block; }
   .line.cont .gutter, .line.cont .name { display: none; }
   .line.broadcast .name { display: inline; margin-right: 0.4rem; }
 

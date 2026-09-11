@@ -10,14 +10,28 @@
  * raise no badge: an event that goes to everyone for every post is not
  * something addressed to you (hxd-ng's `docs/news.md` §9.3).
  *
- * Bodies are plain text and drawn as text. The only thing turned into a
- * link is what the server said was one: a URL, as in chat, and a `#51`
- * the server resolved to an article.
+ * What *is* addressed to you is `news_notify`, and only an account that
+ * may hold subscriptions ever sees one: the Follow and Mute buttons, the
+ * counts beside what is followed, and the Following screen are all drawn
+ * only where the login reply's `news.subscribe` says so, so a server
+ * older than subscriptions gets exactly the reader it always did.
+ *
+ * A body is drawn as its article's `mime` says. `text/plain` is text: the
+ * only things turned into links are a URL, as in chat, and a `#51` the
+ * server resolved to an article. `text/markdown` is parsed by the
+ * library's article dialect and drawn as elements and text nodes — never
+ * as HTML — with the same rule for references: only an id in the
+ * article's `refs` is a link, whether it was written `#51` or
+ * `[text](news:51)`. Search snippets and notification excerpts are the
+ * server's plain text, and stay that.
  */
 
 import {
+  blocksText,
   errorText,
   markedSpans,
+  newsScopeOf,
+  parseArticle,
   referenceSpans,
   WireFailure,
   type Connection,
@@ -27,11 +41,55 @@ import {
   type NewsNode,
   type NewsNodeKind,
   type NewsReference,
+  type NewsScope,
+  type NewsSub,
   type NewsThread,
 } from '@hotline-ng/client';
 
-import { canReply, draftProblem, excerpt, indexTree, isOwn, nextSearchOffset, replySubject, trailTo } from '../news';
+import {
+  canReply,
+  coalesced,
+  draftProblem,
+  excerpt,
+  Following,
+  highestId,
+  indexTree,
+  isMarkdown,
+  isOwn,
+  Jumps,
+  markdownOffered,
+  nextSearchOffset,
+  notifiesThread,
+  replySubject,
+  trailTo,
+} from '../news';
 import { fill, h, linkify } from './dom';
+import { blockNodes, wrapSelection } from './markdown';
+
+const NEWS_MARKDOWN_KEY = 'hxd-ng.news-markdown';
+
+/** Whether a new draft is markdown, where the server takes it: on unless
+ *  this reader turned it off last time. */
+function readNewsMarkdown(): boolean {
+  try {
+    return localStorage.getItem(NEWS_MARKDOWN_KEY) !== 'off';
+  } catch {
+    return true;
+  }
+}
+
+function writeNewsMarkdown(on: boolean): void {
+  try {
+    localStorage.setItem(NEWS_MARKDOWN_KEY, on ? 'on' : 'off');
+  } catch {
+    /* storage disabled; the choice lasts this page load */
+  }
+}
+
+/** A listing's one line: the words, not the markup around them. */
+function listingText(a: NewsArticle): string {
+  return isMarkdown(a.mime) ? blocksText(parseArticle(a.body, [])) : a.body;
+}
 
 type Screen =
   /** `trail` is the bundles down to the one being shown; empty is the root. */
@@ -41,7 +99,10 @@ type Screen =
   | { at: 'thread'; trail: NewsNode[]; category: NewsNode; root: number; focus?: number }
   /** A search, scoped to the category or bundle it was typed in, if any.
    *  `trail` is the bundles above the scope, for the breadcrumb. */
-  | { at: 'search'; trail: NewsNode[]; q: string; scope: NewsNode | null };
+  | { at: 'search'; trail: NewsNode[]; q: string; scope: NewsNode | null }
+  /** Everything followed or muted. `trail` is always empty; it is here
+   *  so every screen can be walked the same way. */
+  | { at: 'following'; trail: NewsNode[] };
 
 type InCategory = Extract<Screen, { at: 'category' | 'thread' }>;
 
@@ -54,6 +115,8 @@ export interface NewsHooks {
   conn: () => Connection | null;
   /** The account this session is, for "is this article mine". */
   me: () => string | null;
+  /** Something the rail's badge is drawn from has changed. */
+  onUnread: () => void;
 }
 
 /** The largest thread page the wire allows. */
@@ -142,9 +205,18 @@ export class NewsView {
   private threadsMore = false;
   private articles: NewsArticle[] = [];
   private articlesMore = false;
+  private articleSnapshot: number | null = null;
   /** The open compose form: a new thread, or a reply to `parent`. Held
    *  here rather than read back off the DOM, so a redraw keeps it. */
-  private draft: { parent?: number; subject: string; body: string } | null = null;
+  private draft: {
+    parent?: number;
+    subject: string;
+    body: string;
+    /** Send as `text/markdown` — honored only where the server takes it. */
+    markdown: boolean;
+    /** Showing the rendered draft rather than the box. */
+    preview: boolean;
+  } | null = null;
   /** The open name form: creating a node of `kind`, or renaming `node`.
    *  `name` is what is typed so far, kept for the same reason as a draft. */
   private naming: ({ kind: NewsNodeKind } | { node: NewsNode }) & { name: string } | null = null;
@@ -154,6 +226,14 @@ export class NewsView {
   private hitsCapped = false;
   /** Where the next page of results starts, or `null` for no more. */
   private hitsNext: number | null = null;
+  /** What this account follows, and the server's unread counts for it. */
+  private following = new Following();
+  /** Bumped by `reset`, so a subscription answer that was in flight
+   *  across a change of session is not taken for the new one's. */
+  private session = 0;
+  /** Whether a jump to an article may still land: of two in flight only
+   *  the newer, and neither once the reader has moved on. */
+  private jumps = new Jumps(() => this.screen);
 
   constructor(private hooks: NewsHooks) {
     this.bar.append(this.crumbsEl, h('span', { class: 'spacer' }), this.searchBox, this.actionsEl);
@@ -169,6 +249,19 @@ export class NewsView {
 
   get visible(): boolean {
     return !this.el.hidden;
+  }
+
+  /** The rail's badge: unread across what is followed. Until the list
+   *  has been fetched it is the login reply's total. */
+  get unread(): number {
+    return this.following.total(this.hooks.conn()?.news?.unread ?? 0);
+  }
+
+  /** May this session follow anything? Feature-detected rather than
+   *  assumed: absent is an older server, and false is a guest or a
+   *  server that keeps no subscriptions. */
+  private subscribable(): boolean {
+    return this.hooks.conn()?.news?.subscribe === true;
   }
 
   show(on: boolean): void {
@@ -193,13 +286,172 @@ export class NewsView {
     this.nodes = [];
     this.threads = [];
     this.articles = [];
+    this.articleSnapshot = null;
     this.draft = null;
     this.naming = null;
     this.backlinks.clear();
     this.hits = [];
     this.hitsNext = null;
     this.searchBox.value = '';
+    this.following.clear();
+    this.session++;
     this.el.hidden = true;
+  }
+
+  // --- following --------------------------------------------------------
+
+  /**
+   * Fetch what this account follows. Called when a session starts or
+   * comes back, and after anything that may have changed it — posting
+   * can subscribe you, depending on the server's `auto_subscribe`.
+   *
+   * Quiet on failure: the badge keeps what it had, and the Following
+   * screen fetches for itself and says what went wrong there.
+   *
+   * Coalesced, because every notification in a scope the list does not
+   * cover asks for it, and a burst of replies should not be a burst of
+   * requests: one in flight, and one more after it for whatever changed
+   * while it was out.
+   */
+  readonly refreshFollowing = coalesced(() => this.fetchFollowing());
+
+  private async fetchFollowing(): Promise<void> {
+    const conn = this.hooks.conn();
+    if (!conn || !this.subscribable()) return;
+    const session = this.session;
+    try {
+      const ok = await conn.newsSubs();
+      if (session !== this.session) return;
+      this.following.load(ok.subs);
+    } catch {
+      return;
+    }
+    this.hooks.onUnread();
+    this.redrawCounts();
+  }
+
+  /**
+   * A notification: something here is yours. Returns true when it is
+   * already in front of the reader — it counts against the thread on
+   * screen — so the caller need not announce it as well.
+   */
+  onNotify(d: Events['news_notify']): boolean {
+    // Not covered means a subscription made since the list was fetched,
+    // or none at all; only the server knows which.
+    if (!this.following.notify(d)) void this.refreshFollowing();
+    this.hooks.onUnread();
+    const s = this.screen;
+    const onScreen = this.visible && s.at === 'thread' && notifiesThread(d, s.root);
+    // A thread on screen shows no counts. The `news_posted` beside this
+    // refetches it, and drawing the new article acknowledges it; this
+    // covers the notification arriving after that refetch did.
+    if (onScreen) this.acknowledge();
+    else this.redrawCounts();
+    return onScreen;
+  }
+
+  /** Open the thread an article is in, focused on it: where a clicked
+   *  notice leads. Whatever the view was fetching before is dropped, and
+   *  fetched after all if the jump fails. */
+  openArticle(id: number): void {
+    this.generation++;
+    this.cancelRefresh();
+    this.stale = true;
+    this.error = null;
+    void this.goToArticle(id);
+  }
+
+  private openFollowing(): void {
+    this.error = null;
+    this.go({ at: 'following', trail: [] });
+  }
+
+  /** The counts beside things changed. Redraw them — but not under
+   *  someone's typing, where the bar is all that may be touched. */
+  private redrawCounts(): void {
+    if (!this.visible) return;
+    if (this.draft || this.naming) this.renderBar();
+    else this.render();
+  }
+
+  /** Follow, unfollow, mute or unmute, then take the server's list as it
+   *  now stands rather than guessing what the change did to it. */
+  private async changeFollowing(act: (conn: Connection) => Promise<unknown>): Promise<void> {
+    const conn = this.hooks.conn();
+    if (!conn || this.busy) return;
+    this.busy = true;
+    try {
+      await act(conn);
+      this.error = null;
+    } catch (e) {
+      this.error = describe(e);
+    } finally {
+      this.busy = false;
+    }
+    await this.refreshFollowing();
+    this.render();
+  }
+
+  /**
+   * Tell the server what the reader has now been shown: the thread on
+   * screen, or a followed category's listing, up to the highest article
+   * in it. Explicit and only from here, because fetching is not reading
+   * — the server never infers it, and neither does this.
+   */
+  private acknowledge(): void {
+    const conn = this.hooks.conn();
+    const s = this.screen;
+    if (!conn || !this.subscribable() || !this.visible || this.stale) return;
+    let scope: NewsScope;
+    let upTo: number | null;
+    if (s.at === 'thread') {
+      scope = { thread: s.root };
+      upTo = highestId(this.articles);
+    } else if (s.at === 'category') {
+      scope = { category: s.category.id };
+      upTo = highestId(this.threads.map((t) => t.article));
+    } else return;
+    if (upTo === null) return;
+    // A loose count can clear with nothing sent, so the badge is redrawn
+    // on what changed rather than on whether anything was.
+    const before = this.unread;
+    const send = this.following.claimSeen(scope, upTo);
+    if (this.unread !== before) this.hooks.onUnread();
+    if (!send) return;
+    const at = upTo;
+    const session = this.session;
+    conn.newsSeen(scope, at).then(
+      (ok) => {
+        if (session !== this.session) return;
+        // Nonzero when what was drawn stops short of the newest article
+        // in the scope. The counts on screen were cleared on the strength
+        // of the claim, so they are redrawn; that redraw claims nothing,
+        // because the cursor already stands where it would.
+        const before = this.unread;
+        this.following.seen(scope, at, ok.unread);
+        this.hooks.onUnread();
+        if (this.unread !== before) this.redrawCounts();
+      },
+      // The count was cleared on the strength of this; it did not
+      // happen, so ask what the counts really are.
+      () => {
+        if (session === this.session) void this.refreshFollowing();
+      },
+    );
+  }
+
+  private async openSub(sub: NewsSub): Promise<void> {
+    const from = this.screen;
+    try {
+      const where = await this.locate(sub.category);
+      if (this.screen !== from) return;
+      if (sub.scope === 'thread') this.openThread(where.trail, where.category, sub.target);
+      else this.openCategory(where.trail, where.category);
+    } catch (e) {
+      if (this.screen !== from) return;
+      this.error = describe(e);
+      this.render();
+    }
   }
 
   /** The session came back from a drop, resynced across a gap, or logged
@@ -213,6 +465,14 @@ export class NewsView {
 
   // --- events: "your copy is stale" ------------------------------------
 
+  /** Something changed in a category that the Following list's rows say
+   *  about it: a name, a thread starter's subject, a count, or the row
+   *  itself, which the server drops with the thread or category it
+   *  follows. Asked again only when the list holds anything there. */
+  private refreshFollowingIn(category: number): void {
+    if (this.following.touches(category)) void this.refreshFollowing();
+  }
+
   onPosted(d: Events['news_posted']): void {
     const s = this.screen;
     if (
@@ -225,6 +485,7 @@ export class NewsView {
   }
 
   onDeleted(d: Events['news_deleted']): void {
+    this.refreshFollowingIn(d.category);
     const s = this.screen;
     if (
       (s.at === 'category' && s.category.id === d.category) ||
@@ -237,6 +498,7 @@ export class NewsView {
 
   onNode(d: Events['news_node']): void {
     const node = d.node;
+    this.refreshFollowingIn(node.id);
     const s = this.screen;
     // A rename of something in the breadcrumb is a new label and nothing
     // else; take it straight from the event.
@@ -252,6 +514,7 @@ export class NewsView {
   }
 
   onNodeDeleted(d: Events['news_node_deleted']): void {
+    this.refreshFollowingIn(d.id);
     const s = this.screen;
     const gone = s.trail.findIndex((n) => n.id === d.id);
     const current = inCategory(s) ? s.category : s.at === 'search' ? s.scope : null;
@@ -305,6 +568,7 @@ export class NewsView {
     this.threadsMore = false;
     this.articles = [];
     this.articlesMore = false;
+    this.articleSnapshot = null;
     this.hits = [];
     this.hitsTotal = 0;
     this.hitsCapped = false;
@@ -342,19 +606,24 @@ export class NewsView {
   private async goToArticle(id: number): Promise<void> {
     const conn = this.hooks.conn();
     if (!conn) return;
-    // Checked by screen rather than by generation: a refresh bumps that
-    // too, and a post landing meanwhile is no reason to ignore the click.
-    // A reader who has gone somewhere else is not dragged back.
-    const from = this.screen;
+    // Its answer, or its failure, is dropped once it is no longer the
+    // jump to land; `Jumps` says when that is.
+    const current = this.jumps.begin();
     try {
       const article = await conn.newsArticle(id);
+      if (!current()) return;
       const where = await this.locate(article.category);
-      if (this.screen !== from) return;
+      if (!current()) return;
       this.openThread(where.trail, where.category, article.root, id);
     } catch (e) {
-      if (this.screen !== from) return;
+      if (!current()) return;
       this.error = describe(e);
-      this.render();
+      // A jump from a notice dropped what the screen was fetching. With
+      // nowhere to land — a pruned article, a dropped socket — the screen
+      // it left is fetched after all, and the error drawn over that
+      // rather than over a "Loading…" that never ends.
+      if (this.stale && this.visible) void this.load();
+      else this.render();
     }
   }
 
@@ -411,21 +680,33 @@ export class NewsView {
         this.hitsTotal = ok.total;
         this.hitsCapped = ok.capped;
         this.hitsNext = nextSearchOffset(0, ok.hits.length, ok.total, conn.news?.search_max_results);
+      } else if (s.at === 'following') {
+        const ok = await conn.newsSubs();
+        if (gen !== this.generation) return;
+        this.following.load(ok.subs);
+        this.hooks.onUnread();
       } else {
         const want = Math.max(this.articles.length, THREAD_PAGE);
         let all: NewsArticle[] = [];
         let after: number | undefined;
+        let snapshot: number | undefined;
         let more = true;
         while (more && all.length < want && all.length < THREAD_PRELOAD) {
-          const page = await conn.newsThread(after === undefined ? { root: s.root, limit: THREAD_PAGE } : { root: s.root, after, limit: THREAD_PAGE });
+          const page = await conn.newsThread(
+            after === undefined
+              ? { root: s.root, limit: THREAD_PAGE }
+              : { root: s.root, after, snapshot, limit: THREAD_PAGE },
+          );
           if (gen !== this.generation) return;
           all = all.concat(page.articles);
           more = page.has_more;
+          snapshot = page.snapshot;
           after = page.articles.at(-1)?.id;
           if (after === undefined) break;
         }
         this.articles = all;
         this.articlesMore = more;
+        this.articleSnapshot = snapshot ?? null;
       }
     } catch (e) {
       if (gen !== this.generation) return;
@@ -472,11 +753,12 @@ export class NewsView {
     const conn = this.hooks.conn();
     const s = this.screen;
     const after = this.articles.at(-1)?.id;
-    if (!conn || s.at !== 'thread' || after === undefined || this.paging) return;
+    const snapshot = this.articleSnapshot;
+    if (!conn || s.at !== 'thread' || after === undefined || snapshot === null || this.paging) return;
     const gen = this.generation;
     this.paging = true;
     try {
-      const page = await conn.newsThread({ root: s.root, after, limit: THREAD_PAGE });
+      const page = await conn.newsThread({ root: s.root, after, snapshot, limit: THREAD_PAGE });
       if (gen !== this.generation) return;
       // An article already here is not drawn twice, whatever the page
       // overlapped: two elements with one id is a thread that scrolls to
@@ -484,6 +766,7 @@ export class NewsView {
       const have = new Set(this.articles.map((a) => a.id));
       this.articles = this.articles.concat(page.articles.filter((a) => !have.has(a.id)));
       this.articlesMore = page.has_more;
+      this.articleSnapshot = page.snapshot;
     } catch (e) {
       if (gen !== this.generation) return;
       this.error = describe(e);
@@ -508,13 +791,18 @@ export class NewsView {
     }
     this.busy = true;
     try {
-      const params = { category: s.category.id, subject: d.subject.trim(), body: d.body };
+      // The source, verbatim, and its type: the server stores what was
+      // typed and every reader renders it for themselves.
+      const mime = markdownOffered(cfg) && d.markdown ? { mime: 'text/markdown' } : {};
+      const params = { category: s.category.id, subject: d.subject.trim(), body: d.body, ...mime };
       const { id } = await conn.newsPost(parent ? { ...params, parent: parent.id } : params);
       // Posted, wherever the reader is now. One who moved on while it
       // went is left there, along with any draft they started there.
       if (this.screen !== s) return;
       this.draft = null;
       this.error = null;
+      // Posting may have subscribed the poster, which only the list says.
+      void this.refreshFollowing();
       // A new thread opens; a reply is shown where it landed.
       if (s.at === 'category') this.openThread(s.trail, s.category, id);
       else {
@@ -721,7 +1009,9 @@ export class NewsView {
           ? this.categoryView(s)
           : s.at === 'search'
             ? this.searchView(s)
-            : this.threadView();
+            : s.at === 'following'
+              ? this.followingView()
+              : this.threadView();
     fill(this.body, this.error ? h('p', { class: 'news-error' }, this.error) : null, ...content);
     if (this.notice) this.body.prepend(h('p', { class: 'news-notice' }, this.notice));
     if (this.loading) this.body.append(h('p', { class: 'news-loading' }, 'Loading…'));
@@ -743,6 +1033,7 @@ export class NewsView {
       );
       field?.focus();
     }
+    this.acknowledge();
   }
 
   private renderBar(): void {
@@ -773,6 +1064,7 @@ export class NewsView {
       }
       crumb(`Search: ${s.q}`, null);
     }
+    if (s.at === 'following') crumb('Following', null);
 
     const actions: HTMLElement[] = [];
     const action = (label: string, fn: () => void, opts: { on?: boolean; title?: string; disabled?: boolean } = {}) => {
@@ -790,12 +1082,47 @@ export class NewsView {
       action(
         'New thread',
         () => {
-          this.draft = { subject: '', body: '' };
+          this.draft = { subject: '', body: '', markdown: readNewsMarkdown(), preview: false };
           this.focusDraft = true;
           this.render();
         },
         { disabled: !may || this.draft?.parent === undefined && this.draft !== null, title: may ? 'Start a thread' : 'You may not post here.' },
       );
+    }
+    const followScope: NewsScope | null = !this.subscribable()
+      ? null
+      : s.at === 'thread'
+        ? { thread: s.root }
+        : s.at === 'category'
+          ? { category: s.category.id }
+          : null;
+    if (followScope) {
+      const sub = this.following.get(followScope);
+      const thread = followScope.thread !== undefined;
+      // A muted row is not something followed, whatever the server
+      // keeps it as; it offers only to be unmuted.
+      if (!sub?.muted) {
+        action(
+          sub ? 'Following' : 'Follow',
+          () => void this.changeFollowing((c) => (sub ? c.newsUnsubscribe(followScope) : c.newsSubscribe(followScope))),
+          {
+            on: !!sub,
+            title: sub
+              ? `${sub.auto ? 'Following because you posted here.' : 'Following.'} Click to stop.${thread ? ' Replies to your own articles still reach you; Mute says never.' : ''}`
+              : thread
+                ? 'Be told when someone posts in this thread'
+                : 'Be told when someone starts a thread here',
+          },
+        );
+      }
+      action(sub?.muted ? 'Muted' : 'Mute', () => void this.changeFollowing((c) => c.newsMute(followScope, !sub?.muted)), {
+        on: !!sub?.muted,
+        title: sub?.muted
+          ? 'Muted. Click to be told again.'
+          : thread
+            ? 'Never be told about this thread, not even replies to you'
+            : 'Never be told about new threads here',
+      });
     }
     action('Manage', () => {
       this.managing = !this.managing;
@@ -829,6 +1156,20 @@ export class NewsView {
       out.push(h('div', { class: 'news-manage' }, make('category', 'New category'), make('bundle', 'New bundle')));
     }
     if (this.naming && 'kind' in this.naming) out.push(this.nameForm());
+    if (!s.trail.length && this.subscribable()) {
+      // What is followed sits above the tree rather than in the bar:
+      // it is somewhere to go, like a category, not something to do.
+      const n = this.unread;
+      const open = h(
+        'button',
+        { class: 'news-node news-following', title: 'What you follow' },
+        h('span', { class: 'glyph' }, '★'),
+        h('span', { class: 'name' }, 'Following'),
+        n ? h('span', { class: 'badge', title: `${plural(n, 'unread article', 'unread articles')}` }, String(n)) : null,
+      );
+      open.onclick = () => this.openFollowing();
+      out.push(h('div', { class: 'news-node-row' }, open));
+    }
     if (!this.nodes.length && !this.loading) {
       out.push(h('p', { class: 'news-empty' }, s.trail.length ? 'This bundle is empty.' : 'There is no news here yet.'));
     }
@@ -837,6 +1178,7 @@ export class NewsView {
         out.push(this.nameForm());
         continue;
       }
+      const unread = node.kind === 'category' ? this.following.unreadIn(node.id) : 0;
       const open = h(
         'button',
         { class: 'news-node' },
@@ -847,6 +1189,7 @@ export class NewsView {
           { class: 'count' },
           node.kind === 'bundle' ? plural(node.count, 'item', 'items') : plural(node.count, 'article', 'articles'),
         ),
+        unread ? h('span', { class: 'badge', title: 'Unread in what you follow here' }, String(unread)) : null,
       );
       open.onclick = () =>
         node.kind === 'bundle' ? this.openTree([...s.trail, node]) : this.openCategory(s.trail, node);
@@ -899,11 +1242,17 @@ export class NewsView {
     }
     for (const t of this.threads) {
       const a = t.article;
+      const unread = this.following.unreadOf({ thread: a.id });
       const row = h(
         'button',
         { class: `news-thread${a.deleted ? ' deleted' : ''}` },
-        h('span', { class: 'news-thread-subject' }, a.deleted ? 'Deleted article' : a.subject),
-        a.deleted ? null : h('span', { class: 'news-thread-excerpt' }, excerpt(a.body)),
+        h(
+          'span',
+          { class: 'news-thread-head' },
+          h('span', { class: 'news-thread-subject' }, a.deleted ? 'Deleted article' : a.subject),
+          unread ? h('span', { class: 'badge', title: plural(unread, 'unread reply', 'unread replies') }, String(unread)) : null,
+        ),
+        a.deleted ? null : h('span', { class: 'news-thread-excerpt' }, excerpt(listingText(a))),
         h(
           'span',
           { class: 'news-thread-meta' },
@@ -921,6 +1270,40 @@ export class NewsView {
         void this.loadOlderThreads();
       };
       out.push(more);
+    }
+    return out;
+  }
+
+  private followingView(): (HTMLElement | null)[] {
+    const out: (HTMLElement | null)[] = [];
+    if (this.stale) return out;
+    const subs = this.following.list();
+    const auto = this.hooks.conn()?.news?.auto_subscribe;
+    const how =
+      auto === 'participated'
+        ? 'Posting in a thread follows it.'
+        : auto === 'own_thread'
+          ? 'Starting a thread follows it.'
+          : 'Follow a thread or a category from its own page.';
+    out.push(h('p', { class: 'news-search-head' }, subs.length ? how : `You follow nothing yet. ${how}`));
+    for (const sub of subs) {
+      const scope = newsScopeOf(sub);
+      const unread = this.following.unreadOf(scope);
+      const label = sub.scope === 'thread' ? sub.subject || 'Deleted article' : (sub.name ?? 'Category');
+      const tags = [sub.scope, sub.auto ? 'because you posted' : null, sub.muted ? 'muted' : null].filter(Boolean).join(' · ');
+      const open = h(
+        'button',
+        { class: `news-node${sub.muted ? ' muted' : ''}` },
+        h('span', { class: 'glyph' }, sub.scope === 'category' ? '#' : '¶'),
+        h('span', { class: 'name' }, label),
+        h('span', { class: 'count' }, tags),
+        unread ? h('span', { class: 'badge' }, String(unread)) : null,
+      );
+      open.onclick = () => void this.openSub(sub);
+      const drop = h('button', { class: 'ghost small' }, sub.muted ? 'Unmute' : 'Unfollow');
+      drop.onclick = () =>
+        void this.changeFollowing((c) => (sub.muted ? c.newsMute(scope, false) : c.newsUnsubscribe(scope)));
+      out.push(h('div', { class: 'news-node-row' }, open, drop));
     }
     return out;
   }
@@ -959,14 +1342,17 @@ export class NewsView {
     if (a.deleted) {
       el.append(h('div', { class: 'news-text muted' }, 'This article was deleted.'));
     } else {
-      el.append(h('div', { class: 'news-subject-line' }, a.subject), h('div', { class: 'news-text' }, ...this.bodyNodes(a)));
+      el.append(
+        h('div', { class: 'news-subject-line' }, a.subject),
+        h('div', { class: isMarkdown(a.mime) ? 'news-text md' : 'news-text' }, ...this.bodyNodes(a)),
+      );
     }
 
     const actions: HTMLElement[] = [];
     if (canReply(a, cfg)) {
       const reply = h('button', {}, 'Reply');
       reply.onclick = () => {
-        this.draft = { parent: a.id, subject: replySubject(a.subject), body: '' };
+        this.draft = { parent: a.id, subject: replySubject(a.subject), body: '', markdown: readNewsMarkdown(), preview: false };
         this.focusDraft = true;
         this.render();
       };
@@ -1002,14 +1388,18 @@ export class NewsView {
     return el;
   }
 
-  /** A body as text, with URLs and resolved references as links. */
+  /** A body as its type says: markdown drawn as elements, plain text as
+   *  text — URLs and resolved references as links in both. */
   private bodyNodes(a: NewsArticle): (Node | string)[] {
+    if (isMarkdown(a.mime)) {
+      return blockNodes(parseArticle(a.body, a.refs), { ref: (r, label) => this.refLink(r, label) });
+    }
     return referenceSpans(a.body, a.refs).flatMap((span) =>
       'ref' in span ? [this.refLink(span.ref, span.text)] : linkify(span.text),
     );
   }
 
-  private refLink(r: NewsReference, label: string): HTMLElement {
+  private refLink(r: NewsReference, label: string | (Node | string)[]): HTMLElement {
     const link = h(
       'a',
       {
@@ -1017,7 +1407,7 @@ export class NewsView {
         class: `news-ref${r.deleted ? ' gone' : ''}`,
         title: r.deleted ? 'That article was deleted.' : `${r.subject ?? ''} — ${r.from ?? ''}`,
       },
-      label,
+      ...(typeof label === 'string' ? [label] : label),
     );
     link.onclick = (e) => {
       e.preventDefault();
@@ -1038,12 +1428,23 @@ export class NewsView {
       value: d.body,
     });
     text.oninput = () => (d.body = text.value);
+    // Offered only where the login reply lists `text/markdown`; anywhere
+    // else a draft is plain text whatever the reader chose last time.
+    const offered = markdownOffered(this.hooks.conn()?.news ?? null);
+    const markdown = () => offered && d.markdown;
     const post = h('button', { class: 'primary' }, parent ? 'Post reply' : 'Post');
     post.onclick = () => void this.submit(parent);
     text.onkeydown = (e) => {
       if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
         e.preventDefault();
         post.click();
+      }
+      // The chat composer's shortcuts, where they mean something.
+      if (markdown() && (e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && (e.key === 'b' || e.key === 'i')) {
+        e.preventDefault();
+        const w = wrapSelection(text.value, text.selectionStart, text.selectionEnd, e.key === 'b' ? '**' : '*');
+        text.value = d.body = w.value;
+        text.setSelectionRange(w.start, w.end);
       }
     };
     const cancel = h('button', { class: 'ghost' }, 'Cancel');
@@ -1053,18 +1454,57 @@ export class NewsView {
       if (this.pendingRefresh) void this.load();
       else this.render();
     };
+
+    // The preview is the reader's own renderer over the draft, so what it
+    // shows is what everyone will see — except references, which the
+    // server resolves only once the article is posted, and so are drawn
+    // here as the text they are until then.
+    const preview = h('div', { class: 'news-text md news-preview', hidden: true });
+    const previewBtn = h('button', { class: 'ghost' }, 'Preview');
+    const showPreview = (on: boolean) => {
+      d.preview = on && markdown();
+      text.hidden = d.preview;
+      preview.hidden = !d.preview;
+      previewBtn.textContent = d.preview ? 'Edit' : 'Preview';
+      if (d.preview) {
+        fill(preview, ...(d.body.trim() ? blockNodes(parseArticle(d.body, [])) : [h('p', { class: 'muted' }, 'Nothing to preview yet.')]));
+      }
+    };
+    previewBtn.onclick = () => {
+      showPreview(!d.preview);
+      if (!d.preview) text.focus();
+    };
+    const hint = h('span', { class: 'news-hint' });
+    const paint = () => {
+      previewBtn.hidden = !markdown();
+      hint.textContent = `${markdown() ? 'Markdown' : 'Plain text'} · #123 links to article 123 · Ctrl+Enter posts`;
+    };
+    let toggle: HTMLElement | null = null;
+    if (offered) {
+      const box = h('input', { type: 'checkbox', checked: d.markdown });
+      box.onchange = () => {
+        d.markdown = box.checked;
+        writeNewsMarkdown(box.checked);
+        if (!box.checked) showPreview(false);
+        paint();
+      };
+      toggle = h(
+        'label',
+        { class: 'news-md-toggle', title: 'Post as markdown: headings, lists, **bold**, [links](https://…). Off, the article is plain text, exactly as typed.' },
+        box,
+        'Markdown',
+      );
+    }
+    paint();
+    showPreview(d.preview);
+
     return h(
       'div',
       { class: 'news-compose' },
       subject,
       text,
-      h(
-        'div',
-        { class: 'news-compose-actions' },
-        post,
-        cancel,
-        h('span', { class: 'news-hint' }, 'Plain text · #123 links to article 123 · Ctrl+Enter posts'),
-      ),
+      preview,
+      h('div', { class: 'news-compose-actions' }, post, cancel, previewBtn, toggle, hint),
     );
   }
 }

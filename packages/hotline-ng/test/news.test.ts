@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { Connection, type Credentials } from '../src/connection';
 import { markedSpans, referenceSpans } from '../src/news';
-import type { LoginOk, NewsConfig, NewsReference, SelfUser } from '../src/protocol';
+import { newsScopeOf, type LoginOk, type NewsConfig, type NewsReference, type SelfUser } from '../src/protocol';
 
 import { installFakeWire, settle, uninstallFakeWire, type FakeServer } from './fake-wire';
 
@@ -205,7 +205,7 @@ describe('the news requests', () => {
     };
     server.on('news_tree', () => ({ ok: { nodes: [] } }));
     server.on('news_threads', () => ({ ok: { threads: [], has_more: false } }));
-    server.on('news_thread', () => ({ ok: { articles: [article], has_more: false } }));
+    server.on('news_thread', () => ({ ok: { articles: [article], has_more: false, snapshot: 7 } }));
     server.on('news_article', () => ({ ok: { article } }));
     server.on('news_post', () => ({ ok: { id: 8 } }));
     server.on('news_delete', () => ({ ok: {} }));
@@ -227,7 +227,7 @@ describe('the news requests', () => {
 
     await conn.newsTree({ depth: 2 });
     await conn.newsThreads({ category: 2, before: 9, limit: 10 });
-    await conn.newsThread({ root: 7, after: 7 });
+    await conn.newsThread({ root: 7, after: 7, snapshot: 9 });
     expect(await conn.newsArticle(7)).toEqual(article);
     expect(await conn.newsPost({ category: 2, parent: 7, subject: 'Re: s', body: 'hi' })).toEqual({ id: 8 });
     await conn.newsDelete(7);
@@ -240,7 +240,7 @@ describe('the news requests', () => {
 
     expect(server.sent('news_tree')[0]?.params).toEqual({ depth: 2 });
     expect(server.sent('news_threads')[0]?.params).toEqual({ category: 2, before: 9, limit: 10 });
-    expect(server.sent('news_thread')[0]?.params).toEqual({ root: 7, after: 7 });
+    expect(server.sent('news_thread')[0]?.params).toEqual({ root: 7, after: 7, snapshot: 9 });
     expect(server.sent('news_article')[0]?.params).toEqual({ id: 7 });
     expect(server.sent('news_post')[0]?.params).toEqual({ category: 2, parent: 7, subject: 'Re: s', body: 'hi' });
     expect(server.sent('news_delete').map((f) => f.params)).toEqual([{ id: 7 }, { id: 7, reason: 'off topic' }]);
@@ -248,6 +248,48 @@ describe('the news requests', () => {
     expect(server.sent('news_node_create')[0]?.params).toEqual({ kind: 'category', name: 'General' });
     expect(server.sent('news_node_rename')[0]?.params).toEqual({ id: 3, name: 'Chatter' });
     expect(server.sent('news_node_delete')[0]?.params).toEqual({ id: 3 });
+  });
+
+  it('send the subscription frames the wire specifies', async () => {
+    server.on('login', () => ({ ok: loginOk({ news: { ...NEWS, subscribe: true, auto_subscribe: 'participated', unread: 3 } }) }));
+    const conn = new Connection(CREDS);
+    await conn.start();
+    expect(conn.news?.subscribe).toBe(true);
+    expect(conn.news?.unread).toBe(3);
+
+    const sub = {
+      scope: 'thread' as const,
+      target: 7,
+      category: 2,
+      subject: 's',
+      auto: true,
+      muted: false,
+      unread: 2,
+      last_seen: 5,
+    };
+    server.on('news_subscribe', () => ({ ok: { unread: 0 } }));
+    server.on('news_unsubscribe', () => ({ ok: {} }));
+    server.on('news_mute', () => ({ ok: {} }));
+    server.on('news_subs', () => ({ ok: { subs: [sub] } }));
+    server.on('news_seen', () => ({ ok: { unread: 0 } }));
+
+    expect(await conn.newsSubscribe({ thread: 7 })).toEqual({ unread: 0 });
+    await conn.newsSubscribe({ category: 2 });
+    await conn.newsUnsubscribe({ thread: 7 });
+    await conn.newsMute({ category: 2 }, true);
+    expect((await conn.newsSubs()).subs).toEqual([sub]);
+    expect(await conn.newsSeen(newsScopeOf(sub), 9)).toEqual({ unread: 0 });
+
+    expect(server.sent('news_subscribe').map((f) => f.params)).toEqual([{ thread: 7 }, { category: 2 }]);
+    expect(server.sent('news_unsubscribe')[0]?.params).toEqual({ thread: 7 });
+    expect(server.sent('news_mute')[0]?.params).toEqual({ category: 2, muted: true });
+    expect(server.sent('news_subs')[0]?.params).toEqual({});
+    expect(server.sent('news_seen')[0]?.params).toEqual({ thread: 7, up_to: 9 });
+  });
+
+  it('name a scope the way a request takes it', () => {
+    expect(newsScopeOf({ scope: 'thread', target: 398 })).toEqual({ thread: 398 });
+    expect(newsScopeOf({ scope: 'category', target: 7 })).toEqual({ category: 7 });
   });
 
   it('reject with the server’s own error', async () => {
@@ -277,5 +319,30 @@ describe('the news requests', () => {
     await settle();
     expect(seen).toEqual([12]);
     expect(conn.seq).toBe(1);
+  });
+
+  it('hand a notification to its handler, and keep news_posted apart from it', async () => {
+    const conn = new Connection(CREDS);
+    const notified: number[] = [];
+    const posted: number[] = [];
+    conn.on('news_notify', (d) => notified.push(d.article));
+    conn.on('news_posted', (d) => posted.push(d.id));
+    await conn.start();
+    server.event('news_notify', {
+      reason: 'reply',
+      scope: 'thread',
+      target: 398,
+      article: 412,
+      root: 398,
+      category: 7,
+      subject: 'Re: the u16',
+      excerpt: 'The part size is a u16…',
+      from: { nick: 'Bob', login: 'bob' },
+      at: 1_789_000_000,
+      unread: 3,
+    });
+    await settle();
+    expect(notified).toEqual([412]);
+    expect(posted).toEqual([]);
   });
 });

@@ -121,6 +121,47 @@ ${opts.sections ?? IDENTITY_SECTIONS}`,
   };
 }
 
+/**
+ * The `news` section of the login reply an account gets, off the wire:
+ * what the server offers, asked of the server rather than read off a page
+ * drawn from what it said. A spec that skips for a server too old to
+ * have a feature decides that here, so a page that fails to draw the
+ * feature fails the spec instead of skipping it.
+ *
+ * A bare socket, not `@hotline-ng/client`: the library's reading of the
+ * login reply is part of what the page does with it, and so part of
+ * what is under test. Logged out before it closes, so no detached
+ * session outlives the probe.
+ */
+export async function loginNews(server: RunningServer, login: string, password: string): Promise<Record<string, unknown> | null> {
+  type Reply = { reply: number; ok?: Record<string, unknown>; error?: { code: string } };
+  const ws = new WebSocket(server.wsUrl);
+  const replies = new Map<number, (r: Reply) => void>();
+  const closed = new Promise<void>((resolve) => (ws.onclose = () => resolve()));
+  ws.onmessage = (e) => {
+    const frame = JSON.parse(String(e.data)) as Partial<Reply>;
+    if (typeof frame.reply === 'number') replies.get(frame.reply)?.(frame as Reply);
+  };
+  const ask = (id: number, req: string, params: object) =>
+    new Promise<Reply>((resolve) => {
+      replies.set(id, resolve);
+      ws.send(JSON.stringify({ id, req, params }));
+    });
+  try {
+    await new Promise<void>((resolve, reject) => {
+      ws.onopen = () => resolve();
+      ws.onerror = () => reject(new Error(`could not reach ${server.wsUrl}`));
+    });
+    const reply = await ask(1, 'login', { login, password });
+    if (!reply.ok) throw new Error(`login as ${login} was refused: ${reply.error?.code ?? 'no reason given'}`);
+    // The server may close as it answers; either is a logout.
+    await Promise.race([ask(2, 'logout', {}), closed]);
+    return (reply.ok.news as Record<string, unknown> | undefined) ?? null;
+  } finally {
+    ws.close();
+  }
+}
+
 const IDENTITY_SECTIONS = `
 [identity]
 key = "identity-server.key"

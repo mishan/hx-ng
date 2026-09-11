@@ -58,9 +58,16 @@ export function clock(t = Date.now()): string {
   return new Date(t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 }
 
-/** Turn bare URLs into links and leave everything else as text. Chat is
- *  never interpreted as markup: the server hands us UTF-8 from strangers
- *  and `textContent` is the only safe thing to do with it. */
+/** Turn bare URLs into links and leave everything else as text.
+ *
+ *  Text from the server is never interpreted as HTML: it is UTF-8 from
+ *  strangers, and a text node is the only safe thing to make of it. The
+ *  one markup it is read as is markdown — GtkHx's chat dialect, and an
+ *  article's when it says `text/markdown` — and only as that closed set
+ *  of constructs, parsed by `@hotline-ng/client` into runs that
+ *  `./markdown` draws as text nodes and a few fixed elements. This is
+ *  what draws the plain parts, and the whole of a body when markdown is
+ *  off. */
 export function linkify(text: string): (Node | string)[] {
   const out: (Node | string)[] = [];
   const re = /\b(https?:\/\/[^\s<>"']+)/g;

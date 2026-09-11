@@ -47,6 +47,9 @@ export interface Line {
    *  metadata survives even when the handle does not, which is what a
    *  placeholder is drawn from. */
   media?: HistoryMedia;
+  /** A news article this line announces. The transcript draws the line
+   *  as a link, and following it opens the article where it sits. */
+  article?: number;
 }
 
 export type ConvId = string;
@@ -476,7 +479,11 @@ export class Store {
     c.lines.push(line);
     if (c.kind === 'lobby') this.trimPublic(c, 'oldest');
     else if (c.lines.length > MAX_LINES) c.lines.splice(0, c.lines.length - MAX_LINES);
-    if (fresh && (id !== this.active || this.covered)) c.unread++;
+    // A line announcing a news article is counted where the news is, on
+    // the News badge. It lands in whichever conversation was on screen
+    // and is about none of them: a reply from Bob is not unread chat with
+    // Carol.
+    if (fresh && line.article === undefined && (id !== this.active || this.covered)) c.unread++;
     return c;
   }
 

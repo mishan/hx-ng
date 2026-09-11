@@ -42,8 +42,12 @@ import {
   type NewsPostOk,
   type NewsPostParams,
   type NewsRefsOk,
+  type NewsScope,
   type NewsSearchOk,
   type NewsSearchParams,
+  type NewsSeenOk,
+  type NewsSubscribeOk,
+  type NewsSubsOk,
   type NewsThreadOk,
   type NewsThreadParams,
   type NewsThreadsOk,
@@ -790,6 +794,44 @@ export class Connection {
    *  wait and ask again, never that nothing matched. */
   newsSearch(params: NewsSearchParams): Promise<NewsSearchOk> {
     return this.request<NewsSearchOk>('news_search', params);
+  }
+
+  // --- news subscriptions (hxd-ng's docs/news.md §10) -------------------
+  //
+  // What reaches you arrives as `news_notify`; these requests decide what
+  // does — what is followed, what is muted, and how far each has been
+  // read. A guest is refused `no_mailbox` and a server that keeps no
+  // subscriptions `not_available` — `news.subscribe` in the login reply
+  // says which before anything is asked.
+
+  /** Follow a thread or a category. Something new starts caught up; one
+   *  already followed keeps its place, and stops being `auto`. */
+  newsSubscribe(scope: NewsScope): Promise<NewsSubscribeOk> {
+    return this.request<NewsSubscribeOk>('news_subscribe', scope);
+  }
+
+  /** Stop following. Asking twice is not an error. Replies to your own
+   *  articles still reach you afterwards; `newsMute` is how to say never. */
+  newsUnsubscribe(scope: NewsScope): Promise<Record<string, never>> {
+    return this.request('news_unsubscribe', scope);
+  }
+
+  /** Mute or unmute. Muting something not followed is allowed, and is
+   *  what keeps posting there from subscribing you again. */
+  newsMute(scope: NewsScope, muted: boolean): Promise<Record<string, never>> {
+    return this.request('news_mute', { ...scope, muted });
+  }
+
+  /** Everything this account follows or has muted, newest first. */
+  newsSubs(): Promise<NewsSubsOk> {
+    return this.request<NewsSubsOk>('news_subs', {});
+  }
+
+  /** Say the reader has been shown the scope up to article `upTo`.
+   *  Explicit, like `msgRead`: fetching a thread never implies it, since
+   *  a client may fetch what it never draws. */
+  newsSeen(scope: NewsScope, upTo: number): Promise<NewsSeenOk> {
+    return this.request<NewsSeenOk>('news_seen', { ...scope, up_to: upTo });
   }
 
   async ping(): Promise<number> {

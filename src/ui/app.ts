@@ -60,7 +60,7 @@ import { renderRoster } from './roster';
 import { Tiles } from './tiles';
 import { MediaCache } from './media';
 import { NewsView } from './news';
-import { appendLine, isAtBottom, renderTranscript, scrollToEnd } from './transcript';
+import { appendLine, isAtBottom, keepingPlace, renderTranscript, scrollToEnd } from './transcript';
 import { wrapSelection } from './markdown';
 
 /** Codes that mean "not for you, not now, not ever on this session":
@@ -1387,7 +1387,9 @@ export class App {
       this.markdown = !this.markdown;
       writeMarkdown(this.markdown);
       paintMarkdown();
-      this.renderTranscript();
+      // Only how the lines are drawn changes, so a reader back in the
+      // history stays on what they were reading.
+      keepingPlace(this.transcript, () => this.renderTranscript());
     };
 
     this.pill.onclick = () => this.debug.toggle(true);

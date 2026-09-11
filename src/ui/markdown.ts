@@ -131,13 +131,15 @@ function blockNode(b: MdBlock, hooks: MarkdownHooks, tight: boolean): HTMLElemen
 /**
  * A chat body, drawn. A line that is one paragraph — nearly all of them —
  * comes back as inline nodes, so it still flows beside the nick on a
- * phone; one with a quote or a code block in it comes back as blocks.
+ * phone; one with a quote or a code block in it comes back as blocks,
+ * and says so, since only a box that holds blocks may hold it.
  */
-export function chatNodes(text: string): (Node | string)[] {
+export function chatNodes(text: string): { nodes: (Node | string)[]; block: boolean } {
   const blocks = parseChat(text);
   const only = blocks[0];
-  if (blocks.length === 1 && only?.type === 'paragraph') return inlineNodes(only.content);
-  return blockNodes(blocks, {}, true);
+  if (blocks.length === 0) return { nodes: [], block: false };
+  if (blocks.length === 1 && only?.type === 'paragraph') return { nodes: inlineNodes(only.content), block: false };
+  return { nodes: blockNodes(blocks, {}, true), block: true };
 }
 
 /**

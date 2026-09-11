@@ -72,6 +72,23 @@ export function scrollToEnd(el: HTMLElement): void {
   el.scrollTop = el.scrollHeight;
 }
 
+/** Redraw without moving the reader. At the newest line they stay there;
+ *  scrolled back, the line at the top of the view stays where it was,
+ *  however the lines above it changed height. `redraw` must leave one
+ *  element per line, in the same order, as `renderTranscript` does. */
+export function keepingPlace(el: HTMLElement, redraw: () => void): void {
+  if (isAtBottom(el)) {
+    redraw();
+    return;
+  }
+  const top = el.getBoundingClientRect().top;
+  const k = [...el.children].findIndex((c) => c.getBoundingClientRect().bottom > top);
+  const was = el.children[k]?.getBoundingClientRect().top;
+  redraw();
+  const now = el.children[k]?.getBoundingClientRect().top;
+  if (was !== undefined && now !== undefined) el.scrollTop += now - was;
+}
+
 /** The clock is printed only when it changes. A room where thirty lines
  *  all say 03:46 has spent a column telling you nothing; the full
  *  timestamp stays on the line's tooltip either way. */
@@ -98,6 +115,12 @@ function lineEl(
   // rather than the wrong one.
   const user = from?.uid !== undefined && from.uid > 0 ? store.user(from.uid) : undefined;
   const iconId = user?.icon ?? from?.icon;
+  // The body only: the nick is a name, and a name with asterisks in it
+  // is still that name. Your own lines are drawn like anyone's, a
+  // private message's local echo included, so they look as they do to
+  // whoever reads them; what stays literal is this client's own notices
+  // and status lines, which are drawn in `eventLine`.
+  const body = opts.markdown ? chatNodes(line.text) : { nodes: linkify(line.text), block: false };
 
   return h(
     'div',
@@ -119,20 +142,18 @@ function lineEl(
       },
       sameSpeaker ? '' : (from?.nick ?? ''),
     ),
+    // A `div`, because a body may hold blocks: a quote, a code block, an
+    // image. A phone runs the body on beside the nick, so one with a
+    // markdown block in it is marked to start on a line of its own.
     h(
-      'span',
-      { class: 'text' },
+      'div',
+      { class: body.block ? 'text md-blocks' : 'text' },
       // The legacy wire prepends `[queued 2026-09-06 14:22 UTC]` to the
       // body because it has nowhere else to put it. Here it is a tag
       // beside the text and the timestamp is already the line's own, in
       // the reader's timezone rather than in UTC.
       line.queued ? h('span', { class: 'tag', title: 'Held by the server until you came back' }, 'queued') : null,
-      // The body only: the nick is a name, and a name with asterisks in it
-      // is still that name. Your own lines are drawn like anyone's, a
-      // private message's local echo included, so they look as they do
-      // to whoever reads them; what stays literal is this client's own
-      // notices and status lines, which are drawn in `eventLine`.
-      ...(opts.markdown ? chatNodes(line.text) : linkify(line.text)),
+      ...body.nodes,
       // An image is a block under the text, not a word in it: a line
       // may carry one with nothing said at all, which is a picture
       // posted rather than an empty message.
@@ -158,6 +179,7 @@ function eventLine(line: Line, prev: Line | undefined, media: MediaCache, opts: 
   // system line is this client's, and a news notice is an excerpt the
   // server cut; all of those are shown as they are.
   const typed = opts.markdown && (line.kind === 'action' || line.kind === 'broadcast');
+  const body = typed && line.article === undefined ? chatNodes(line.text) : null;
   const label =
     line.kind === 'broadcast' ? 'broadcast' : line.kind === 'deleted' ? 'deleted' : '';
   return h(
@@ -167,14 +189,14 @@ function eventLine(line: Line, prev: Line | undefined, media: MediaCache, opts: 
     h('span', { class: 'gutter' }),
     h('span', { class: 'name' }, label),
     h(
-      'span',
-      { class: 'text' },
+      'div',
+      { class: body?.block ? 'text md-blocks' : 'text' },
       // A news notice is one link to the article it is about; the shell
       // handles the click, since only it can open the reader.
       ...(line.article !== undefined
         ? [h('a', { href: `#news-${line.article}`, class: 'news-notice', dataset: { article: String(line.article) } }, text)]
-        : typed
-          ? [prefix, ...chatNodes(line.text)]
+        : body
+          ? [prefix, ...body.nodes]
           : linkify(text)),
       // The same renderer a chat line gets. A redacted history row is
       // the *only* line that ever carries `removed`, so drawing it any

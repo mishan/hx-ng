@@ -1243,6 +1243,9 @@ button.ghost.danger:hover { color: var(--admin); border-color: var(--admin); }
   .line .gutter { display: inline-flex; margin-right: 0.3rem; vertical-align: -3px; }
   .line .name { display: inline; text-align: left; margin-right: 0.4rem; }
   .line .text { display: inline; }
+  /* A quote or a code block cannot run on beside the name; a body with
+     one starts on a line of its own. */
+  .line .text.md-blocks { display: block; }
   .line.cont .gutter, .line.cont .name { display: none; }
   .line.broadcast .name { display: inline; margin-right: 0.4rem; }
 

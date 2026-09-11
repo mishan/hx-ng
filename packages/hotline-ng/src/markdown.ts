@@ -115,7 +115,10 @@ const MAX_DEPTH = 8;
 /** Cap on block containers — quotes and list items — in an article. Past
  *  it, what is left is one paragraph. Deep enough for any outline
  *  anybody writes; shallow enough that a body of nothing but `>` is a
- *  few dozen elements rather than a DOM the browser gives up on. */
+ *  few dozen elements rather than a DOM the browser gives up on. The
+ *  server's bound is a different one: it refuses a body whose lines open
+ *  with too many columns of container syntax (hxd-ng's `docs/news.md`
+ *  §5.4), which admits bodies nested deeper than this draws. */
 const MAX_BLOCK_DEPTH = 16;
 
 /** Widest delimiter row that makes a table; past it the lines are a
@@ -1474,7 +1477,9 @@ function later(text: string, mode: Mode): MdRun[] {
 
 function parseBlocks(input: readonly string[], depth: number, mode: Mode): MdBlock[] {
   const para = (text: string): MdBlock[] => (text ? [{ type: 'paragraph', content: later(text, mode) }] : []);
-  if (depth > MAX_BLOCK_DEPTH) return para(joinParagraph(input.filter((l) => !isBlank(l))));
+  // The top level is depth 0, so a parse at the cap is inside that many
+  // containers already and opens none of its own.
+  if (depth >= MAX_BLOCK_DEPTH) return para(joinParagraph(input.filter((l) => !isBlank(l))));
 
   const lines = input.map(detab);
   const out: MdBlock[] = [];

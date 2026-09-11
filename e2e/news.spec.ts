@@ -316,4 +316,48 @@ max_depth = 4
     await expect(hostile.locator('a[href="https://tracker.example/p.gif"]')).toHaveText('pixel');
     await expect(hostile.locator('img')).toHaveCount(0);
   });
+
+  test("the Markdown switch keeps the reader's place, and a block message is a block on a phone", async ({ browser }) => {
+    const editor = await logIn(browser, server, 'editor');
+    await editor.setViewportSize({ width: 1000, height: 500 });
+    const input = editor.locator('.composer-input');
+    for (let k = 0; k < 40; k++) {
+      await input.fill(`line ${k} **bold**`);
+      await input.press('Enter');
+      await expect(editor.locator('.line.chat').last()).toContainText(`line ${k} bold`);
+    }
+
+    // Back in the history, which line is at the top of the view and how
+    // far into it the view begins.
+    const transcript = editor.locator('.transcript');
+    const place = () =>
+      transcript.evaluate((el) => {
+        const top = el.getBoundingClientRect().top;
+        const lines = [...el.children];
+        const index = lines.findIndex((c) => c.getBoundingClientRect().bottom > top);
+        return { index, offset: lines[index]!.getBoundingClientRect().top - top };
+      });
+    await transcript.evaluate((el) => (el.scrollTop = (el.scrollHeight - el.clientHeight) / 2));
+    const before = await place();
+    expect(before.index).toBeGreaterThan(0);
+
+    const toggle = editor.getByRole('button', { name: 'Markdown', exact: true });
+    for (const drawn of [0, 40]) {
+      await toggle.click();
+      await expect(transcript.locator('strong')).toHaveCount(drawn);
+      const after = await place();
+      expect(after.index).toBe(before.index);
+      expect(Math.abs(after.offset - before.offset)).toBeLessThan(2);
+    }
+
+    // On a phone the body runs on beside the nick, unless it holds a
+    // block, which then starts on a line of its own.
+    await editor.setViewportSize({ width: 400, height: 700 });
+    await input.fill('> quoted\nand said');
+    await input.press('Enter');
+    const quoted = editor.locator('.line.chat').last();
+    await expect(quoted.locator('div.text > blockquote')).toHaveText('quoted');
+    await expect(quoted.locator('.text')).toHaveCSS('display', 'block');
+    await expect(editor.locator('.line.chat').nth(-2).locator('.text')).toHaveCSS('display', 'inline');
+  });
 });

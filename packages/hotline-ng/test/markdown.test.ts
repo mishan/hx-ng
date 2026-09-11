@@ -702,6 +702,10 @@ describe('articles', () => {
       { type: 'html', text: '<div>\n**bold** #51 https://x.example\n</div>' },
       { type: 'paragraph', content: [{ text: 'after ' }, { text: '#51', ref: r51 }] },
     ]);
+    // Block markers inside one are its text too.
+    expect(parseArticle('<div>\n# heading\n> quote\n- item\n</div>', [])).toEqual([
+      { type: 'html', text: '<div>\n# heading\n> quote\n- item\n</div>' },
+    ]);
     // Each of the seven kinds, and where each ends: the first five at a
     // line holding their end, blank lines and all; the last two at a
     // blank line.
@@ -995,12 +999,15 @@ describe('articles', () => {
       return d;
     };
     const started = performance.now();
+    // No deeper than the cap, and exactly as deep as it.
+    const cap = 16;
     const quotes = parseArticle(`${'>'.repeat(5000)} deep\n${'lazy\n'.repeat(5000)}`, []);
-    expect(depthOf(quotes)).toBe(17);
+    expect(depthOf(quotes)).toBe(cap);
     const bullets = parseArticle(`${'- '.repeat(5000)}x`, []);
-    expect(depthOf(bullets)).toBe(17);
+    expect(depthOf(bullets)).toBe(cap);
     const indented = parseArticle(Array.from({ length: 300 }, (_, k) => `${'  '.repeat(k)}- level ${k}`).join('\n'), []);
-    expect(depthOf(indented)).toBe(17);
+    expect(depthOf(indented)).toBe(cap);
+    expect(depthOf(parseArticle(`${'>'.repeat(cap)} x`, []))).toBe(cap);
     expect(performance.now() - started).toBeLessThan(2000);
   });
 });

@@ -13,6 +13,11 @@
  *  metadata the server measured off the canonical image. A room whose
  *  pictures arrive over a slow link therefore does not reflow as each
  *  one lands.
+ *
+ *  The cache is not only the transcript's. A news article's images are
+ *  handles too, fetched from another route with the same credential, and
+ *  they need the same care over types and refusals — so where the bytes
+ *  come from is the one thing a cache is told when it is made.
  */
 
 import type { Connection, HistoryMedia } from '@hotline-ng/client';
@@ -31,6 +36,10 @@ const MAX_HEIGHT = 320;
  *  what clicking an image can do — `image/svg+xml` is a document with
  *  script in it, and the capability forbids it upstream anyway. */
 const INERT = ['image/jpeg', 'image/png', 'image/gif'];
+
+/** Where a cache's bytes come from: a handle's canonical image, or a
+ *  rejection for anything the server would not give. */
+export type MediaFetch = (conn: Connection, id: string) => Promise<Blob>;
 
 export class MediaCache {
   private urls = new Map<string, string>();
@@ -51,6 +60,9 @@ export class MediaCache {
    *  and one stored after `revoke()` is the image a moderator just took
    *  down, held for the rest of the session. */
   private generation = 0;
+
+  /** `fetch` defaults to the chat route, `GET /media/{id}`. */
+  constructor(private fetch: MediaFetch = (conn, id) => conn.fetchMedia(id)) {}
 
   attach(conn: Connection | null): void {
     if (conn !== this.conn) this.clear();
@@ -84,6 +96,12 @@ export class MediaCache {
     return this.revoked.has(id);
   }
 
+  /** The blob URL already held for a handle, without fetching: for a
+   *  redraw that should not blank a picture it already has. */
+  held(id: string): string | null {
+    return this.urls.get(id) ?? null;
+  }
+
   /** The blob URL for a handle, fetching it at most once. `null` when
    *  the server would not give it to us — expired, revoked, or a handle
    *  this session was never shown, which are deliberately one answer —
@@ -106,8 +124,7 @@ export class MediaCache {
     const conn = this.conn;
     if (!conn) return Promise.resolve(null);
     const started = this.generation;
-    const p = conn
-      .fetchMedia(id)
+    const p = this.fetch(conn, id)
       .then((blob) => {
         if (started !== this.generation) {
           // Cleared or revoked while this was in flight. Nothing may be

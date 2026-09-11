@@ -4,10 +4,13 @@ import type { Events, NewsArticle, NewsConfig, NewsNode, NewsSub } from '@hotlin
 
 import {
   byteLength,
+  attachmentProblem,
   canReply,
   coalesced,
   draftProblem,
   excerpt,
+  expiredAttachments,
+  expiryProblem,
   Following,
   highestId,
   indexTree,
@@ -18,6 +21,7 @@ import {
   notifyText,
   replySubject,
   scopeKey,
+  staleProblem,
   trailTo,
 } from '../src/news';
 
@@ -98,6 +102,43 @@ describe('drafts', () => {
     // CRLF is one byte once the server has made it LF.
     expect(draftProblem('ok', 'a\r\nb\r\nc\r\nd\r\n', cfg({ max_body: 8 }))).toBeNull();
     expect(draftProblem('ok', '', cfg())).toBeNull();
+  });
+
+  it('uses the server attachment capability and count', () => {
+    const image = { id: 'a', type: 'image/png', width: 1, height: 1, bytes: 70 };
+    expect(attachmentProblem([], cfg())).toBeNull();
+    expect(attachmentProblem([image], cfg())).toMatch(/may not attach/);
+    expect(attachmentProblem([image], cfg({ attach: true, max_attachments: 1 }))).toBeNull();
+    expect(attachmentProblem([image, { ...image, id: 'b' }], cfg({ attach: true, max_attachments: 1 }))).toMatch(/1 attachments/);
+  });
+
+  it('names the staged images that have lapsed, and says what to do', () => {
+    const image = { id: 'a', type: 'image/png', width: 1, height: 1, bytes: 70 };
+    const draft = [
+      { ...image, name: 'photo.png', expiresAt: 1000 },
+      { ...image, id: 'b', expiresAt: 5000 },
+      { ...image, id: 'c', expiresAt: 2000 },
+    ];
+    expect(expiredAttachments([], 0)).toEqual([]);
+    expect(expiredAttachments(draft, 999)).toEqual([]);
+    // The moment it lapses counts as lapsed.
+    expect(expiredAttachments(draft, 1000)).toEqual([0]);
+    expect(expiredAttachments(draft, 2500)).toEqual([0, 2]);
+
+    expect(expiryProblem(draft, 999)).toBeNull();
+    expect(expiryProblem(draft, 1000)).toBe('photo.png has expired. Remove it and attach it again.');
+    // One without a file name is called by its place in the draft.
+    expect(expiryProblem(draft, 2500)).toBe('photo.png, Image 3 have expired. Remove them and attach them again.');
+  });
+
+  it('turns a server refusal of staged images into something to do', () => {
+    const image = { id: 'a', type: 'image/png', width: 1, height: 1, bytes: 70 };
+    expect(staleProblem([{ ...image, name: 'photo.png' }])).toBe(
+      'photo.png has expired on the server. Remove it and attach it again.',
+    );
+    expect(staleProblem([{ ...image, name: 'photo.png' }, { ...image, id: 'b' }])).toMatch(
+      /photo\.png, Image 2\. Remove the images and attach them again\./,
+    );
   });
 });
 

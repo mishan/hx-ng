@@ -170,6 +170,7 @@ export class NewsView {
   private threadsMore = false;
   private articles: NewsArticle[] = [];
   private articlesMore = false;
+  private articleSnapshot: number | null = null;
   /** The open compose form: a new thread, or a reply to `parent`. Held
    *  here rather than read back off the DOM, so a redraw keeps it. */
   private draft: { parent?: number; subject: string; body: string } | null = null;
@@ -242,6 +243,7 @@ export class NewsView {
     this.nodes = [];
     this.threads = [];
     this.articles = [];
+    this.articleSnapshot = null;
     this.draft = null;
     this.naming = null;
     this.backlinks.clear();
@@ -506,6 +508,7 @@ export class NewsView {
     this.threadsMore = false;
     this.articles = [];
     this.articlesMore = false;
+    this.articleSnapshot = null;
     this.hits = [];
     this.hitsTotal = 0;
     this.hitsCapped = false;
@@ -626,17 +629,24 @@ export class NewsView {
         const want = Math.max(this.articles.length, THREAD_PAGE);
         let all: NewsArticle[] = [];
         let after: number | undefined;
+        let snapshot: number | undefined;
         let more = true;
         while (more && all.length < want && all.length < THREAD_PRELOAD) {
-          const page = await conn.newsThread(after === undefined ? { root: s.root, limit: THREAD_PAGE } : { root: s.root, after, limit: THREAD_PAGE });
+          const page = await conn.newsThread(
+            after === undefined
+              ? { root: s.root, limit: THREAD_PAGE }
+              : { root: s.root, after, snapshot, limit: THREAD_PAGE },
+          );
           if (gen !== this.generation) return;
           all = all.concat(page.articles);
           more = page.has_more;
+          snapshot = page.snapshot;
           after = page.articles.at(-1)?.id;
           if (after === undefined) break;
         }
         this.articles = all;
         this.articlesMore = more;
+        this.articleSnapshot = snapshot ?? null;
       }
     } catch (e) {
       if (gen !== this.generation) return;
@@ -683,11 +693,12 @@ export class NewsView {
     const conn = this.hooks.conn();
     const s = this.screen;
     const after = this.articles.at(-1)?.id;
-    if (!conn || s.at !== 'thread' || after === undefined || this.paging) return;
+    const snapshot = this.articleSnapshot;
+    if (!conn || s.at !== 'thread' || after === undefined || snapshot === null || this.paging) return;
     const gen = this.generation;
     this.paging = true;
     try {
-      const page = await conn.newsThread({ root: s.root, after, limit: THREAD_PAGE });
+      const page = await conn.newsThread({ root: s.root, after, snapshot, limit: THREAD_PAGE });
       if (gen !== this.generation) return;
       // An article already here is not drawn twice, whatever the page
       // overlapped: two elements with one id is a thread that scrolls to
@@ -695,6 +706,7 @@ export class NewsView {
       const have = new Set(this.articles.map((a) => a.id));
       this.articles = this.articles.concat(page.articles.filter((a) => !have.has(a.id)));
       this.articlesMore = page.has_more;
+      this.articleSnapshot = page.snapshot;
     } catch (e) {
       if (gen !== this.generation) return;
       this.error = describe(e);

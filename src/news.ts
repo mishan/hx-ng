@@ -295,9 +295,12 @@ export class Following {
 
   /**
    * Should the reader's having seen `scope` up to `upTo` be sent? True
-   * when it would move something — a cursor behind it, or a count above
-   * zero — and in that case the count is cleared here and now, so a
-   * redraw before the answer lands does not ask twice.
+   * when it would move the cursor, and in that case the count is cleared
+   * here and now, so a redraw before the answer lands does not ask twice.
+   * At or behind the cursor nothing drawn is counted — the server counts
+   * only what is newer — so a count the answer kept, for a page short of
+   * the newest article, stays, and redrawing that page does not ask
+   * again.
    *
    * A loose count clears only once what was drawn reaches the article it
    * was for: a thread's first page is not the reply on its third. Once
@@ -309,7 +312,7 @@ export class Following {
     const key = scopeKey(scope);
     const sub = this.subs.get(key);
     if (sub) {
-      if (upTo <= sub.last_seen && sub.unread === 0) return false;
+      if (upTo <= sub.last_seen) return false;
       this.subs.set(key, { ...sub, last_seen: Math.max(sub.last_seen, upTo), unread: 0 });
       return true;
     }
@@ -332,6 +335,13 @@ export class Following {
     const sub = this.subs.get(key);
     if (!sub || upTo < sub.last_seen) return;
     this.subs.set(key, { ...sub, last_seen: upTo, unread });
+  }
+
+  /** Does anything followed live in this category: the category itself,
+   *  or a thread in it? */
+  touches(category: number): boolean {
+    for (const s of this.subs.values()) if (s.category === category) return true;
+    return false;
   }
 
   /** Unread in one scope. A muted one has nothing to say. */

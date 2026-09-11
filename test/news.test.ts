@@ -5,6 +5,7 @@ import type { Events, NewsArticle, NewsConfig, NewsNode, NewsSub } from '@hotlin
 import {
   byteLength,
   attachmentProblem,
+  tooManyAttachments,
   canReply,
   coalesced,
   draftProblem,
@@ -109,7 +110,10 @@ describe('drafts', () => {
     expect(attachmentProblem([], cfg())).toBeNull();
     expect(attachmentProblem([image], cfg())).toMatch(/may not attach/);
     expect(attachmentProblem([image], cfg({ attach: true, max_attachments: 1 }))).toBeNull();
-    expect(attachmentProblem([image, { ...image, id: 'b' }], cfg({ attach: true, max_attachments: 1 }))).toMatch(/1 attachments/);
+    expect(attachmentProblem([image, { ...image, id: 'b' }], cfg({ attach: true, max_attachments: 1 }))).toBe(
+      'That post may have 1 attachment at most.',
+    );
+    expect(tooManyAttachments(8)).toBe('That post may have 8 attachments at most.');
   });
 
   it('names the staged images that have lapsed, and says what to do', () => {

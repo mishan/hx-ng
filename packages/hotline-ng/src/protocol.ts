@@ -545,6 +545,10 @@ export interface NewsThread {
 export interface NewsConfig {
   post: boolean;
   attach: boolean;
+  /** Present when this server accepts staged news images. */
+  max_attachments?: number;
+  max_attachment_bytes?: number;
+  types?: string[];
   max_body: number;
   max_subject: number;
   /** Reply nesting. A reply to an article this deep is refused. */
@@ -707,6 +711,13 @@ export interface NewsPostParams {
   body: string;
   /** Default `text/plain`. */
   mime?: string;
+  /** Handles returned by `uploadNewsAttachment`, in display order. */
+  attach?: string[];
+}
+
+/** A staged image, usable by a later `newsPost` from this session. */
+export interface StagedNewsAttachment extends NewsAttachment {
+  expires_in: number;
 }
 
 export interface NewsPostOk {

@@ -39,6 +39,7 @@ export default defineConfig({
     proxy: {
       '/identity': 'http://127.0.0.1:5700',
       '/media': 'http://127.0.0.1:5700',
+      '/news': 'http://127.0.0.1:5700',
       '/.well-known': 'http://127.0.0.1:5700',
       '/ng': { target: 'ws://127.0.0.1:5700', ws: true },
     },

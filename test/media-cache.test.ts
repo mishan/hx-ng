@@ -115,3 +115,48 @@ describe('the media cache', () => {
     expect(await cache.url('abc', PNG)).toBeNull();
   });
 });
+
+describe('a cache with its own route', () => {
+  // The news reader's images come from `GET /news/blob/{id}`. Only the
+  // fetch differs; every refusal the transcript's cache makes, this one
+  // makes too.
+  it('fetches through the route it was given, not the chat one', async () => {
+    const fetchMedia = vi.fn();
+    const conn = fakeConn(fetchMedia);
+    const route = vi.fn().mockResolvedValue(png());
+    const cache = new MediaCache(route);
+    cache.attach(conn);
+
+    const url = await cache.url('abc', PNG);
+    expect(url).toMatch(/^blob:/);
+    expect(cache.held('abc')).toBe(url);
+    expect(await cache.url('abc', PNG)).toBe(url);
+    expect(route).toHaveBeenCalledTimes(1);
+    expect(route).toHaveBeenCalledWith(conn, 'abc');
+    expect(fetchMedia).not.toHaveBeenCalled();
+  });
+
+  it('remembers a refusal from that route', async () => {
+    const route = vi.fn().mockRejectedValue(new Error('404'));
+    const cache = new MediaCache(route);
+    cache.attach(fakeConn(vi.fn()));
+
+    expect(await cache.url('gone', PNG)).toBeNull();
+    expect(await cache.url('gone', PNG)).toBeNull();
+    expect(route).toHaveBeenCalledTimes(1);
+  });
+
+  it('builds the blob with the metadata type, whatever the route answered', async () => {
+    // A hostile server answering `image/svg+xml` for a handle the
+    // article calls a PNG gets a PNG blob, which a browser only paints.
+    const svg = new Blob(['<svg/>'], { type: 'image/svg+xml' });
+    const cache = new MediaCache(() => Promise.resolve(svg));
+    cache.attach(fakeConn(vi.fn()));
+    const create = vi.spyOn(URL, 'createObjectURL');
+
+    expect(await cache.url('abc', PNG)).toMatch(/^blob:/);
+    expect((create.mock.calls[0]![0] as Blob).type).toBe(PNG);
+    create.mockRestore();
+    expect(await cache.url('def', 'image/svg+xml')).toBeNull();
+  });
+});

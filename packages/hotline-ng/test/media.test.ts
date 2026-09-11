@@ -176,6 +176,81 @@ describe('downloading', () => {
   });
 });
 
+describe('news attachments', () => {
+  it('stages with the session credential and optional filename', async () => {
+    const blob = {
+      id: 'BBBBBBBBBBBBBBBBBBBBBB',
+      type: 'image/png',
+      width: 2,
+      height: 3,
+      bytes: 90,
+      name: 'photo.png',
+      expires_in: 1800,
+    };
+    stubFetch(() => jsonResponse(201, { blob }));
+    const conn = await connect();
+
+    await expect(
+      conn.uploadNewsAttachment(new Blob([new Uint8Array(90)], { type: 'image/png' }), 'photo.png'),
+    ).resolves.toEqual(blob);
+    expect(calls[0]!.url).toBe('http://test/news/blob');
+    expect(calls[0]!.init).toMatchObject({ method: 'POST' });
+    expect(calls[0]!.init.headers).toMatchObject({
+      Authorization: 'Bearer s_1.tok',
+      'Content-Type': 'image/png',
+      'X-Attachment-Name': 'photo.png',
+    });
+  });
+
+  it('percent-encodes a UTF-8 filename', async () => {
+    stubFetch(() => jsonResponse(201, { blob: {} }));
+    const conn = await connect();
+
+    await conn.uploadNewsAttachment(new Blob([new Uint8Array(4)], { type: 'image/png' }), 'café 日本.png');
+    expect(calls[0]!.init.headers).toMatchObject({
+      'X-Attachment-Name': 'caf%C3%A9%20%E6%97%A5%E6%9C%AC.png',
+    });
+  });
+
+  it('cuts a long filename at 255 code points, never inside a pair', async () => {
+    stubFetch(() => jsonResponse(201, { blob: {} }));
+    const conn = await connect();
+
+    await conn.uploadNewsAttachment(new Blob([new Uint8Array(4)], { type: 'image/png' }), '😀'.repeat(300));
+    const sent = (calls[0]!.init.headers as Record<string, string>)['X-Attachment-Name']!;
+    expect(sent).toBe(encodeURIComponent('😀'.repeat(255)));
+    expect(Array.from(decodeURIComponent(sent))).toHaveLength(255);
+  });
+
+  it('replaces a lone surrogate rather than throwing on it', async () => {
+    stubFetch(() => jsonResponse(201, { blob: {} }));
+    const conn = await connect();
+
+    await conn.uploadNewsAttachment(new Blob([new Uint8Array(4)], { type: 'image/png' }), 'a\uD800.png');
+    expect(calls[0]!.init.headers).toMatchObject({ 'X-Attachment-Name': 'a%EF%BF%BD.png' });
+  });
+
+  it('sends no Content-Type for a blob that has none', async () => {
+    stubFetch(() => jsonResponse(201, { blob: {} }));
+    const conn = await connect();
+
+    await conn.uploadNewsAttachment(new Blob([new Uint8Array(4)]));
+    expect(calls[0]!.init.headers).not.toHaveProperty('Content-Type');
+    expect(calls[0]!.init.headers).not.toHaveProperty('X-Attachment-Name');
+  });
+
+  it('fetches durable bytes through the news route', async () => {
+    stubFetch(() => new Response(new Uint8Array([1, 2, 3]), { status: 200 }));
+    const conn = await connect();
+
+    await expect(conn.fetchNewsAttachment('BBBBBBBBBBBBBBBBBBBBBB')).resolves.toMatchObject({
+      size: 3,
+    });
+    expect(calls[0]!.url).toBe('http://test/news/blob/BBBBBBBBBBBBBBBBBBBBBB');
+    expect(calls[0]!.init.headers).toMatchObject({ Authorization: 'Bearer s_1.tok' });
+  });
+});
+
 describe('the local pre-flight', () => {
   it('refuses what the server would, in words for the person who picked it', () => {
     expect(mediaBlockedReason({ type: 'image/png', size: 1024 }, LIMITS)).toBeNull();

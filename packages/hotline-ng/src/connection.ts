@@ -35,6 +35,7 @@ import {
   type MsgOk,
   type MsgParams,
   type NewsArticle,
+  type StagedNewsAttachment,
   type NewsConfig,
   type NewsNodeCreateParams,
   type NewsNodeDeleteOk,
@@ -78,6 +79,13 @@ async function mediaFailure(res: Response): Promise<WireFailure> {
   } catch {
     return new WireFailure(fallback);
   }
+}
+
+/** A news attachment's file name as `X-Attachment-Name` carries it: well
+ *  formed, at most 255 code points, then percent-encoded UTF-8. */
+function attachmentName(name: string): string {
+  const whole = name.replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, '\uFFFD');
+  return encodeURIComponent(Array.from(whole).slice(0, 255).join(''));
 }
 
 export type ConnState =
@@ -706,7 +714,43 @@ export class Connection {
     return res.blob();
   }
 
-  /** The session's credential for the media routes: the public session
+  /**
+   * Canonicalize and stage an image for a later news post.
+   *
+   * `name` is for display and search. It travels in `X-Attachment-Name`
+   * as UTF-8, percent-encoded as `encodeURIComponent` does it, and the
+   * server decodes it (hxd-ng's `docs/news.md` §9.4): a header value past
+   * ASCII is bytes a proxy may mangle, and a file name often is. It is
+   * cut to 255 characters first — code points, so a surrogate pair is
+   * never split — and a lone surrogate, which has no UTF-8, becomes
+   * U+FFFD rather than an exception.
+   */
+  async uploadNewsAttachment(image: Blob, name?: string): Promise<StagedNewsAttachment> {
+    const headers: Record<string, string> = { Authorization: this.bearer() };
+    // A blob with no type says nothing, and the server sniffs the bytes
+    // whatever it is told.
+    if (image.type) headers['Content-Type'] = image.type;
+    if (name) headers['X-Attachment-Name'] = attachmentName(name);
+    const res = await fetch(`${this.httpBase()}/news/blob`, {
+      method: 'POST',
+      headers,
+      body: image,
+    });
+    if (!res.ok) throw await mediaFailure(res);
+    const body = (await res.json()) as { blob: StagedNewsAttachment };
+    return body.blob;
+  }
+
+  /** Fetch a durable news image this account may read. */
+  async fetchNewsAttachment(id: string): Promise<Blob> {
+    const res = await fetch(`${this.httpBase()}/news/blob/${encodeURIComponent(id)}`, {
+      headers: { Authorization: this.bearer() },
+    });
+    if (!res.ok) throw await mediaFailure(res);
+    return res.blob();
+  }
+
+  /** The session's credential for authenticated media and news routes: the public session
    *  id and the secret token, joined by a dot. */
   private bearer(): string {
     if (!this.session || !this.token) throw new Error('not logged in');

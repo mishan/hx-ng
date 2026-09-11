@@ -5,6 +5,7 @@ import {
   newsScopeOf,
   type Events,
   type NewsArticle,
+  type NewsAttachment,
   type NewsAuthor,
   type NewsConfig,
   type NewsNode,
@@ -82,6 +83,68 @@ export function draftProblem(subject: string, body: string, cfg: NewsConfig): st
     return `That article is too long: ${Math.floor(cfg.max_body / 1024)} KB at most.`;
   }
   return null;
+}
+
+/** Why staged attachments cannot be named on this post. */
+export function attachmentProblem(attachments: readonly NewsAttachment[], cfg: NewsConfig): string | null {
+  if (attachments.length === 0) return null;
+  if (!cfg.attach) return 'This account may not attach images to news.';
+  if (cfg.max_attachments !== undefined && attachments.length > cfg.max_attachments) {
+    return tooManyAttachments(cfg.max_attachments);
+  }
+  return null;
+}
+
+/** The refusal for a draft over the server's attachment count, said the
+ *  same way whether the picker or the Post button finds it. */
+export function tooManyAttachments(max: number): string {
+  return `That post may have ${max} ${max === 1 ? 'attachment' : 'attachments'} at most.`;
+}
+
+/** A staged image in a draft, and the moment — by this page's clock, in
+ *  milliseconds — after which the server no longer honors its handle. */
+export interface DraftAttachment extends NewsAttachment {
+  expiresAt: number;
+}
+
+/** What a draft's image is called on its chip and in an error: its file
+ *  name, or its place in the draft. */
+export function attachmentLabel(a: NewsAttachment, index: number): string {
+  return a.name ?? `Image ${index + 1}`;
+}
+
+/** The places in a draft of the staged images that have lapsed by `now`. */
+export function expiredAttachments(attachments: readonly DraftAttachment[], now: number): number[] {
+  const out: number[] = [];
+  attachments.forEach((a, i) => {
+    if (now >= a.expiresAt) out.push(i);
+  });
+  return out;
+}
+
+/**
+ * Why a draft's images cannot go as they are: the ones whose handles
+ * have lapsed, by name, and what to do about it. Refused here because
+ * the server's answer would be a bare `no_such_media` that names none
+ * of them.
+ */
+export function expiryProblem(attachments: readonly DraftAttachment[], now: number): string | null {
+  const gone = expiredAttachments(attachments, now);
+  if (!gone.length) return null;
+  const names = gone.map((i) => attachmentLabel(attachments[i]!, i)).join(', ');
+  return gone.length === 1
+    ? `${names} has expired. Remove it and attach it again.`
+    : `${names} have expired. Remove them and attach them again.`;
+}
+
+/** What to say when the server refuses a post's images as gone although
+ *  none had lapsed by this page's clock. The two clocks disagree, the
+ *  server's is the one that counts, and it does not say which handle. */
+export function staleProblem(attachments: readonly NewsAttachment[]): string {
+  const names = attachments.map(attachmentLabel).join(', ');
+  return attachments.length === 1
+    ? `${names} has expired on the server. Remove it and attach it again.`
+    : `One of these has expired on the server: ${names}. Remove the images and attach them again.`;
 }
 
 /**

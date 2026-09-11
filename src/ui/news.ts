@@ -423,8 +423,14 @@ export class NewsView {
     conn.newsSeen(scope, at).then(
       (ok) => {
         if (session !== this.session) return;
+        // Nonzero when what was drawn stops short of the newest article
+        // in the scope. The counts on screen were cleared on the strength
+        // of the claim, so they are redrawn; that redraw claims nothing,
+        // because the cursor already stands where it would.
+        const before = this.unread;
         this.following.seen(scope, at, ok.unread);
         this.hooks.onUnread();
+        if (this.unread !== before) this.redrawCounts();
       },
       // The count was cleared on the strength of this; it did not
       // happen, so ask what the counts really are.
@@ -459,6 +465,14 @@ export class NewsView {
 
   // --- events: "your copy is stale" ------------------------------------
 
+  /** Something changed in a category that the Following list's rows say
+   *  about it: a name, a thread starter's subject, a count, or the row
+   *  itself, which the server drops with the thread or category it
+   *  follows. Asked again only when the list holds anything there. */
+  private refreshFollowingIn(category: number): void {
+    if (this.following.touches(category)) void this.refreshFollowing();
+  }
+
   onPosted(d: Events['news_posted']): void {
     const s = this.screen;
     if (
@@ -471,6 +485,7 @@ export class NewsView {
   }
 
   onDeleted(d: Events['news_deleted']): void {
+    this.refreshFollowingIn(d.category);
     const s = this.screen;
     if (
       (s.at === 'category' && s.category.id === d.category) ||
@@ -483,6 +498,7 @@ export class NewsView {
 
   onNode(d: Events['news_node']): void {
     const node = d.node;
+    this.refreshFollowingIn(node.id);
     const s = this.screen;
     // A rename of something in the breadcrumb is a new label and nothing
     // else; take it straight from the event.
@@ -498,6 +514,7 @@ export class NewsView {
   }
 
   onNodeDeleted(d: Events['news_node_deleted']): void {
+    this.refreshFollowingIn(d.id);
     const s = this.screen;
     const gone = s.trail.findIndex((n) => n.id === d.id);
     const current = inCategory(s) ? s.category : s.at === 'search' ? s.scope : null;

@@ -327,7 +327,8 @@ describe('following', () => {
     f.load([sub({ unread: 3 })]);
     expect(f.total(3)).toBe(3);
 
-    // One the list does not cover counts from then on.
+    // A notification for a scope the list does not cover counts from
+    // then on.
     const g = new Following();
     g.notify(notice({ reason: 'reply', target: 9, root: 9, unread: 1 }));
     expect(g.total(2)).toBe(2);
@@ -357,6 +358,31 @@ describe('following', () => {
     f.seen({ thread: 398 }, 412, 1);
     expect(f.unreadOf({ thread: 398 })).toBe(1);
     expect(f.get({ thread: 398 })?.last_seen).toBe(412);
+  });
+
+  it('keeps a count answered for a page short of the newest, and does not claim that page again', () => {
+    const f = new Following();
+    f.load([sub({ unread: 3, last_seen: 400 })]);
+    expect(f.claimSeen({ thread: 398 }, 410)).toBe(true);
+    expect(f.unreadOf({ thread: 398 })).toBe(0);
+    // One reply is newer than anything drawn.
+    f.seen({ thread: 398 }, 410, 1);
+    expect(f.unreadOf({ thread: 398 })).toBe(1);
+    // Redrawn to show it, the same page moves no cursor: nothing is sent,
+    // and the count stays.
+    expect(f.claimSeen({ thread: 398 }, 410)).toBe(false);
+    expect(f.unreadOf({ thread: 398 })).toBe(1);
+    // Drawn as far as that reply, it is claimed.
+    expect(f.claimSeen({ thread: 398 }, 415)).toBe(true);
+    expect(f.unreadOf({ thread: 398 })).toBe(0);
+  });
+
+  it('knows which categories something followed lives in', () => {
+    const f = new Following();
+    f.load([sub(), sub({ scope: 'category', target: 12, category: 12, name: 'Announcements' })]);
+    expect(f.touches(7)).toBe(true);
+    expect(f.touches(12)).toBe(true);
+    expect(f.touches(8)).toBe(false);
   });
 
   it('forgets everything with the session', () => {

@@ -798,8 +798,9 @@ export class Connection {
 
   // --- news subscriptions (hxd-ng's docs/news.md §10) -------------------
   //
-  // What reaches you arrives as `news_notify`; these are how you say what
-  // should. A guest is refused `no_mailbox` and a server that keeps no
+  // What reaches you arrives as `news_notify`; these requests decide what
+  // does — what is followed, what is muted, and how far each has been
+  // read. A guest is refused `no_mailbox` and a server that keeps no
   // subscriptions `not_available` — `news.subscribe` in the login reply
   // says which before anything is asked.
 

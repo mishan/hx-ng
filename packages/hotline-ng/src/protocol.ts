@@ -590,6 +590,8 @@ export interface NewsThreadsOk {
 export interface NewsThreadParams {
   root: number;
   after?: number;
+  /** Returned by the first page and required whenever `after` is set. */
+  snapshot?: number;
   /** 1–100, default 25. */
   limit?: number;
 }
@@ -597,6 +599,8 @@ export interface NewsThreadParams {
 export interface NewsThreadOk {
   articles: NewsArticle[];
   has_more: boolean;
+  /** Echo on later pages so the thread's mutable preorder stays fixed. */
+  snapshot: number;
 }
 
 export interface NewsPostParams {

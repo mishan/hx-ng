@@ -205,7 +205,7 @@ describe('the news requests', () => {
     };
     server.on('news_tree', () => ({ ok: { nodes: [] } }));
     server.on('news_threads', () => ({ ok: { threads: [], has_more: false } }));
-    server.on('news_thread', () => ({ ok: { articles: [article], has_more: false } }));
+    server.on('news_thread', () => ({ ok: { articles: [article], has_more: false, snapshot: 7 } }));
     server.on('news_article', () => ({ ok: { article } }));
     server.on('news_post', () => ({ ok: { id: 8 } }));
     server.on('news_delete', () => ({ ok: {} }));
@@ -227,7 +227,7 @@ describe('the news requests', () => {
 
     await conn.newsTree({ depth: 2 });
     await conn.newsThreads({ category: 2, before: 9, limit: 10 });
-    await conn.newsThread({ root: 7, after: 7 });
+    await conn.newsThread({ root: 7, after: 7, snapshot: 9 });
     expect(await conn.newsArticle(7)).toEqual(article);
     expect(await conn.newsPost({ category: 2, parent: 7, subject: 'Re: s', body: 'hi' })).toEqual({ id: 8 });
     await conn.newsDelete(7);
@@ -240,7 +240,7 @@ describe('the news requests', () => {
 
     expect(server.sent('news_tree')[0]?.params).toEqual({ depth: 2 });
     expect(server.sent('news_threads')[0]?.params).toEqual({ category: 2, before: 9, limit: 10 });
-    expect(server.sent('news_thread')[0]?.params).toEqual({ root: 7, after: 7 });
+    expect(server.sent('news_thread')[0]?.params).toEqual({ root: 7, after: 7, snapshot: 9 });
     expect(server.sent('news_article')[0]?.params).toEqual({ id: 7 });
     expect(server.sent('news_post')[0]?.params).toEqual({ category: 2, parent: 7, subject: 'Re: s', body: 'hi' });
     expect(server.sent('news_delete').map((f) => f.params)).toEqual([{ id: 7 }, { id: 7, reason: 'off topic' }]);

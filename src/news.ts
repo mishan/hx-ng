@@ -90,9 +90,15 @@ export function attachmentProblem(attachments: readonly NewsAttachment[], cfg: N
   if (attachments.length === 0) return null;
   if (!cfg.attach) return 'This account may not attach images to news.';
   if (cfg.max_attachments !== undefined && attachments.length > cfg.max_attachments) {
-    return `That post may have ${cfg.max_attachments} attachments at most.`;
+    return tooManyAttachments(cfg.max_attachments);
   }
   return null;
+}
+
+/** The refusal for a draft over the server's attachment count, said the
+ *  same way whether the picker or the Post button finds it. */
+export function tooManyAttachments(max: number): string {
+  return `That post may have ${max} ${max === 1 ? 'attachment' : 'attachments'} at most.`;
 }
 
 /** A staged image in a draft, and the moment — by this page's clock, in

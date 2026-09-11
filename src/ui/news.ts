@@ -67,6 +67,7 @@ import {
   notifiesThread,
   replySubject,
   staleProblem,
+  tooManyAttachments,
   trailTo,
   type DraftAttachment,
 } from '../news';
@@ -848,6 +849,9 @@ export class NewsView {
         e instanceof WireFailure && e.wire.code === 'no_such_media' && d.attachments.length
           ? staleProblem(d.attachments)
           : describe(e);
+      // Not busy by the time it is drawn, or the attachment picker it
+      // draws stays disabled until something unrelated redraws.
+      this.busy = false;
       this.render();
     } finally {
       this.busy = false;
@@ -1473,6 +1477,9 @@ export class NewsView {
       // The type is the article's, not the response's; the cache builds
       // the blob with it and refuses one a browser would execute.
       void this.images.url(item.id, item.type).then((url) => {
+        // Redrawn or navigated away from while it was fetched: nothing
+        // is showing this one to decode it for.
+        if (!figure.isConnected) return;
         if (url) img.src = url;
         else img.classList.add('missing');
       });
@@ -1654,7 +1661,7 @@ export class NewsView {
         const chosen = [...file.files];
         const max = cfg.max_attachments ?? Infinity;
         if (d.attachments.length + chosen.length > max) {
-          this.error = `That post may have ${max} attachments at most.`;
+          this.error = tooManyAttachments(max);
           return this.render();
         }
         const tooLarge = chosen.find((f) => cfg.max_attachment_bytes !== undefined && f.size > cfg.max_attachment_bytes);
@@ -1665,9 +1672,15 @@ export class NewsView {
         this.busy = true;
         file.disabled = true;
         label.classList.add('busy');
+        // Canceled, replaced or logged out of while an upload was out:
+        // what comes back belongs to a draft nobody is writing, and its
+        // result or its error must not land on the one that is.
+        const session = this.session;
+        const current = () => this.draft === d && this.session === session;
         try {
           for (const image of chosen) {
             const staged = await conn.uploadNewsAttachment(image, image.name);
+            if (!current()) return;
             // Counted from the answer, which the server's own clock
             // started before; a post that loses that race gets the
             // server's refusal, said the same way.
@@ -1675,7 +1688,7 @@ export class NewsView {
           }
           this.error = null;
         } catch (e) {
-          this.error = describe(e);
+          if (current()) this.error = describe(e);
         } finally {
           this.busy = false;
           this.render();

@@ -11,9 +11,9 @@
  * that browser is showing rather than raising anything — and that
  * `news_notify`, which is addressed to one account, is what does.
  *
- * Its own port rather than the dev proxy's 5700: news needs no HTTP
- * route, so the page connects to the server directly with `?server=`,
- * and this spec can run beside the identity one without either caring.
+ * Its own port rather than the dev proxy's 5700: the page connects to
+ * the server directly with `?server=`, including the authenticated
+ * attachment HTTP route.
  */
 
 import { expect, test, type Browser, type Page } from '@playwright/test';
@@ -31,6 +31,7 @@ ${access}`;
 
 const EDITOR = `read_news = true
 post_news = true
+send_media = true
 delete_articles = true
 create_categories = true
 delete_categories = true
@@ -40,7 +41,11 @@ delete_news_bundles = true
 
 async function logIn(browser: Browser, server: RunningServer, login: string): Promise<Page> {
   const page = await (await browser.newContext()).newPage();
-  await page.goto(`/?server=${encodeURIComponent(server.wsUrl)}`);
+  // A distinct hostname makes this a custom-server deployment rather
+  // than the dev proxy's default :5700, so its HTTP attachment route is
+  // exercised directly (and through hxd-ng's CORS policy).
+  const customUrl = server.wsUrl.replace('127.0.0.1', 'localhost');
+  await page.goto(`/?server=${encodeURIComponent(customUrl)}`);
   await page.getByLabel('Account').fill(login);
   await page.getByLabel('Password').fill('pw');
   await page.getByRole('button', { name: 'Connect', exact: true }).click();
@@ -69,11 +74,13 @@ db = "server.sqlite"
 [news]
 max_depth = 4
 
+[news.attach]
+
 [news.notify]
 `,
       accounts: {
         editor: account('Editor', EDITOR),
-        reader: account('Reader', 'read_news = true\npost_news = true\n'),
+        reader: account('Reader', 'read_news = true\npost_news = true\nsend_media = true\n'),
       },
     });
   });
@@ -106,6 +113,15 @@ max_depth = 4
     await editor.getByRole('button', { name: 'New thread' }).click();
     await editor.locator('.news-subject-input').fill('Phase 4 is open');
     await editor.locator('.news-body-input').fill('News, finally.\nThreads, references, the lot.');
+    await editor.locator('.news-compose input[type="file"]').setInputFiles({
+      name: 'pixel.png',
+      mimeType: 'image/png',
+      buffer: Buffer.from(
+        'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
+        'base64',
+      ),
+    });
+    await expect(editor.locator('.news-attachment-chip')).toContainText('pixel.png');
     await editor.getByRole('button', { name: 'Post', exact: true }).click();
     const starter = editor.locator('.news-article').first();
     await expect(starter.locator('.news-subject-line')).toHaveText('Phase 4 is open');
@@ -117,6 +133,10 @@ max_depth = 4
 
     // --- the reader answers, citing the starter by number ----------------
     await reader.locator('.news-thread', { hasText: 'Phase 4 is open' }).click();
+    await expect(reader.locator('.news-attachment')).toBeVisible();
+    await expect
+      .poll(() => reader.locator('.news-attachment').evaluate((img) => (img as { naturalWidth: number }).naturalWidth))
+      .toBe(1);
     await reader.locator('.news-article').first().getByRole('button', { name: 'Reply' }).click();
     await expect(reader.locator('.news-subject-input')).toHaveValue('Re: Phase 4 is open');
     await reader.locator('.news-body-input').fill(`About time. See #${rootId}, and #99999 which is nothing.`);

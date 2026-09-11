@@ -1138,12 +1138,24 @@ button.ghost.danger:hover { color: var(--admin); border-color: var(--admin); }
 .news-actions button:hover, .news-actions button.on { color: var(--text); background: var(--surface-2); }
 .news-actions button.danger:hover { color: var(--admin); }
 .news-backlinks { margin-top: 0.35rem; font-size: 0.82rem; display: grid; gap: 0.15rem; }
+.news-attachments { display: grid; grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr)); gap: 0.5rem; margin-top: 0.6rem; }
+.news-attachment-wrap { margin: 0; min-width: 0; }
+.news-attachment { display: block; width: 100%; height: auto; max-height: 28rem; object-fit: contain; border-radius: 8px; background: var(--surface-2); }
+.news-attachment.missing { min-height: 5rem; opacity: 0.35; }
+.news-attachment-wrap figcaption { color: var(--muted); font-size: 0.75rem; margin-top: 0.2rem; overflow-wrap: anywhere; }
 .news-more { margin: 0.5rem 0; color: var(--link); }
 
 .news-compose { display: grid; gap: 0.45rem; margin: 0.5rem 0 0.8rem; }
 .news-compose input, .news-compose textarea { background: var(--bg); }
 .news-compose textarea { resize: vertical; min-height: 5rem; line-height: 1.45; }
 .news-compose-actions { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
+.news-compose-attachments { display: flex; gap: 0.35rem; flex-wrap: wrap; }
+.news-attachment-chip { display: inline-flex; align-items: center; gap: 0.25rem; border: 1px solid var(--line); border-radius: 999px; padding: 0.15rem 0.25rem 0.15rem 0.55rem; font-size: 0.78rem; }
+.news-attachment-chip button { padding: 0 0.3rem; }
+.news-attachment-chip.expired { color: var(--admin); border-color: var(--admin); }
+.news-attach-picker { color: var(--link); font-size: 0.82rem; cursor: pointer; }
+.news-attach-picker.busy { color: var(--muted); cursor: progress; }
+.news-attach-picker input { position: absolute; inline-size: 1px; block-size: 1px; opacity: 0; }
 .news-hint { color: var(--muted); font-size: 0.72rem; }
 .news-md-toggle { display: inline-flex; align-items: center; gap: 0.3rem; color: var(--muted); font-size: 0.8rem; cursor: pointer; }
 .news-preview {

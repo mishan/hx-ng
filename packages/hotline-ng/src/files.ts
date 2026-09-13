@@ -64,6 +64,11 @@ export function formatFileSize(value: bigint): string {
     unit++;
   }
   if (unit === 0) return `${value.toLocaleString()} ${value === 1n ? 'byte' : 'bytes'}`;
-  const tenths = (value * 10n + divisor / 2n) / divisor;
+  let tenths = (value * 10n + divisor / 2n) / divisor;
+  if (tenths === 10_240n && unit < units.length - 1) {
+    divisor *= 1024n;
+    unit++;
+    tenths = (value * 10n + divisor / 2n) / divisor;
+  }
   return `${tenths / 10n}.${tenths % 10n} ${units[unit]}`;
 }

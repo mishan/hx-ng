@@ -952,6 +952,7 @@ export const CAP_IDENTITY = 'identity';
 export const CAP_HISTORY = 'history';
 export const CAP_MEDIA = 'media';
 export const CAP_NEWS = 'news';
+export const CAP_FILES = 'files';
 
 /**
  * `resync_required` is not a failure: the session is still alive and the

@@ -26,6 +26,7 @@ export class FilesView {
   private path = '';
   private generation = 0;
   private abort: AbortController | null = null;
+  private downloading = false;
 
   constructor(private connection: () => Connection | null) {}
 
@@ -45,6 +46,7 @@ export class FilesView {
   }
 
   private async load(path: string): Promise<void> {
+    this.abort?.abort();
     const connection = this.connection();
     if (!connection) return;
     const generation = ++this.generation;
@@ -110,6 +112,7 @@ export class FilesView {
   }
 
   private async inspect(path: string): Promise<void> {
+    this.abort?.abort();
     const connection = this.connection();
     if (!connection) return;
     const generation = ++this.generation;
@@ -132,7 +135,7 @@ export class FilesView {
     const size = parseDecimalU64(info.size);
     const download = h('button', { class: 'primary' }, 'Download');
     const progress = h('div', { class: 'file-progress' });
-    download.onclick = () => void this.download(info.path, info.name, size, progress);
+    download.onclick = () => void this.download(info.path, info.name, size, progress, download);
     const back = h('button', { class: 'ghost' }, 'Back');
     back.onclick = () => void this.load(this.path);
     fill(
@@ -160,13 +163,20 @@ export class FilesView {
     name: string,
     size: bigint,
     progress: HTMLElement,
+    button: HTMLElement,
   ): Promise<void> {
+    if (this.downloading) return;
     const connection = this.connection();
     if (!connection) return;
+    this.downloading = true;
+    button.setAttribute('disabled', '');
+    const abort = new AbortController();
+    this.abort = abort;
     const picker = (globalThis as { showSaveFilePicker?: SavePicker }).showSaveFilePicker;
     try {
       if (!picker) {
         const prepared = await connection.prepareFileDownload(path);
+        if (abort.signal.aborted) throw new DOMException('Download canceled', 'AbortError');
         const link = h('a', {
           href: connection.fileDownloadUrl(prepared),
           download: name,
@@ -179,9 +189,8 @@ export class FilesView {
         return;
       }
       const handle = await picker({ suggestedName: name });
+      if (abort.signal.aborted) throw new DOMException('Download canceled', 'AbortError');
       const writable = await handle.createWritable();
-      const abort = new AbortController();
-      this.abort = abort;
       const cancel = h('button', { class: 'ghost danger' }, 'Cancel');
       cancel.onclick = () => abort.abort();
       fill(progress, `Starting ${formatFileSize(size)}… `, cancel);
@@ -211,8 +220,6 @@ export class FilesView {
       } catch (error) {
         await writable.abort().catch(() => undefined);
         throw error;
-      } finally {
-        if (this.abort === abort) this.abort = null;
       }
     } catch (error) {
       if (error instanceof DOMException && error.name === 'AbortError') {
@@ -220,6 +227,10 @@ export class FilesView {
       } else {
         fill(progress, h('span', { class: 'error' }, this.message(error)));
       }
+    } finally {
+      if (this.abort === abort) this.abort = null;
+      this.downloading = false;
+      button.removeAttribute('disabled');
     }
   }
 

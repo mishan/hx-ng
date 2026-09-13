@@ -48,6 +48,7 @@ describe('decimal u64 file sizes', () => {
     expect(parseDecimalU64('18446744073709551615')).toBe(18_446_744_073_709_551_615n);
     expect(decimalU64(4_294_967_297n)).toBe('4294967297');
     expect(formatFileSize(4_294_967_297n)).toBe('4.0 GiB');
+    expect(formatFileSize(1_048_525n)).toBe('1.0 MiB');
     expect(() => parseDecimalU64(9_007_199_254_740_993 as unknown as string)).toThrow(RangeError);
     expect(() => parseDecimalU64('01')).toThrow(RangeError);
     expect(() => parseDecimalU64('18446744073709551616')).toThrow(RangeError);

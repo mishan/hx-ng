@@ -20,6 +20,7 @@ import {
   screenShareBlockedReason,
   VoiceSession,
   WireFailure,
+  CAP_FILES,
   CAP_HISTORY,
   CAP_INBOX,
   isFingerprint,
@@ -727,7 +728,7 @@ export class App {
         if (!conn.news) return this.say('This server has no news.');
         return this.showNews(true);
       case 'files':
-        if (!conn.hasCap('files')) return this.say('This server has no file area.');
+        if (!conn.hasCap(CAP_FILES)) return this.say('This server has no file area.');
         return this.showFiles(true);
       case 'history':
         if (!conn.hasCap(CAP_HISTORY)) return this.say('This server does not keep chat history.');
@@ -1246,7 +1247,7 @@ export class App {
       news.onclick = () => this.showNews(true);
     }
     let files: HTMLElement | null = null;
-    if (conn?.hasCap('files') && conn.state !== 'offline') {
+    if (conn?.hasCap(CAP_FILES) && conn.state !== 'offline') {
       files = h(
         'button',
         { class: `rail-item${this.filesOpen ? ' on' : ''}`, title: 'Files' },

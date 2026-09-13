@@ -52,6 +52,7 @@ import {
 import { connectScreen, remembered, type Details } from './connect';
 import { DebugPanel } from './debug';
 import { clock, fill, h } from './dom';
+import { FilesView } from './files';
 import { icon } from './icons';
 import { pickIcon } from './iconpicker';
 import { IdentityPanel } from './identity';
@@ -167,6 +168,8 @@ export class App {
     onUnread: () => this.renderRail(),
   });
   private newsOpen = false;
+  private files = new FilesView(() => this.conn);
+  private filesOpen = false;
   /** The account typed at the connect form, or `null` for a guest. */
   private account: string | null = null;
 
@@ -267,6 +270,8 @@ export class App {
     // session, and this one may not be allowed to see it.
     this.news.reset();
     this.newsOpen = false;
+    this.files.reset();
+    this.filesOpen = false;
     this.store.covered = false;
     this.chatPane.hidden = false;
     this.account = d.login.trim() || null;
@@ -339,6 +344,8 @@ export class App {
         // chat pane comes back so the reason just said is on screen.
         this.news.reset();
         this.showNews(false);
+        this.files.reset();
+        this.showFiles(false);
         // The paperclip goes with the session it belonged to. Left up,
         // it opens a picker whose upload can only fail with "not logged
         // in" — inert chrome saying something this client cannot do.
@@ -719,6 +726,9 @@ export class App {
       case 'news':
         if (!conn.news) return this.say('This server has no news.');
         return this.showNews(true);
+      case 'files':
+        if (!conn.hasCap('files')) return this.say('This server has no file area.');
+        return this.showFiles(true);
       case 'history':
         if (!conn.hasCap(CAP_HISTORY)) return this.say('This server does not keep chat history.');
         if (this.historyRefused) return this.say('This server will not show you its chat history.');
@@ -797,7 +807,7 @@ export class App {
         return;
       case 'help':
         return this.say(
-          '/me · /msg <nick or account> <text> · /history · /mail · /news · /block <who> · /unblock <who> · /blocks · ' +
+          '/me · /msg <nick or account> <text> · /history · /mail · /news · /files · /block <who> · /unblock <who> · /blocks · ' +
             '/nick <name> · /icon <n> · /clear · /close · /drop · /debug · /logout',
         );
       default:
@@ -823,6 +833,7 @@ export class App {
     // first: the conversation the reader was covering has still not
     // been looked at.
     if (this.newsOpen) this.showNews(false);
+    else if (this.filesOpen) this.showFiles(false);
     else this.seen(conv);
     this.renderRail();
     this.renderTranscript();
@@ -857,6 +868,7 @@ export class App {
   /** Swap the chat pane for the news reader, or back. The call bar and the
    *  video tiles sit above both, so a call carries on whichever is shown. */
   private showNews(open: boolean): void {
+    if (open && this.filesOpen) this.showFiles(false);
     const was = this.newsOpen;
     this.newsOpen = open;
     // The conversation the reader covers stays the active one, and what
@@ -865,6 +877,18 @@ export class App {
     this.chatPane.hidden = open;
     this.news.show(open);
     // Coming back to it is looking at it, the same as picking it.
+    const conv = this.store.conversation(this.store.active);
+    if (was && !open && conv) this.seen(conv);
+    this.renderRail();
+  }
+
+  private showFiles(open: boolean): void {
+    if (open && this.newsOpen) this.showNews(false);
+    const was = this.filesOpen;
+    this.filesOpen = open;
+    this.store.covered = open;
+    this.chatPane.hidden = open;
+    this.files.show(open);
     const conv = this.store.conversation(this.store.active);
     if (was && !open && conv) this.seen(conv);
     this.renderRail();
@@ -1174,7 +1198,7 @@ export class App {
 
   private renderRail(): void {
     const items = [...this.store.conversations.values()].map((c) => {
-      const active = !this.newsOpen && c.id === this.store.active;
+      const active = !this.newsOpen && !this.filesOpen && c.id === this.store.active;
       // Only a conversation whose other half is on the roster has a face
       // to show. One carried by an account alone — mail from someone who
       // is not here — falls back to the default icon.
@@ -1221,8 +1245,18 @@ export class App {
       );
       news.onclick = () => this.showNews(true);
     }
+    let files: HTMLElement | null = null;
+    if (conn?.hasCap('files') && conn.state !== 'offline') {
+      files = h(
+        'button',
+        { class: `rail-item${this.filesOpen ? ' on' : ''}`, title: 'Files' },
+        h('span', { class: 'rail-glyph' }, '▤'),
+        h('span', { class: 'rail-title' }, 'Files'),
+      );
+      files.onclick = () => this.showFiles(true);
+    }
     const [lobby, ...rest] = items;
-    fill(this.rail, h('div', { class: 'rail-head' }, 'Conversations'), lobby, news, ...rest);
+    fill(this.rail, h('div', { class: 'rail-head' }, 'Conversations'), lobby, news, files, ...rest);
   }
 
   private renderRoster(): void {
@@ -1511,10 +1545,10 @@ export class App {
           // the tile renderer, which is the only thing that knows what a
           // browser needs before it will paint a `<video>`.
           this.tiles.el,
-          // The chat pane and the news reader take turns in the rest of
-          // the column; exactly one of them is shown.
+          // Chat and the two server readers take turns in this space.
           this.chatPane,
           this.news.el,
+          this.files.el,
         ),
         // Both live inside `.panes` rather than the document, so the
         // slide-in panel is bounded by the pane area and never covers

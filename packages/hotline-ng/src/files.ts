@@ -40,7 +40,9 @@ const U64_MAX = 18_446_744_073_709_551_615n;
 
 /** Parse the wire's exact decimal-u64 representation. */
 export function parseDecimalU64(value: string): bigint {
-  if (!/^(0|[1-9][0-9]*)$/.test(value)) throw new RangeError('not a decimal u64');
+  if (typeof value !== 'string' || !/^(0|[1-9][0-9]*)$/.test(value)) {
+    throw new RangeError('not a decimal u64');
+  }
   const parsed = BigInt(value);
   if (parsed > U64_MAX) throw new RangeError('decimal value exceeds u64');
   return parsed;

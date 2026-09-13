@@ -189,6 +189,7 @@ export class FilesView {
         // Prepare after the picker: a token should not spend most of its
         // short life behind a human deciding where to save it.
         const prepared = await connection.prepareFileDownload(path);
+        size = parseDecimalU64(prepared.size);
         const response = await connection.fetchFile(prepared, { signal: abort.signal });
         const reader = response.body?.getReader();
         if (!reader) throw new Error('This browser cannot stream the download.');

@@ -48,6 +48,7 @@ describe('decimal u64 file sizes', () => {
     expect(parseDecimalU64('18446744073709551615')).toBe(18_446_744_073_709_551_615n);
     expect(decimalU64(4_294_967_297n)).toBe('4294967297');
     expect(formatFileSize(4_294_967_297n)).toBe('4.0 GiB');
+    expect(() => parseDecimalU64(9_007_199_254_740_993 as unknown as string)).toThrow(RangeError);
     expect(() => parseDecimalU64('01')).toThrow(RangeError);
     expect(() => parseDecimalU64('18446744073709551616')).toThrow(RangeError);
     expect(() => decimalU64(-1n)).toThrow(RangeError);
@@ -106,6 +107,18 @@ describe('Files requests and downloads', () => {
       'bytes=4294967296-',
     );
     expect(calls[0]?.init.signal).toBe(abort.signal);
+  });
+
+  it('rejects a full response when a byte range was requested', async () => {
+    server.on('files_download', () => ({ ok: { url: '/files/token', size: '9' } }));
+    vi.stubGlobal('fetch', () => Promise.resolve(new Response('all bytes', { status: 200 })));
+    const connection = new Connection(CREDS);
+    await connection.start();
+    const prepared = await connection.prepareFileDownload('x');
+
+    await expect(connection.fetchFile(prepared, { offset: 1n })).rejects.toMatchObject({
+      wire: { code: 'server_error' },
+    });
   });
 
   it('reports an expired bound token and never silently retries it', async () => {

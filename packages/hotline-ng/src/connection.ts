@@ -758,7 +758,8 @@ export class Connection {
       headers,
       signal: options.signal,
     });
-    if (response.ok) return response;
+    const expectedStatus = options.offset === undefined ? 200 : 206;
+    if (response.status === expectedStatus) return response;
     throw new WireFailure({
       code:
         response.status === 404

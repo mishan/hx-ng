@@ -14,6 +14,14 @@
 
 import { wsToHttp } from './identity.js';
 import {
+  decimalU64,
+  parseDecimalU64,
+  type FileDownloadOk,
+  type FileFetchOptions,
+  type FileInfo,
+  type FilesListOk,
+} from './files.js';
+import {
   isEvent,
   isReply,
   RATE_LIMITED,
@@ -704,6 +712,83 @@ export class Connection {
     });
     if (!res.ok) throw await mediaFailure(res);
     return res.blob();
+  }
+
+  // --- read-only Files (docs/hotline-ng.md §7.2) ----------------------
+
+  async filesList(path = ''): Promise<FilesListOk> {
+    const listing = await this.request<FilesListOk>('files_list', path ? { path } : {});
+    for (const entry of listing.entries) parseDecimalU64(entry.size);
+    return listing;
+  }
+
+  async fileInfo(path: string): Promise<FileInfo> {
+    const info = await this.request<FileInfo>('files_info', { path });
+    parseDecimalU64(info.size);
+    return info;
+  }
+
+  async prepareFileDownload(path: string): Promise<FileDownloadOk> {
+    const prepared = await this.request<FileDownloadOk>('files_download', { path });
+    parseDecimalU64(prepared.size);
+    return prepared;
+  }
+
+  /** Resolve a prepared same-server path without exposing the origin. */
+  fileDownloadUrl(prepared: FileDownloadOk): string {
+    if (!/^\/files\/[A-Za-z0-9_-]+$/.test(prepared.url)) {
+      throw new Error('invalid file download URL');
+    }
+    return `${this.httpBase()}${prepared.url}`;
+  }
+
+  /**
+   * Fetch once, optionally from an exact bigint offset. Tokens are reusable
+   * for a caller-directed resume, but this method never silently retries an
+   * expired or session-bound URL.
+   */
+  async fetchFile(prepared: FileDownloadOk, options: FileFetchOptions = {}): Promise<Response> {
+    const size = parseDecimalU64(prepared.size);
+    const headers: Record<string, string> = {};
+    if (options.offset !== undefined) {
+      if (options.offset >= size) throw new RangeError('file offset is beyond the end');
+      headers.Range = `bytes=${decimalU64(options.offset)}-`;
+    }
+    const response = await fetch(this.fileDownloadUrl(prepared), {
+      headers,
+      signal: options.signal,
+    });
+    const expectedStatus = options.offset === undefined ? 200 : 206;
+    if (response.status === expectedStatus) return response;
+    // Nobody will read a refused body, and a 200 to a ranged request is
+    // the whole file, still streaming. Let it go now, not when the
+    // response happens to be collected.
+    await response.body?.cancel().catch(() => undefined);
+    switch (response.status) {
+      // Unknown, expired and unauthorized tokens are one answer.
+      case 404:
+        throw new WireFailure({
+          code: 'not_found',
+          text: 'This download has expired or is no longer authorized.',
+        });
+      case 416:
+        throw new WireFailure({
+          code: 'range_invalid',
+          text: 'The server refused that resume offset.',
+        });
+      // Only a ranged request gets here with a 200: the server ignored
+      // `Range`, as it does for a file it cannot read from an offset.
+      case 200:
+        throw new WireFailure({
+          code: 'range_unsupported',
+          text: 'This file cannot be resumed; download it from the start.',
+        });
+      default:
+        throw new WireFailure({
+          code: 'server_error',
+          text: `The server answered ${response.status}.`,
+        });
+    }
   }
 
   /** The session's credential for the media routes: the public session

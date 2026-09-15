@@ -227,6 +227,10 @@ export class NewsView {
     preview: boolean;
     /** Images already staged on the server, in display order. */
     attachments: DraftAttachment[];
+    /** An upload for this draft is out. Held here rather than in `busy`,
+     *  so a draft canceled or replaced mid-upload takes it along, and
+     *  its late answer blocks nothing that comes after. */
+    uploading: boolean;
   } | null = null;
   /** The open name form: creating a node of `kind`, or renaming `node`.
    *  `name` is what is typed so far, kept for the same reason as a draft. */
@@ -806,6 +810,12 @@ export class NewsView {
     const d = this.draft;
     const s = this.screen;
     if (!conn || !cfg || !d || this.busy || !inCategory(s)) return;
+    if (d.uploading) {
+      // Post is disabled meanwhile; this is for Ctrl+Enter, from a box
+      // that keeps its caret.
+      this.error = 'Wait for the images to finish uploading.';
+      return this.paintError();
+    }
     const problem =
       draftProblem(d.subject, d.body, cfg) ??
       attachmentProblem(d.attachments, cfg) ??
@@ -849,9 +859,6 @@ export class NewsView {
         e instanceof WireFailure && e.wire.code === 'no_such_media' && d.attachments.length
           ? staleProblem(d.attachments)
           : describe(e);
-      // Not busy by the time it is drawn, or the attachment picker it
-      // draws stays disabled until something unrelated redraws.
-      this.busy = false;
       this.render();
     } finally {
       this.busy = false;
@@ -1078,6 +1085,17 @@ export class NewsView {
     this.acknowledge();
   }
 
+  /** Put `error` up, or take it down, where `render` draws it, without
+   *  redrawing the form someone is typing in. */
+  private paintError(): void {
+    this.body.querySelector(':scope > .news-error')?.remove();
+    if (!this.error) return;
+    const p = h('p', { class: 'news-error' }, this.error);
+    const notice = this.body.querySelector(':scope > .news-notice');
+    if (notice) notice.after(p);
+    else this.body.prepend(p);
+  }
+
   private renderBar(): void {
     const s = this.screen;
     const crumbs: HTMLElement[] = [];
@@ -1124,7 +1142,7 @@ export class NewsView {
       action(
         'New thread',
         () => {
-          this.draft = { subject: '', body: '', markdown: readNewsMarkdown(), preview: false, attachments: [] };
+          this.draft = { subject: '', body: '', markdown: readNewsMarkdown(), preview: false, attachments: [], uploading: false };
           this.focusDraft = true;
           this.render();
         },
@@ -1404,6 +1422,7 @@ export class NewsView {
           markdown: readNewsMarkdown(),
           preview: false,
           attachments: [],
+          uploading: false,
         };
         this.focusDraft = true;
         this.render();
@@ -1556,7 +1575,7 @@ export class NewsView {
     text.onkeydown = (e) => {
       if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
         e.preventDefault();
-        post.click();
+        void this.submit(parent);
       }
       // The chat composer's shortcuts, where they mean something.
       if (markdown() && (e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && (e.key === 'b' || e.key === 'i')) {
@@ -1618,60 +1637,67 @@ export class NewsView {
     showPreview(d.preview);
 
     const cfg = this.hooks.conn()?.news;
-    // Marked as of this draw. One that lapses while the form sits open is
-    // caught, and named, when Post is pressed.
-    const lapsed = new Set(expiredAttachments(d.attachments, Date.now()));
-    const attachments = h(
-      'div',
-      { class: 'news-compose-attachments' },
-      ...d.attachments.map((item, index) => {
-        const remove = h('button', { class: 'ghost', title: 'Remove attachment' }, '×');
-        remove.onclick = () => {
-          d.attachments.splice(index, 1);
-          this.render();
-        };
-        const gone = lapsed.has(index);
-        return h(
-          'span',
-          {
-            class: `news-attachment-chip${gone ? ' expired' : ''}`,
-            title: gone ? 'Expired on the server. Remove it and attach it again.' : undefined,
-          },
-          attachmentLabel(item, index),
-          remove,
-        );
-      }),
-    );
+    const attachments = h('div', { class: 'news-compose-attachments' });
+    let file: HTMLInputElement | null = null;
     let picker: HTMLElement | null = null;
+    // Redrawn in place rather than with the page: an upload ends while
+    // someone may be typing, and a whole redraw would take the caret, and
+    // any half-composed IME input, out from under them.
+    const paintAttachments = () => {
+      // Marked as of this paint. One that lapses while the form sits open
+      // is caught, and named, when Post is pressed.
+      const lapsed = new Set(expiredAttachments(d.attachments, Date.now()));
+      fill(
+        attachments,
+        ...d.attachments.map((item, index) => {
+          const name = attachmentLabel(item, index);
+          const remove = h('button', { class: 'ghost', title: 'Remove attachment', ariaLabel: `Remove ${name}` }, '×');
+          remove.onclick = () => {
+            d.attachments.splice(index, 1);
+            paintAttachments();
+          };
+          const gone = lapsed.has(index);
+          return h(
+            'span',
+            {
+              class: `news-attachment-chip${gone ? ' expired' : ''}`,
+              title: gone ? 'Expired on the server. Remove it and attach it again.' : undefined,
+            },
+            name,
+            remove,
+          );
+        }),
+      );
+      post.disabled = d.uploading;
+      if (file) file.disabled = d.uploading;
+      picker?.classList.toggle('busy', d.uploading);
+    };
     if (cfg?.attach) {
-      const file = h('input', {
+      const input = h('input', {
         type: 'file',
         accept: (cfg.types ?? ['image/jpeg', 'image/png', 'image/gif']).join(','),
         multiple: true,
         ariaLabel: 'Attach images',
-        disabled: this.busy,
       });
-      const label = h('label', { class: `news-attach-picker${this.busy ? ' busy' : ''}` }, 'Attach images', file);
-      file.onchange = async () => {
+      input.onchange = async () => {
         const conn = this.hooks.conn();
         // One upload at a time: a second pick made while the first is out
         // would pass the count check against a draft the first has not
         // added to yet.
-        if (!conn || !file.files || this.busy) return;
-        const chosen = [...file.files];
+        if (!conn || !input.files || d.uploading) return;
+        const chosen = [...input.files];
         const max = cfg.max_attachments ?? Infinity;
         if (d.attachments.length + chosen.length > max) {
           this.error = tooManyAttachments(max);
-          return this.render();
+          return this.paintError();
         }
         const tooLarge = chosen.find((f) => cfg.max_attachment_bytes !== undefined && f.size > cfg.max_attachment_bytes);
         if (tooLarge) {
           this.error = `${tooLarge.name} is too large.`;
-          return this.render();
+          return this.paintError();
         }
-        this.busy = true;
-        file.disabled = true;
-        label.classList.add('busy');
+        d.uploading = true;
+        paintAttachments();
         // Canceled, replaced or logged out of while an upload was out:
         // what comes back belongs to a draft nobody is writing, and its
         // result or its error must not land on the one that is.
@@ -1690,12 +1716,21 @@ export class NewsView {
         } catch (e) {
           if (current()) this.error = describe(e);
         } finally {
-          this.busy = false;
-          this.render();
+          d.uploading = false;
+          if (current()) {
+            // Something else may have redrawn the page meanwhile, and
+            // this form with it; then only a redraw reaches the new one.
+            if (attachments.isConnected) {
+              paintAttachments();
+              this.paintError();
+            } else this.render();
+          }
         }
       };
-      picker = label;
+      file = input;
+      picker = h('label', { class: 'news-attach-picker' }, 'Attach images', input);
     }
+    paintAttachments();
 
     return h(
       'div',

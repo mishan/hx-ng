@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { Connection, WireFailure, type Credentials } from '../src/connection';
-import { decimalU64, formatFileSize, parseDecimalU64 } from '../src/files';
+import { decimalU64, formatEntrySize, formatFileSize, parseDecimalU64 } from '../src/files';
 import type { LoginOk } from '../src/protocol';
 import { installFakeWire, uninstallFakeWire, type FakeServer } from './fake-wire';
 
@@ -53,6 +53,14 @@ describe('decimal u64 file sizes', () => {
     expect(() => parseDecimalU64('01')).toThrow(RangeError);
     expect(() => parseDecimalU64('18446744073709551616')).toThrow(RangeError);
     expect(() => decimalU64(-1n)).toThrow(RangeError);
+  });
+
+  it('read as a count of items for a folder, and as bytes for a file', () => {
+    expect(formatEntrySize({ kind: 'folder', size: '12' })).toBe('12 items');
+    expect(formatEntrySize({ kind: 'folder', size: '1' })).toBe('1 item');
+    expect(formatEntrySize({ kind: 'file', size: '12' })).toBe('12 bytes');
+    expect(formatEntrySize({ kind: 'file', size: '4294967297' })).toBe('4.0 GiB');
+    expect(() => formatEntrySize({ kind: 'folder', size: '01' })).toThrow(RangeError);
   });
 });
 
@@ -110,16 +118,26 @@ describe('Files requests and downloads', () => {
     expect(calls[0]?.init.signal).toBe(abort.signal);
   });
 
-  it('rejects a full response when a byte range was requested', async () => {
+  it('reports a range the server ignored, and lets go of the whole file it sent', async () => {
     server.on('files_download', () => ({ ok: { url: '/files/token', size: '9' } }));
-    vi.stubGlobal('fetch', () => Promise.resolve(new Response('all bytes', { status: 200 })));
+    let canceled = false;
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('all bytes'));
+      },
+      cancel() {
+        canceled = true;
+      },
+    });
+    vi.stubGlobal('fetch', () => Promise.resolve(new Response(body, { status: 200 })));
     const connection = new Connection(CREDS);
     await connection.start();
     const prepared = await connection.prepareFileDownload('x');
 
     await expect(connection.fetchFile(prepared, { offset: 1n })).rejects.toMatchObject({
-      wire: { code: 'server_error' },
+      wire: { code: 'range_unsupported' },
     });
+    expect(canceled).toBe(true);
   });
 
   it('reports an expired bound token and never silently retries it', async () => {
@@ -131,7 +149,7 @@ describe('Files requests and downloads', () => {
     const prepared = await connection.prepareFileDownload('x');
     const failed = connection.fetchFile(prepared);
     await expect(failed).rejects.toBeInstanceOf(WireFailure);
-    await expect(failed).rejects.toMatchObject({ wire: { code: 'download_expired' } });
+    await expect(failed).rejects.toMatchObject({ wire: { code: 'not_found' } });
     expect(fetch).toHaveBeenCalledTimes(1);
   });
 });

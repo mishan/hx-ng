@@ -72,3 +72,13 @@ export function formatFileSize(value: bigint): string {
   }
   return `${tenths / 10n}.${tenths % 10n} ${units[unit]}`;
 }
+
+/** An entry's `size` as a person reads it. A folder's is how many items
+ *  it holds, not bytes, as a classic client shows it. */
+export function formatEntrySize(entry: Pick<FileEntry, 'kind' | 'size'>): string {
+  const value = parseDecimalU64(entry.size);
+  if (entry.kind === 'folder') {
+    return `${value.toLocaleString()} ${value === 1n ? 'item' : 'items'}`;
+  }
+  return formatFileSize(value);
+}

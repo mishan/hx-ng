@@ -119,12 +119,13 @@ What it handles so a caller does not have to:
 
 The read-only Files API keeps full `u64` values as decimal strings on the
 wire. Convert them with `parseDecimalU64`; `formatFileSize` formats the
-result without rounding it through a JavaScript number.
+result without rounding it through a JavaScript number. A folder's `size`
+is how many items it holds, not bytes, and `formatEntrySize` says which.
 
 ```ts
 const listing = await conn.filesList('manuals');
 for (const entry of listing.entries) {
-  console.log(entry.name, formatFileSize(parseDecimalU64(entry.size)));
+  console.log(entry.name, formatEntrySize(entry)); // "3 items", "1.2 MiB"
 }
 
 const prepared = await conn.prepareFileDownload('manuals/guide.pdf');
@@ -136,7 +137,9 @@ const response = await conn.fetchFile(prepared, {
 
 `fetchFile` performs exactly one request. A caller may prepare again or reuse
 an unexpired token with another explicit offset, but an expired or
-session-bound token is never retried silently.
+session-bound token is never retried silently. An unknown, expired or
+unauthorized token rejects with `not_found`, and a resume from a file the
+server cannot read from an offset with `range_unsupported`.
 
 ### `VoiceSession` — the SFU
 

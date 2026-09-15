@@ -1034,14 +1034,32 @@ dialog.picker header input { width: 9rem; }
 .file-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .file-size { color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .files-state { margin: 1rem; color: var(--muted); }
-.files-state.error, .file-progress .error { color: var(--warn); }
+.files-state.error, .files-transfer .error { color: var(--warn); }
+.files-page { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .file-info { padding: 1rem; overflow-y: auto; }
 .file-info h2 { margin: 0 0 0.75rem; font-size: 1.2rem; overflow-wrap: anywhere; }
 .file-info dl { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 0.35rem 0.8rem; }
 .file-info dt { color: var(--muted); }
 .file-info dd { margin: 0; overflow-wrap: anywhere; }
 .file-actions { display: flex; gap: 0.5rem; margin-top: 1rem; }
-.file-progress { margin-top: 0.75rem; color: var(--muted); font-variant-numeric: tabular-nums; }
+/* The download under way, kept under whichever folder is being looked at. */
+.files-transfer {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.45rem 0.75rem;
+  border-top: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+.files-transfer button.ghost {
+  padding: 0.2rem 0.5rem;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+}
 
 .news-bar {
   display: flex;

@@ -760,20 +760,35 @@ export class Connection {
     });
     const expectedStatus = options.offset === undefined ? 200 : 206;
     if (response.status === expectedStatus) return response;
-    throw new WireFailure({
-      code:
-        response.status === 404
-          ? 'download_expired'
-          : response.status === 416
-            ? 'range_invalid'
-            : 'server_error',
-      text:
-        response.status === 404
-          ? 'This download has expired or is no longer authorized.'
-          : response.status === 416
-            ? 'The server refused that resume offset.'
-            : `The server answered ${response.status}.`,
-    });
+    // Nobody will read a refused body, and a 200 to a ranged request is
+    // the whole file, still streaming. Let it go now, not when the
+    // response happens to be collected.
+    await response.body?.cancel().catch(() => undefined);
+    switch (response.status) {
+      // Unknown, expired and unauthorized tokens are one answer.
+      case 404:
+        throw new WireFailure({
+          code: 'not_found',
+          text: 'This download has expired or is no longer authorized.',
+        });
+      case 416:
+        throw new WireFailure({
+          code: 'range_invalid',
+          text: 'The server refused that resume offset.',
+        });
+      // Only a ranged request gets here with a 200: the server ignored
+      // `Range`, as it does for a file it cannot read from an offset.
+      case 200:
+        throw new WireFailure({
+          code: 'range_unsupported',
+          text: 'This file cannot be resumed; download it from the start.',
+        });
+      default:
+        throw new WireFailure({
+          code: 'server_error',
+          text: `The server answered ${response.status}.`,
+        });
+    }
   }
 
   /** The session's credential for the media routes: the public session

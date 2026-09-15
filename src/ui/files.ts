@@ -1,4 +1,5 @@
 import {
+  formatEntrySize,
   formatFileSize,
   parseDecimalU64,
   WireFailure,
@@ -23,17 +24,25 @@ type SavePicker = (options: { suggestedName: string }) => Promise<SaveHandle>;
 
 export class FilesView {
   readonly el = h('section', { class: 'files-view', hidden: true });
+  /** What navigation redraws: the bar, and the listing or the details. */
+  private page = h('div', { class: 'files-page' });
+  /** The download under way, or how the last one ended. Outside `page`,
+   *  so a download outlives looking at another folder, or at chat; only
+   *  `reset`, which ends the session its token is bound to anyway,
+   *  cancels it. */
+  private transfer = h('div', { class: 'files-transfer', hidden: true });
   private path = '';
   private generation = 0;
+  /** The download under way, which is also what makes one at a time. */
   private abort: AbortController | null = null;
-  private downloading = false;
 
-  constructor(private connection: () => Connection | null) {}
+  constructor(private connection: () => Connection | null) {
+    this.el.append(this.page, this.transfer);
+  }
 
   show(open: boolean): void {
     this.el.hidden = !open;
     if (open) void this.load(this.path);
-    else this.abort?.abort();
   }
 
   reset(): void {
@@ -42,15 +51,16 @@ export class FilesView {
     this.abort = null;
     this.path = '';
     this.el.hidden = true;
-    this.el.replaceChildren();
+    this.page.replaceChildren();
+    this.transfer.replaceChildren();
+    this.transfer.hidden = true;
   }
 
   private async load(path: string): Promise<void> {
-    this.abort?.abort();
     const connection = this.connection();
     if (!connection) return;
     const generation = ++this.generation;
-    fill(this.el, this.bar(path), h('p', { class: 'files-state' }, 'Loading…'));
+    fill(this.page, this.bar(path), h('p', { class: 'files-state' }, 'Loading…'));
     try {
       const listing = await connection.filesList(path);
       if (generation !== this.generation) return;
@@ -59,7 +69,7 @@ export class FilesView {
     } catch (error) {
       if (generation !== this.generation) return;
       fill(
-        this.el,
+        this.page,
         this.bar(path),
         h('p', { class: 'files-state error' }, this.message(error)),
       );
@@ -97,7 +107,7 @@ export class FilesView {
         { class: 'file-row' },
         h('span', { class: 'file-glyph' }, entry.kind === 'folder' ? '▸' : '□'),
         h('span', { class: 'file-name' }, entry.name),
-        h('span', { class: 'file-size' }, formatFileSize(parseDecimalU64(entry.size))),
+        h('span', { class: 'file-size' }, formatEntrySize(entry)),
       );
       const path = this.path ? `${this.path}/${entry.name}` : entry.name;
       button.onclick = () =>
@@ -108,15 +118,14 @@ export class FilesView {
     body.append(
       ...(rows.length ? rows : [h('p', { class: 'files-state' }, 'This folder is empty.')]),
     );
-    fill(this.el, this.bar(this.path), body);
+    fill(this.page, this.bar(this.path), body);
   }
 
   private async inspect(path: string): Promise<void> {
-    this.abort?.abort();
     const connection = this.connection();
     if (!connection) return;
     const generation = ++this.generation;
-    fill(this.el, this.bar(this.path), h('p', { class: 'files-state' }, 'Loading details…'));
+    fill(this.page, this.bar(this.path), h('p', { class: 'files-state' }, 'Loading details…'));
     try {
       const info = await connection.fileInfo(path);
       if (generation !== this.generation) return;
@@ -124,7 +133,7 @@ export class FilesView {
     } catch (error) {
       if (generation !== this.generation) return;
       fill(
-        this.el,
+        this.page,
         this.bar(this.path),
         h('p', { class: 'files-state error' }, this.message(error)),
       );
@@ -133,13 +142,16 @@ export class FilesView {
 
   private renderInfo(info: FileInfo): void {
     const size = parseDecimalU64(info.size);
-    const download = h('button', { class: 'primary' }, 'Download');
-    const progress = h('div', { class: 'file-progress' });
-    download.onclick = () => void this.download(info.path, info.name, size, progress, download);
+    const download = h(
+      'button',
+      { class: 'primary file-download', disabled: this.abort !== null },
+      'Download',
+    );
+    download.onclick = () => void this.download(info.path, info.name, size, download);
     const back = h('button', { class: 'ghost' }, 'Back');
     back.onclick = () => void this.load(this.path);
     fill(
-      this.el,
+      this.page,
       this.bar(this.path),
       h(
         'article',
@@ -153,7 +165,6 @@ export class FilesView {
           info.comment ? h('dd', {}, info.comment) : null,
         ),
         h('div', { class: 'file-actions' }, back, download),
-        progress,
       ),
     );
   }
@@ -162,16 +173,21 @@ export class FilesView {
     path: string,
     name: string,
     size: bigint,
-    progress: HTMLElement,
-    button: HTMLElement,
+    button: HTMLButtonElement,
   ): Promise<void> {
-    if (this.downloading) return;
+    if (this.abort) return;
     const connection = this.connection();
     if (!connection) return;
-    this.downloading = true;
-    button.setAttribute('disabled', '');
+    button.disabled = true;
     const abort = new AbortController();
     this.abort = abort;
+    // A download `reset` has let go of says nothing more: the strip it
+    // would write to now belongs to whatever comes next.
+    const status = (...children: (Node | string)[]) => {
+      if (this.abort !== abort) return;
+      this.transfer.hidden = false;
+      fill(this.transfer, ...children);
+    };
     const picker = (globalThis as { showSaveFilePicker?: SavePicker }).showSaveFilePicker;
     try {
       if (!picker) {
@@ -185,7 +201,7 @@ export class FilesView {
         document.body.append(link);
         link.click();
         link.remove();
-        fill(progress, 'Download handed to the browser.');
+        status(`${name} was handed to the browser.`);
         return;
       }
       const handle = await picker({ suggestedName: name });
@@ -193,7 +209,7 @@ export class FilesView {
       const writable = await handle.createWritable();
       const cancel = h('button', { class: 'ghost danger' }, 'Cancel');
       cancel.onclick = () => abort.abort();
-      fill(progress, `Starting ${formatFileSize(size)}… `, cancel);
+      status(`${name}: starting ${formatFileSize(size)}… `, cancel);
       try {
         // Prepare after the picker: a token should not spend most of its
         // short life behind a human deciding where to save it.
@@ -208,29 +224,30 @@ export class FilesView {
           if (done) break;
           await writable.write(value);
           received += BigInt(value.byteLength);
-          fill(
-            progress,
-            `${formatFileSize(received)} of ${formatFileSize(size)} `,
-            cancel,
-          );
+          status(`${name}: ${formatFileSize(received)} of ${formatFileSize(size)} `, cancel);
         }
         if (received !== size) throw new Error('The download ended before its declared size.');
         await writable.close();
-        fill(progress, `Saved ${formatFileSize(received)}.`);
+        status(`Saved ${name}, ${formatFileSize(received)}.`);
       } catch (error) {
         await writable.abort().catch(() => undefined);
         throw error;
       }
     } catch (error) {
       if (error instanceof DOMException && error.name === 'AbortError') {
-        fill(progress, 'Download canceled.');
+        status(`${name}: download canceled.`);
       } else {
-        fill(progress, h('span', { class: 'error' }, this.message(error)));
+        status(h('span', { class: 'error' }, `${name}: ${this.message(error)}`));
       }
     } finally {
-      if (this.abort === abort) this.abort = null;
-      this.downloading = false;
-      button.removeAttribute('disabled');
+      if (this.abort === abort) {
+        this.abort = null;
+        // The button that started it may have been redrawn since; any
+        // Download on screen now waited on this one.
+        for (const b of this.page.querySelectorAll<HTMLButtonElement>('.file-download')) {
+          b.disabled = false;
+        }
+      }
     }
   }
 

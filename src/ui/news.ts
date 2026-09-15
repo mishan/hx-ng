@@ -37,6 +37,7 @@ import {
   type Connection,
   type Events,
   type NewsArticle,
+  type NewsAttachment,
   type NewsHit,
   type NewsNode,
   type NewsNodeKind,
@@ -47,10 +48,14 @@ import {
 } from '@hotline-ng/client';
 
 import {
+  attachmentLabel,
+  attachmentProblem,
   canReply,
   coalesced,
   draftProblem,
   excerpt,
+  expiredAttachments,
+  expiryProblem,
   Following,
   highestId,
   indexTree,
@@ -61,10 +66,14 @@ import {
   nextSearchOffset,
   notifiesThread,
   replySubject,
+  staleProblem,
+  tooManyAttachments,
   trailTo,
+  type DraftAttachment,
 } from '../news';
 import { fill, h, linkify } from './dom';
 import { blockNodes, wrapSelection } from './markdown';
+import { MediaCache } from './media';
 
 const NEWS_MARKDOWN_KEY = 'hxd-ng.news-markdown';
 
@@ -216,6 +225,12 @@ export class NewsView {
     markdown: boolean;
     /** Showing the rendered draft rather than the box. */
     preview: boolean;
+    /** Images already staged on the server, in display order. */
+    attachments: DraftAttachment[];
+    /** An upload for this draft is out. Held here rather than in `busy`,
+     *  so a draft canceled or replaced mid-upload takes it along, and
+     *  its late answer blocks nothing that comes after. */
+    uploading: boolean;
   } | null = null;
   /** The open name form: creating a node of `kind`, or renaming `node`.
    *  `name` is what is typed so far, kept for the same reason as a draft. */
@@ -231,6 +246,15 @@ export class NewsView {
   /** Bumped by `reset`, so a subscription answer that was in flight
    *  across a change of session is not taken for the new one's. */
   private session = 0;
+  /** Article images: one fetch per handle, blob URLs released with the
+   *  session, and the transcript's refusals — a type a browser would
+   *  execute, a handle the server already would not give. */
+  private images = new MediaCache((conn, id) => conn.fetchNewsAttachment(id));
+  /** Starts an image's fetch once its placeholder nears the viewport, so
+   *  opening a thread does not download every picture in it. */
+  private nearby: IntersectionObserver | null = null;
+  /** What each placeholder still being watched will start. */
+  private deferred = new Map<Element, () => void>();
   /** Whether a jump to an article may still land: of two in flight only
    *  the newer, and neither once the reader has moved on. */
   private jumps = new Jumps(() => this.screen);
@@ -294,6 +318,8 @@ export class NewsView {
     this.hitsNext = null;
     this.searchBox.value = '';
     this.following.clear();
+    this.forgetDeferred();
+    this.images.clear();
     this.session++;
     this.el.hidden = true;
   }
@@ -784,7 +810,16 @@ export class NewsView {
     const d = this.draft;
     const s = this.screen;
     if (!conn || !cfg || !d || this.busy || !inCategory(s)) return;
-    const problem = draftProblem(d.subject, d.body, cfg);
+    if (d.uploading) {
+      // Post is disabled meanwhile; this is for Ctrl+Enter, from a box
+      // that keeps its caret.
+      this.error = 'Wait for the images to finish uploading.';
+      return this.paintError();
+    }
+    const problem =
+      draftProblem(d.subject, d.body, cfg) ??
+      attachmentProblem(d.attachments, cfg) ??
+      expiryProblem(d.attachments, Date.now());
     if (problem) {
       this.error = problem;
       return this.render();
@@ -794,7 +829,13 @@ export class NewsView {
       // The source, verbatim, and its type: the server stores what was
       // typed and every reader renders it for themselves.
       const mime = markdownOffered(cfg) && d.markdown ? { mime: 'text/markdown' } : {};
-      const params = { category: s.category.id, subject: d.subject.trim(), body: d.body, ...mime };
+      const params = {
+        category: s.category.id,
+        subject: d.subject.trim(),
+        body: d.body,
+        attach: d.attachments.map((a) => a.id),
+        ...mime,
+      };
       const { id } = await conn.newsPost(parent ? { ...params, parent: parent.id } : params);
       // Posted, wherever the reader is now. One who moved on while it
       // went is left there, along with any draft they started there.
@@ -812,7 +853,12 @@ export class NewsView {
       }
     } catch (e) {
       if (this.screen !== s) return;
-      this.error = describe(e);
+      // Only a staged handle draws this from a post, and none had lapsed
+      // by this page's clock or the check above would have said so.
+      this.error =
+        e instanceof WireFailure && e.wire.code === 'no_such_media' && d.attachments.length
+          ? staleProblem(d.attachments)
+          : describe(e);
       this.render();
     } finally {
       this.busy = false;
@@ -1001,6 +1047,9 @@ export class NewsView {
 
   private render(): void {
     this.renderBar();
+    // Every placeholder the last draw was watching is about to be
+    // replaced, and this draw watches its own.
+    this.forgetDeferred();
     const s = this.screen;
     const content =
       s.at === 'tree'
@@ -1034,6 +1083,17 @@ export class NewsView {
       field?.focus();
     }
     this.acknowledge();
+  }
+
+  /** Put `error` up, or take it down, where `render` draws it, without
+   *  redrawing the form someone is typing in. */
+  private paintError(): void {
+    this.body.querySelector(':scope > .news-error')?.remove();
+    if (!this.error) return;
+    const p = h('p', { class: 'news-error' }, this.error);
+    const notice = this.body.querySelector(':scope > .news-notice');
+    if (notice) notice.after(p);
+    else this.body.prepend(p);
   }
 
   private renderBar(): void {
@@ -1082,7 +1142,7 @@ export class NewsView {
       action(
         'New thread',
         () => {
-          this.draft = { subject: '', body: '', markdown: readNewsMarkdown(), preview: false };
+          this.draft = { subject: '', body: '', markdown: readNewsMarkdown(), preview: false, attachments: [], uploading: false };
           this.focusDraft = true;
           this.render();
         },
@@ -1346,13 +1406,24 @@ export class NewsView {
         h('div', { class: 'news-subject-line' }, a.subject),
         h('div', { class: isMarkdown(a.mime) ? 'news-text md' : 'news-text' }, ...this.bodyNodes(a)),
       );
+      if (a.attachments.length) {
+        el.append(h('div', { class: 'news-attachments' }, ...a.attachments.map((item) => this.attachmentEl(item))));
+      }
     }
 
     const actions: HTMLElement[] = [];
     if (canReply(a, cfg)) {
       const reply = h('button', {}, 'Reply');
       reply.onclick = () => {
-        this.draft = { parent: a.id, subject: replySubject(a.subject), body: '', markdown: readNewsMarkdown(), preview: false };
+        this.draft = {
+          parent: a.id,
+          subject: replySubject(a.subject),
+          body: '',
+          markdown: readNewsMarkdown(),
+          preview: false,
+          attachments: [],
+          uploading: false,
+        };
         this.focusDraft = true;
         this.render();
       };
@@ -1399,6 +1470,73 @@ export class NewsView {
     );
   }
 
+  /** An article's image: a placeholder at the image's own proportions,
+   *  so the thread does not reflow as pictures land, which becomes the
+   *  picture once it is near enough to be worth fetching. */
+  private attachmentEl(item: NewsAttachment): HTMLElement {
+    const img = h('img', {
+      class: 'news-attachment',
+      alt: item.name ?? 'Article attachment',
+      width: item.width,
+      height: item.height,
+    });
+    const figure = h('figure', { class: 'news-attachment-wrap' }, img, item.name ? h('figcaption', {}, item.name) : null);
+    this.images.attach(this.hooks.conn());
+    // One already in hand goes straight in, so a redraw does not blank it.
+    const held = this.images.held(item.id);
+    if (held) {
+      img.src = held;
+      return figure;
+    }
+    // The fetch is what is deferred, not the `<img>`: `loading="lazy"`
+    // would defer nothing, because by the time there is a `src` the
+    // bytes are already here.
+    this.whenNear(figure, () => {
+      this.images.attach(this.hooks.conn());
+      // The type is the article's, not the response's; the cache builds
+      // the blob with it and refuses one a browser would execute.
+      void this.images.url(item.id, item.type).then((url) => {
+        // Redrawn or navigated away from while it was fetched: nothing
+        // is showing this one to decode it for.
+        if (!figure.isConnected) return;
+        if (url) img.src = url;
+        else img.classList.add('missing');
+      });
+    });
+    return figure;
+  }
+
+  /** Call `load` once `el` is within a screen or so of the news pane's
+   *  visible part — or straight away where there is no
+   *  `IntersectionObserver` to ask. Watched until it fires or the next
+   *  render, whichever is first. */
+  private whenNear(el: Element, load: () => void): void {
+    if (typeof IntersectionObserver === 'undefined') return load();
+    this.nearby ??= new IntersectionObserver(
+      (entries) => {
+        for (const e of entries) {
+          if (!e.isIntersecting) continue;
+          this.nearby?.unobserve(e.target);
+          const run = this.deferred.get(e.target);
+          this.deferred.delete(e.target);
+          run?.();
+        }
+      },
+      // The pane scrolls, not the page, so it is the root; the margin is
+      // so an image is fetched before it is scrolled to rather than after.
+      { root: this.body, rootMargin: '600px 0px' },
+    );
+    this.deferred.set(el, load);
+    this.nearby.observe(el);
+  }
+
+  /** Stop watching every placeholder: they are about to be replaced, or
+   *  the session they would be fetched through is over. */
+  private forgetDeferred(): void {
+    this.nearby?.disconnect();
+    this.deferred.clear();
+  }
+
   private refLink(r: NewsReference, label: string | (Node | string)[]): HTMLElement {
     const link = h(
       'a',
@@ -1437,7 +1575,7 @@ export class NewsView {
     text.onkeydown = (e) => {
       if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
         e.preventDefault();
-        post.click();
+        void this.submit(parent);
       }
       // The chat composer's shortcuts, where they mean something.
       if (markdown() && (e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && (e.key === 'b' || e.key === 'i')) {
@@ -1498,12 +1636,110 @@ export class NewsView {
     paint();
     showPreview(d.preview);
 
+    const cfg = this.hooks.conn()?.news;
+    const attachments = h('div', { class: 'news-compose-attachments' });
+    let file: HTMLInputElement | null = null;
+    let picker: HTMLElement | null = null;
+    // Redrawn in place rather than with the page: an upload ends while
+    // someone may be typing, and a whole redraw would take the caret, and
+    // any half-composed IME input, out from under them.
+    const paintAttachments = () => {
+      // Marked as of this paint. One that lapses while the form sits open
+      // is caught, and named, when Post is pressed.
+      const lapsed = new Set(expiredAttachments(d.attachments, Date.now()));
+      fill(
+        attachments,
+        ...d.attachments.map((item, index) => {
+          const name = attachmentLabel(item, index);
+          const remove = h('button', { class: 'ghost', title: 'Remove attachment', ariaLabel: `Remove ${name}` }, '×');
+          remove.onclick = () => {
+            d.attachments.splice(index, 1);
+            paintAttachments();
+          };
+          const gone = lapsed.has(index);
+          return h(
+            'span',
+            {
+              class: `news-attachment-chip${gone ? ' expired' : ''}`,
+              title: gone ? 'Expired on the server. Remove it and attach it again.' : undefined,
+            },
+            name,
+            remove,
+          );
+        }),
+      );
+      post.disabled = d.uploading;
+      if (file) file.disabled = d.uploading;
+      picker?.classList.toggle('busy', d.uploading);
+    };
+    if (cfg?.attach) {
+      const input = h('input', {
+        type: 'file',
+        accept: (cfg.types ?? ['image/jpeg', 'image/png', 'image/gif']).join(','),
+        multiple: true,
+        ariaLabel: 'Attach images',
+      });
+      input.onchange = async () => {
+        const conn = this.hooks.conn();
+        // One upload at a time: a second pick made while the first is out
+        // would pass the count check against a draft the first has not
+        // added to yet.
+        if (!conn || !input.files || d.uploading) return;
+        const chosen = [...input.files];
+        const max = cfg.max_attachments ?? Infinity;
+        if (d.attachments.length + chosen.length > max) {
+          this.error = tooManyAttachments(max);
+          return this.paintError();
+        }
+        const tooLarge = chosen.find((f) => cfg.max_attachment_bytes !== undefined && f.size > cfg.max_attachment_bytes);
+        if (tooLarge) {
+          this.error = `${tooLarge.name} is too large.`;
+          return this.paintError();
+        }
+        d.uploading = true;
+        paintAttachments();
+        // Canceled, replaced or logged out of while an upload was out:
+        // what comes back belongs to a draft nobody is writing, and its
+        // result or its error must not land on the one that is.
+        const session = this.session;
+        const current = () => this.draft === d && this.session === session;
+        try {
+          for (const image of chosen) {
+            const staged = await conn.uploadNewsAttachment(image, image.name);
+            if (!current()) return;
+            // Counted from the answer, which the server's own clock
+            // started before; a post that loses that race gets the
+            // server's refusal, said the same way.
+            d.attachments.push({ ...staged, expiresAt: Date.now() + staged.expires_in * 1000 });
+          }
+          this.error = null;
+        } catch (e) {
+          if (current()) this.error = describe(e);
+        } finally {
+          d.uploading = false;
+          if (current()) {
+            // Something else may have redrawn the page meanwhile, and
+            // this form with it; then only a redraw reaches the new one.
+            if (attachments.isConnected) {
+              paintAttachments();
+              this.paintError();
+            } else this.render();
+          }
+        }
+      };
+      file = input;
+      picker = h('label', { class: 'news-attach-picker' }, 'Attach images', input);
+    }
+    paintAttachments();
+
     return h(
       'div',
       { class: 'news-compose' },
       subject,
       text,
       preview,
+      attachments,
+      picker,
       h('div', { class: 'news-compose-actions' }, post, cancel, previewBtn, toggle, hint),
     );
   }

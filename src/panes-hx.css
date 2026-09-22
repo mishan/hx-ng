@@ -1,0 +1,65 @@
+/*
+ * What this client has to say to mullion: the answers to questions the
+ * layout asks and a tiler could not have known.
+ */
+
+/* The visible box, not the layout viewport. `ui/viewport.ts` sets
+   `--app-height` from `visualViewport` because `100dvh` accounts for a
+   browser's retracting chrome and not for the on-screen keyboard drawn
+   over the composer. The tiler reads `--pane-height` for exactly this. */
+body.tiled {
+  padding: 0;
+  --pane-height: var(--app-height, 100dvh);
+}
+
+/* What the tiler is drawn in, said in this app's own colors. */
+body.tiled .panesroot {
+  --pane-fg: var(--text);
+  --pane-bg: var(--surface);
+  --pane-dim: var(--muted);
+  --pane-panel: var(--surface-2);
+  --pane-line: var(--line);
+  --pane-held: var(--accent);
+}
+
+/* The shell's own grid is the layout the tiler is replacing; while it is
+   on, the container is a column with the call bar and the video strip
+   above it. */
+body.tiled .panes {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+body.tiled .panes > main {
+  flex: 0 0 auto;
+  min-height: 0;
+  display: contents;
+}
+
+body.tiled .scrim {
+  display: none;
+}
+
+/* What the panels assume about where they sit. Each was a cell of that
+   grid and carried the border between itself and the next; in a pane the
+   frame is the tiler's and the border is a second line beside it. */
+body.tiled .rail,
+body.tiled .roster {
+  border: 0;
+  position: static;
+  width: auto;
+  height: auto;
+  transform: none;
+}
+
+/* And which of these boxes takes the room a pane has. No tiler can know
+   that -- it has a box to fill and nothing about what is in it. */
+body.tiled .panebody > .rail,
+body.tiled .panebody > .roster,
+body.tiled .panebody > .chat-pane,
+body.tiled .panebody > .news,
+body.tiled .panebody > .files {
+  flex: 1 1 auto;
+  min-height: 0;
+}

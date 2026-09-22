@@ -42,7 +42,12 @@ export class FilesView {
 
   show(open: boolean): void {
     this.el.hidden = !open;
-    if (open) void this.load(this.path);
+    this.shown(open);
+  }
+
+  /** On screen or not, without touching `hidden`. See `NewsView.shown`. */
+  shown(on: boolean): void {
+    if (on) void this.load(this.path);
   }
 
   reset(): void {

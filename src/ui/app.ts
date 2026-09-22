@@ -64,6 +64,41 @@ import { MediaCache } from './media';
 import { NewsView } from './news';
 import { appendLine, isAtBottom, keepingPlace, renderTranscript, scrollToEnd } from './transcript';
 import { wrapSelection } from './markdown';
+import { createPanes, type PaneNode, type Panes } from 'mullion';
+
+/** Mark an element as one of the tiler's panes.
+ *
+ *  The tiler takes its panes from the document: `catalog` is a list of
+ *  ids and everything else about a pane -- its title, how narrow it may
+ *  be made -- is an attribute on the element. That suits a page whose
+ *  panels are written in markup. Nothing here is: `index.html` is a
+ *  `<div id="root">` and the shell is built by `h()`, so what is one
+ *  attribute over there is four assignments here, on an element we made
+ *  a line ago and already know everything about.
+ */
+function pane(el: HTMLElement, id: string, title: string, min: number): HTMLElement {
+  el.id = id;
+  el.dataset.pane = '';
+  el.dataset.paneTitle = title;
+  el.dataset.paneMin = String(min);
+  return el;
+}
+
+/** Every panel this client tiles, in the order the shell builds them. */
+const PANES = ['rail', 'chat', 'news', 'files', 'roster'];
+
+/** Where they go the first time somebody opens this in a window with
+ *  room. Chat, news and files are tabs of one leaf, which is the whole
+ *  point: they take turns in the same space today, by hiding each other. */
+const LAYOUT: PaneNode = {
+  dir: 'row',
+  size: [0.16, 0.62, 0.22],
+  kids: [
+    { tabs: ['rail'] },
+    { tabs: ['chat', 'news', 'files'] },
+    { tabs: ['roster'] },
+  ],
+};
 
 /** Codes that mean "not for you, not now, not ever on this session":
  *  no log configured, no privilege, or a request this server will not
@@ -168,6 +203,10 @@ export class App {
     me: () => this.conn?.self?.identity?.account ?? this.account,
     onUnread: () => this.renderRail(),
   });
+  private panes: Panes | null = null;
+  /** Where the tiler draws, when it is on. Its own box inside `.panes`
+   *  so the shell's own children are what it adopts from. */
+  private tiler = h('div', { class: 'tiler' });
   private newsOpen = false;
   private files = new FilesView(() => this.conn);
   private filesOpen = false;
@@ -227,6 +266,27 @@ export class App {
       () => this.identityPanel.toggle(true),
     );
     this.root.append(screen, this.shell, this.debug.el, this.identityPanel.el);
+
+    // After the shell is in the document: the tiler finds its panes with
+    // getElementById, so nothing it is given may still be detached.
+    this.panes = createPanes({
+      root: this.tiler,
+      catalog: PANES,
+      layouts: { hotline: LAYOUT },
+      mode: 'hotline',
+      store: 'hx-panes',
+      editing: '.composer-input, .md-body',
+      on: true,
+      // The whole of what tiling asks of a page: a reader that nobody
+      // can see does not have to fetch anything, and one brought forward
+      // does. `shown` and not `show`, because the layout owns `hidden`
+      // while it is up and `show` would write it.
+      onShow: (id, on) => {
+        if (id === 'news') this.news.shown(on);
+        else if (id === 'files') this.files.shown(on);
+      },
+    });
+
     // `?debug` opens the drawer before the first frame, which is what you
     // want when the thing you are debugging is the login itself.
     if (new URLSearchParams(location.search).has('debug')) this.debug.toggle(true);
@@ -274,7 +334,7 @@ export class App {
     this.files.reset();
     this.filesOpen = false;
     this.store.covered = false;
-    this.chatPane.hidden = false;
+    if (!this.tiling) this.chatPane.hidden = false;
     this.account = d.login.trim() || null;
     const creds: Credentials = { ...d };
     const conn = new Connection(creds, {
@@ -875,12 +935,30 @@ export class App {
     // The conversation the reader covers stays the active one, and what
     // arrives in it while nobody can see it is unread like anywhere else.
     this.store.covered = open;
-    this.chatPane.hidden = open;
-    this.news.show(open);
+    this.raise(open ? 'news' : 'chat', open);
+    if (this.tiling) this.news.shown(open);
+    else this.news.show(open);
     // Coming back to it is looking at it, the same as picking it.
     const conv = this.store.conversation(this.store.active);
     if (was && !open && conv) this.seen(conv);
     this.renderRail();
+  }
+
+  /** Bring a pane to the front, whichever layout is up.
+   *
+   *  Tiled, these three are tabs of one leaf and raising one is the whole
+   *  of the switch. Untiled, the shell is what it was and they take turns
+   *  by hiding each other. The two cannot both write `hidden`: that is
+   *  also what `available()` reads to decide a pane is not in this mode,
+   *  so a chat pane the app hid would leave the layout entirely. */
+  private raise(id: string, open: boolean): void {
+    if (this.panes?.tiled()) this.panes.present(id, { focus: false });
+    else this.chatPane.hidden = open;
+  }
+
+  /** Whether the layout is what decides who is on screen. */
+  private get tiling(): boolean {
+    return this.panes?.tiled() === true;
   }
 
   private showFiles(open: boolean): void {
@@ -888,8 +966,9 @@ export class App {
     const was = this.filesOpen;
     this.filesOpen = open;
     this.store.covered = open;
-    this.chatPane.hidden = open;
-    this.files.show(open);
+    this.raise(open ? 'files' : 'chat', open);
+    if (this.tiling) this.files.shown(open);
+    else this.files.show(open);
     const conv = this.store.conversation(this.store.active);
     if (was && !open && conv) this.seen(conv);
     this.renderRail();
@@ -1537,7 +1616,7 @@ export class App {
       h(
         'div',
         { class: 'panes' },
-        this.rail,
+        pane(this.rail, 'rail', 'Conversations', 180),
         h(
           'main',
           {},
@@ -1546,16 +1625,20 @@ export class App {
           // the tile renderer, which is the only thing that knows what a
           // browser needs before it will paint a `<video>`.
           this.tiles.el,
-          // Chat and the two server readers take turns in this space.
-          this.chatPane,
-          this.news.el,
-          this.files.el,
+          // Chat and the two server readers take turns in this space —
+          // tiled they are three tabs of one leaf and take none.
+          pane(this.chatPane, 'chat', 'Chat', 320),
+          pane(this.news.el, 'news', 'News', 360),
+          pane(this.files.el, 'files', 'Files', 320),
         ),
         // Both live inside `.panes` rather than the document, so the
         // slide-in panel is bounded by the pane area and never covers
         // the title bar — including the button that opens it.
         this.scrim,
-        this.rosterEl,
+        pane(this.rosterEl, 'roster', 'People', 200),
+        // Where the layout is drawn, when there is one. Empty and
+        // invisible otherwise, and the shell is the shell it always was.
+        this.tiler,
       ),
     );
   }

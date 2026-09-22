@@ -271,8 +271,18 @@ export class NewsView {
     };
   }
 
+  /** On screen or not, told rather than worked out.
+   *
+   *  This used to be `!this.el.hidden`, which was the same question while
+   *  the shell was the only thing that hid this view. Tiled, the layout
+   *  owns `hidden` -- a reader behind another tab has it set, a reader in
+   *  a pane of its own does not -- and six decisions in here about
+   *  whether to fetch, subscribe or redraw would all have answered "yes,
+   *  somebody is looking" for a tab nobody had selected. */
+  private onScreen = false;
+
   get visible(): boolean {
-    return !this.el.hidden;
+    return this.onScreen;
   }
 
   /** The rail's badge: unread across what is followed. Until the list
@@ -288,8 +298,17 @@ export class NewsView {
     return this.hooks.conn()?.news?.subscribe === true;
   }
 
+  /** Hide or reveal this view *and* say so. What the shell calls while
+   *  it is the thing deciding who is on screen. */
   show(on: boolean): void {
     this.el.hidden = !on;
+    this.shown(on);
+  }
+
+  /** Only say so. What the layout calls: it has already put this view in
+   *  front or behind, and `show` would fight it for `hidden`. */
+  shown(on: boolean): void {
+    this.onScreen = on;
     if (!on) return;
     if (this.stale) void this.load();
     this.render();

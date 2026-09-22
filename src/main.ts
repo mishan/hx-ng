@@ -1,4 +1,6 @@
 import './styles.css';
+import 'mullion/panes.css';
+import './panes-hx.css';
 import { loadConfig } from './config';
 import { App } from './ui/app';
 import { loadIcons } from './ui/icons';

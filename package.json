@@ -20,6 +20,9 @@
     "check:package": "npm run build:lib && node -e \"import('./packages/hotline-ng/dist/index.js')\"",
     "icons": "python3 tools/build-icons.py ../gtkhx/icons.rsrc public"
   },
+  "dependencies": {
+    "mullion": "^0.1.1"
+  },
   "devDependencies": {
     "@playwright/test": "^1.63.0",
     "@types/node": "^22.9.0",

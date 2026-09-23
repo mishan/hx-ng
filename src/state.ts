@@ -487,6 +487,30 @@ export class Store {
     return c;
   }
 
+  /**
+   * A moderator redacted a public line: blank it where it sits, as
+   * `history` would now answer it — the id, the time and the place stay,
+   * the words and the name go, and an image it carried is gone with it.
+   * Returns the image's handle, if it had one, so its bytes can be let go
+   * too; `undefined` when the line was not held or already blank.
+   */
+  redact(id: number): { handle?: string } | undefined {
+    const lobby = this.conversations.get(LOBBY)!;
+    const line = lobby.lines.find((l) => l.id === id);
+    if (!line || line.deleted) return undefined;
+    const handle = line.media?.id;
+    line.kind = 'deleted';
+    line.deleted = true;
+    line.text = 'Message deleted.';
+    line.from = undefined;
+    if (line.media) {
+      const { id: _gone, ...rest } = line.media;
+      line.media = { ...rest, removed: true };
+    }
+    this.revision++;
+    return { handle };
+  }
+
   system(text: string, id: ConvId = this.active): Conversation | undefined {
     return this.add(id, { t: Date.now(), kind: 'system', text, local: true });
   }

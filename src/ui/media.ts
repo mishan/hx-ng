@@ -35,7 +35,7 @@ const MAX_HEIGHT = 320;
  *  origin of the page that made it, so this is the list that decides
  *  what clicking an image can do — `image/svg+xml` is a document with
  *  script in it, and the capability forbids it upstream anyway. */
-const INERT = ['image/jpeg', 'image/png', 'image/gif'];
+export const INERT = ['image/jpeg', 'image/png', 'image/gif'];
 
 /** Where a cache's bytes come from: a handle's canonical image, or a
  *  rejection for anything the server would not give. */

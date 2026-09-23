@@ -2,7 +2,7 @@
 
 A browser client for the **Hotline-ng** wire: public chat, the user list
 with the classic icons, private messages, threaded news, notifications
-while you are away, and the voice and video the SFU already serves. It never sees the legacy wire, and the server cannot
+while you are away, reports and moderation, and the voice and video the SFU already serves. It never sees the legacy wire, and the server cannot
 tell it apart from any other ng client. The protocol it speaks is
 [`hotline-ng.md`](https://github.com/mishan/hxd-ng/blob/main/docs/hotline-ng.md).
 
@@ -270,6 +270,10 @@ Typed into the composer:
 | `/history` | load an earlier page of public chat; scrolling to the top does the same |
 | `/block <who>`, `/unblock <who>` | a nick, an account, or (to unblock) a fingerprint |
 | `/blocks` | who you have blocked |
+| `/report <who> [reason]` | report a person to the moderators; a line or an article is reported from its own **Report** button |
+| `/kick <nick> [reason]`, `/ban <nick> <10m\|2h\|3d\|1w…> [reason]` | needs the kick privilege |
+| `/purge <who> [length] [reason]` | a moderator's: their lines, images and articles from the window, an hour by default |
+| `/reports` | a moderator's: open the reports |
 | `/nick <name>` | needs `use_any_name` |
 | `/icon <n>` | or click your own icon in the title bar |
 | `/drop` | close the socket without logging out — exercises resume |
@@ -381,6 +385,21 @@ Typed into the composer:
   puts right a changed endpoint or a server that has changed its key
   since. Logging out leaves notifications on, since being away is what
   they are for. Only **Notify** turns them off.
+- **Anyone can report, and a moderator acts where the report is.** A
+  line, a private message and an article each have a **Report** button,
+  and a person has one in the ⋯ menu on their user-list row. Whichever
+  target the wire can name is named: a public line by its id, a stored
+  message by its inbox id, and otherwise the sender, with the words
+  pasted and marked unverified by the server. The reporter is told how
+  it ends. A session the login reply calls `moderator` gets **Reports**
+  on the rail, badged from the login reply's count and moved by the
+  `report` and `report_closed` events. Each report offers the act that
+  fits it — redact a line, revoke an image, delete an article, purge a
+  sender — and acting closes it, since the server closes every open
+  report on what an act removed. Dismissing and closing as a duplicate
+  are the two closes that remove nothing, and the audit trail is the
+  view's third tab. A redacted line blanks in place on every page that
+  drew it, on `chat_redacted`, and keeps its place.
 - **Negotiation is serialised, and inbound video is read from the
   transceivers.** Both are the difference between a picture and a black
   rectangle; `packages/hotline-ng/README.md` says why.
@@ -408,6 +427,7 @@ published name like anybody else would.
 | `src/ui/` | the shell, roster, transcript, composer, icon picker, video tiles, debug drawer |
 | `src/ui/tiles.ts` | the video strip, and everything a browser needs before it will paint a `<video>` |
 | `src/ui/media.ts` | inline images: one fetch per handle, the blob URLs, and the sized placeholder they replace |
+| `src/moderation.ts`, `src/ui/moderation.ts` | reports and moderation: what a report on a line names, the open count; the reports view |
 | `src/push/`, `src/sw.ts` | notifications: permission, subscription and registration in the page; the service worker that draws them |
 | `test/`, `packages/hotline-ng/test/` | the tests, kept out of `src` so the published package ships neither them nor a test runner |
 | `tools/build-icons.py` | `icons.rsrc` → sprite sheet |

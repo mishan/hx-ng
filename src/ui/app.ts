@@ -33,12 +33,15 @@ import {
   type HistoryOk,
   type Media,
   type MsgParams,
+  type PersonRef,
   type RemoteVideo,
+  type ReportParams,
   type User,
   type VideoKind,
 } from '@hotline-ng/client';
 
 import { serverFromUrl, type AppConfig } from '../config';
+import { durationWords, DURATIONS, lineReport, parseDuration, personRef } from '../moderation';
 import { notifyText } from '../news';
 import {
   addressOf,
@@ -50,6 +53,7 @@ import {
   Store,
   styleToKind,
 } from '../state';
+import { ask, choose, type Field } from './ask';
 import { connectScreen, remembered, type ConnectScreen, type Details } from './connect';
 import { DebugPanel } from './debug';
 import { clock, fill, h } from './dom';
@@ -62,8 +66,9 @@ import { takeScanFragment, type Scanned } from '../identity/scan';
 import { renderRoster } from './roster';
 import { Tiles } from './tiles';
 import { MediaCache } from './media';
+import { closedForReporter, ModerationView, problem as moderationProblem } from './moderation';
 import { NewsView } from './news';
-import { appendLine, isAtBottom, keepingPlace, renderTranscript, scrollToEnd } from './transcript';
+import { appendLine, isAtBottom, keepingPlace, lineOf, renderTranscript, scrollToEnd } from './transcript';
 import { wrapSelection } from './markdown';
 import { contentWords, disablePush, enablePush, pushEnabled, pushSupported, refreshPush } from '../push/client';
 import { isPushOpenMessage, parseOpenParam, type PushOpen, type PushOpenReply } from '../push/notice';
@@ -87,8 +92,14 @@ function pane(el: HTMLElement, id: string, title: string, min: number): HTMLElem
   return el;
 }
 
+/** A pane that starts out of the layout, for `available()` to bring in. */
+function offPane(el: HTMLElement): HTMLElement {
+  el.setAttribute('data-pane-off', '');
+  return el;
+}
+
 /** Every panel this client tiles, in the order the shell builds them. */
-const PANES = ['rail', 'chat', 'news', 'files', 'roster'];
+const PANES = ['rail', 'chat', 'news', 'files', 'reports', 'roster'];
 
 /** Where they go the first time somebody opens this in a window with
  *  room. Chat, news and files are tabs of one leaf, which is the whole
@@ -98,7 +109,7 @@ const LAYOUT: PaneNode = {
   size: [0.16, 0.62, 0.22],
   kids: [
     { tabs: ['rail'] },
-    { tabs: ['chat', 'news', 'files'] },
+    { tabs: ['chat', 'news', 'files', 'reports'] },
     { tabs: ['roster'] },
   ],
 };
@@ -240,6 +251,15 @@ export class App {
   private newsOpen = false;
   private files = new FilesView(() => this.conn);
   private filesOpen = false;
+  /** Reports and the audit trail, for a moderator; a pane nobody else
+   *  is offered. */
+  private moderation = new ModerationView({
+    conn: () => this.conn,
+    store: this.store,
+    onCount: () => this.renderRail(),
+    openArticle: (id) => this.openNewsArticle(id),
+  });
+  private reportsOpen = false;
   /** The account typed at the connect form, or `null` for a guest. */
   private account: string | null = null;
   /** Notifications on this device, for this server and account. Shown
@@ -353,6 +373,7 @@ export class App {
       onShow: (id, on) => {
         if (id === 'news') this.news.shown(on);
         else if (id === 'files') this.files.shown(on);
+        else if (id === 'reports') this.moderation.shown(on);
       },
     });
 
@@ -402,6 +423,8 @@ export class App {
     this.newsOpen = false;
     this.files.reset();
     this.filesOpen = false;
+    this.moderation.reset();
+    this.reportsOpen = false;
     this.store.covered = false;
     if (!this.tiling) this.chatPane.hidden = false;
     this.account = d.login.trim() || null;
@@ -437,6 +460,8 @@ export class App {
         // restate.
         this.news.onReconnected();
         void this.news.refreshFollowing();
+        // So are the reports filed and closed in between.
+        void this.moderation.recount();
       },
       onResumed: (replay) => {
         this.say(
@@ -476,6 +501,9 @@ export class App {
         this.showNews(false);
         this.files.reset();
         this.showFiles(false);
+        this.moderation.reset();
+        this.showReports(false);
+        this.panes?.available('reports', false);
         // The paperclip goes with the session it belonged to. Left up,
         // it opens a picker whose upload can only fail with "not logged
         // in" — inert chrome saying something this client cannot do.
@@ -523,6 +551,16 @@ export class App {
     // this client cannot keep.
     this.attachBtn.hidden = conn.media === null;
     this.filePicker.accept = conn.media?.types.join(',') ?? '';
+    // The reports pane is a moderator's. The count the login reply gave
+    // is where the badge starts; a listing corrects it — which matters
+    // after a reload, when the count is the one saved with the session
+    // and the events since have been replayed on top of it.
+    this.moderation.reset(conn.moderation?.open ?? 0);
+    // A moderator on a server that keeps no reports can still redact,
+    // but has no queue to open.
+    const reports = conn.moderator && conn.moderation !== null;
+    this.panes?.available('reports', reports);
+    if (reports) void this.moderation.recount();
     this.renderAll();
     this.composer.focus();
     // Conversations live in memory and die with the page; the mailbox
@@ -682,6 +720,22 @@ export class App {
     conn.on('media_revoked', (d) => {
       this.images.revoke(d.id);
       this.renderTranscript();
+    });
+
+    // A moderator redacted a public line: blank it where it sits, and let
+    // go of any image it carried. The reader stays where they were.
+    conn.on('chat_redacted', (d) => {
+      const done = this.store.redact(d.id);
+      if (!done) return;
+      if (done.handle) this.images.revoke(done.handle);
+      if (this.store.active === LOBBY) keepingPlace(this.transcript, () => this.renderTranscript());
+    });
+
+    conn.on('report', (d) => this.moderation.onReport(d));
+    conn.on('report_closed', (d) => {
+      if (d.yours) this.say(closedForReporter(d.id, d.outcome));
+      // A moderator who filed it hears it once, as the reporter.
+      if (this.conn?.moderator) this.moderation.onClosed(d.id);
     });
 
     conn.on('msg', (d) => {
@@ -989,6 +1043,19 @@ export class App {
         );
       }
 
+      // Moderation, answered here rather than by `send`'s catch: these say
+      // `no_such_user` for nobody by that name, and the message wording
+      // that catch would use gets that wrong.
+      case 'report':
+      case 'kick':
+      case 'ban':
+      case 'purge':
+        return this.moderationCommand(word!.toLowerCase(), rest).catch((e: unknown) => this.say(moderationProblem(e)));
+      case 'reports':
+        if (!conn.moderator) return this.say('Only a moderator reads the reports.');
+        if (!conn.moderation) return this.say('This server keeps no reports.');
+        return this.showReports(true);
+
       case 'nick':
         if (!arg) return this.say('Usage: /nick <name>');
         await conn.request('nick', { nick: arg });
@@ -1024,10 +1091,61 @@ export class App {
       case 'help':
         return this.say(
           '/me · /msg <nick or account> <text> · /history · /mail · /news · /files · /block <who> · /unblock <who> · /blocks · ' +
+            '/report <who> [reason] · ' +
+            (conn.moderator || this.store.self?.admin ? '/kick <nick> [reason] · /ban <nick> <length> [reason] · ' : '') +
+            (conn.moderator ? '/purge <who> [length] [reason] · /reports · ' : '') +
             '/nick <name> · /icon <n> · /clear · /close · /drop · /debug · /logout',
         );
       default:
         return this.say(`Unknown command: /${word}`);
+    }
+  }
+
+  /** `/report`, `/kick`, `/ban` and `/purge`: the menu's acts without
+   *  the menu, and anything left out of the line asked for as the menu
+   *  would. */
+  private async moderationCommand(word: string, rest: string[]): Promise<void> {
+    const conn = this.conn;
+    if (!conn) return;
+    switch (word) {
+      case 'report': {
+        const [who, ...why] = rest;
+        if (!who) return this.say('Usage: /report <nick, account or fingerprint> [reason]');
+        const target = this.findUser(who);
+        const ref = personRef(who, target);
+        const reason = why.join(' ').trim();
+        if (!reason) return this.reportPerson(target?.nick ?? who, ref);
+        return this.fileReport({ user: ref, reason });
+      }
+      case 'kick':
+      case 'ban': {
+        const [who, ...more] = rest;
+        const usage = word === 'ban' ? 'Usage: /ban <nick> <10m, 2h, 3d, 1w…> [reason]' : 'Usage: /kick <nick> [reason]';
+        if (!who) return this.say(usage);
+        const target = this.findUser(who);
+        if (!target) return this.say(`Nobody here is called ${who}.`);
+        let ban: number | undefined;
+        if (word === 'ban') {
+          ban = parseDuration(more.shift() ?? '') ?? undefined;
+          if (ban === undefined) return this.say(usage);
+        }
+        const reason = more.join(' ').trim();
+        // A kick's reason is optional, so there is nothing to ask for:
+        // what was typed is what is done. The menu is where a purge goes
+        // with it.
+        await conn.kick({ uid: target.uid, ...(ban ? { ban } : {}), ...(reason ? { reason } : {}) });
+        return;
+      }
+      case 'purge': {
+        const [who, ...more] = rest;
+        const usage = 'Usage: /purge <nick, account or fingerprint> [10m, 2h, 3d…] [reason]';
+        if (!who) return this.say(usage);
+        const target = this.findUser(who);
+        const since = more.length ? parseDuration(more[0]!) : null;
+        if (since !== null) more.shift();
+        const reason = more.join(' ').trim();
+        return this.purge(target?.nick ?? who, personRef(who, target), { since: since ?? 3600, reason });
+      }
     }
   }
 
@@ -1050,6 +1168,7 @@ export class App {
     // been looked at.
     if (this.newsOpen) this.showNews(false);
     else if (this.filesOpen) this.showFiles(false);
+    else if (this.reportsOpen) this.showReports(false);
     else this.seen(conv);
     this.renderRail();
     this.renderTranscript();
@@ -1085,6 +1204,7 @@ export class App {
    *  video tiles sit above both, so a call carries on whichever is shown. */
   private showNews(open: boolean): void {
     if (open && this.filesOpen) this.showFiles(false);
+    if (open && this.reportsOpen) this.showReports(false);
     const was = this.newsOpen;
     this.newsOpen = open;
     // The conversation the reader covers stays the active one, and what
@@ -1118,12 +1238,28 @@ export class App {
 
   private showFiles(open: boolean): void {
     if (open && this.newsOpen) this.showNews(false);
+    if (open && this.reportsOpen) this.showReports(false);
     const was = this.filesOpen;
     this.filesOpen = open;
     this.store.covered = open;
     this.raise(open ? 'files' : 'chat', open);
     if (this.tiling) this.files.shown(open);
     else this.files.show(open);
+    const conv = this.store.conversation(this.store.active);
+    if (was && !open && conv) this.seen(conv);
+    this.renderRail();
+  }
+
+  /** The moderator's reports, in the same space the readers take. */
+  private showReports(open: boolean): void {
+    if (open && this.newsOpen) this.showNews(false);
+    if (open && this.filesOpen) this.showFiles(false);
+    const was = this.reportsOpen;
+    this.reportsOpen = open;
+    this.store.covered = open;
+    this.raise(open ? 'reports' : 'chat', open);
+    if (this.tiling) this.moderation.shown(open);
+    else this.moderation.show(open);
     const conv = this.store.conversation(this.store.active);
     if (was && !open && conv) this.seen(conv);
     this.renderRail();
@@ -1149,6 +1285,155 @@ export class App {
     if (!this.conn?.news) return;
     this.showNews(true);
     this.news.openArticle(id);
+  }
+
+  // --- moderation (hxd-ng's docs/moderation.md) -----------------------
+
+  /** Report a line from where it is drawn. */
+  private async reportLine(line: Line, conv: Conversation): Promise<void> {
+    const target = lineReport(line, conv, this.store.self, (uid) => this.store.user(uid) !== undefined);
+    if (!target) return;
+    const who = line.from?.nick || 'someone';
+    const pasted = 'user' in target && target.user !== undefined;
+    const reason = await this.reportReason(
+      `Report ${who}’s ${conv.kind === 'lobby' ? 'line' : 'message'}`,
+      pasted
+        ? 'The server kept no copy of it, so the words go with your report as your account of them.'
+        : conv.kind === 'lobby'
+          ? 'The moderators are shown the line.'
+          : 'The moderators are shown the message: reporting it is you choosing to show them.',
+    );
+    if (reason === null) return;
+    await this.fileReport({ ...target, reason } as ReportParams);
+  }
+
+  private async redactLine(line: Line): Promise<void> {
+    const conn = this.conn;
+    if (!conn || line.id === undefined) return;
+    const a = await ask({
+      title: `Redact ${line.from?.nick ? `${line.from.nick}’s` : 'this'} line`,
+      body: `Its words go from every client and from history${line.media ? ', and the image it carried with them' : ''}. The line keeps its place, blank.`,
+      fields: [{ kind: 'text', name: 'reason', label: 'Reason', required: true, max: 512 }],
+      ok: 'Redact',
+      danger: true,
+    });
+    if (!a) return;
+    // Nothing is blanked here: `chat_redacted` does that, for this
+    // client as for everyone else.
+    await conn.redact(line.id, String(a.reason));
+  }
+
+  private async reportReason(title: string, body: string): Promise<string | null> {
+    const a = await ask({
+      title,
+      body,
+      fields: [{ kind: 'textarea', name: 'reason', label: 'What is wrong with it', required: true, max: 1024 }],
+      ok: 'Report',
+    });
+    return a ? String(a.reason) : null;
+  }
+
+  private async fileReport(params: ReportParams): Promise<void> {
+    const conn = this.conn;
+    if (!conn) return;
+    const ok = await conn.report(params);
+    this.say(
+      ok.outcome === 'removed'
+        ? 'Thank you — that has already been removed.'
+        : ok.follow_up
+          ? `Report #${ok.id} is with the moderators. You will hear how it ends.`
+          : `Report #${ok.id} is with the moderators. A guest has no mailbox, so you will not hear how it ends.`,
+    );
+  }
+
+  /** What can be done to someone on the roster, besides writing to them. */
+  private async personMenu(u: User): Promise<void> {
+    const conn = this.conn;
+    if (!conn) return;
+    // The kick is the kick bit's, which the roster does not show this
+    // client about itself; an administrator or a moderator is offered
+    // it, and the server has the last word.
+    const mayKick = conn.moderator || this.store.self?.admin === true;
+    const choice = await choose(u.nick, [
+      ['message', 'Send a private message'],
+      ['report', 'Report to the moderators…'],
+      ...(mayKick ? [['kick', 'Disconnect…', true] as ['kick', string, boolean]] : []),
+      ...(conn.moderator ? [['purge', 'Purge recent output…', true] as ['purge', string, boolean]] : []),
+    ]);
+    try {
+      if (choice === 'message') {
+        this.select(this.store.openPm({ uid: u.uid, nick: u.nick }).id);
+        this.showRoster(false);
+      } else if (choice === 'report') await this.reportPerson(u.nick, { uid: u.uid });
+      else if (choice === 'kick') await this.kick(u);
+      else if (choice === 'purge') await this.purge(u.nick, { uid: u.uid });
+    } catch (e) {
+      this.say(moderationProblem(e));
+    }
+  }
+
+  private async reportPerson(name: string, who: PersonRef): Promise<void> {
+    const reason = await this.reportReason(`Report ${name}`, 'The moderators are told who, and your reason is the whole of the evidence.');
+    if (reason === null) return;
+    await this.fileReport({ user: who, reason });
+  }
+
+  private async kick(u: User): Promise<void> {
+    const conn = this.conn;
+    if (!conn) return;
+    const lengths = DURATIONS.map(([sec, words]) => [String(sec), words] as [string, string]);
+    const a = await ask({
+      title: `Disconnect ${u.nick}`,
+      body: 'The room is told who did it.',
+      fields: [
+        { kind: 'choice', name: 'ban', label: 'And ban them for', options: [['', 'no ban — they may come back'], ...lengths] },
+        ...(conn.moderator
+          ? [{ kind: 'choice', name: 'purge', label: 'Taking their output from the last', options: [['', 'nothing — leave what they said'], ...lengths.slice(0, 4)] } satisfies Field]
+          : []),
+        { kind: 'text', name: 'reason', label: 'Reason', max: 512 },
+      ],
+      ok: 'Disconnect',
+      danger: true,
+    });
+    if (!a) return;
+    const reason = String(a.reason ?? '');
+    const purge = a.purge ? Number(a.purge) : undefined;
+    // The server's rule, said before asking rather than after: a purge is
+    // an act, and every act is on the record with a reason.
+    if (purge && !reason) return this.say('A purge needs a reason. Nothing was done.');
+    await conn.kick({
+      uid: u.uid,
+      ...(a.ban ? { ban: Number(a.ban) } : {}),
+      ...(purge ? { purge } : {}),
+      ...(reason ? { reason } : {}),
+    });
+  }
+
+  private async purge(name: string, who: PersonRef, preset: { since?: number; reason?: string } = {}): Promise<void> {
+    const conn = this.conn;
+    if (!conn) return;
+    let since = preset.since;
+    let reason = preset.reason;
+    if (since === undefined || !reason) {
+      const a = await ask({
+        title: `Purge ${name}`,
+        body: 'Their public lines, images and news articles from the window go, from every client and from history, under one record.',
+        fields: [
+          { kind: 'choice', name: 'since', label: 'From the last', options: DURATIONS.map(([sec, w]) => [String(sec), w]), value: String(since ?? 3600) },
+          { kind: 'text', name: 'reason', label: 'Reason', required: true, max: 512, value: reason ?? '' },
+        ],
+        ok: 'Purge',
+        danger: true,
+      });
+      if (!a) return;
+      since = Number(a.since);
+      reason = String(a.reason);
+    }
+    const done = await conn.purge({ ...who, since, reason });
+    this.say(
+      `Purged ${name}'s last ${durationWords(since)}: ${done.lines} ${done.lines === 1 ? 'line' : 'lines'}, ` +
+        `${done.media} ${done.media === 1 ? 'image' : 'images'}, ${done.articles} ${done.articles === 1 ? 'article' : 'articles'}.`,
+    );
   }
 
   // --- public chat history ---------------------------------------------
@@ -1372,7 +1657,7 @@ export class App {
       // Appending one line assumes the DOM still matches the array it was
       // drawn from. A merge rewrites that array, so redraw instead.
       if (this.store.revision !== this.drawnRevision) this.renderTranscript();
-      else appendLine(this.transcript, line, conv, this.store, this.images, { markdown: this.markdown });
+      else appendLine(this.transcript, line, conv, this.store, this.images, this.transcriptOptions());
     }
     // The active conversation's badge moves too while the news reader
     // covers it.
@@ -1433,7 +1718,7 @@ export class App {
 
   private renderRail(): void {
     const items = [...this.store.conversations.values()].map((c) => {
-      const active = !this.newsOpen && !this.filesOpen && c.id === this.store.active;
+      const active = !this.newsOpen && !this.filesOpen && !this.reportsOpen && c.id === this.store.active;
       // Only a conversation whose other half is on the roster has a face
       // to show. One carried by an account alone — mail from someone who
       // is not here — falls back to the default icon.
@@ -1490,8 +1775,23 @@ export class App {
       );
       files.onclick = () => this.showFiles(true);
     }
+    let reports: HTMLElement | null = null;
+    if (conn?.moderator && conn.moderation && conn.state !== 'offline') {
+      const open = this.moderation.queue.count;
+      reports = h(
+        'button',
+        {
+          class: `rail-item${this.reportsOpen ? ' on' : ''}${open ? ' unread' : ''}`,
+          title: open ? `${open} ${open === 1 ? 'report' : 'reports'} waiting` : 'Reports',
+        },
+        h('span', { class: 'rail-glyph' }, '⚑'),
+        h('span', { class: 'rail-title' }, 'Reports'),
+        open ? h('span', { class: 'badge' }, String(open)) : null,
+      );
+      reports.onclick = () => this.showReports(true);
+    }
     const [lobby, ...rest] = items;
-    fill(this.rail, h('div', { class: 'rail-head' }, 'Conversations'), lobby, news, files, ...rest);
+    fill(this.rail, h('div', { class: 'rail-head' }, 'Conversations'), lobby, news, files, reports, ...rest);
   }
 
   private renderRoster(): void {
@@ -1501,14 +1801,19 @@ export class App {
         this.select(this.store.openPm({ uid: u.uid, nick: u.nick }).id);
         this.showRoster(false);
       },
+      onMore: (u) => void this.personMenu(u),
       onClose: () => this.showRoster(false),
     });
   }
 
   private renderTranscript(): void {
     const conv = this.store.conversation(this.store.active);
-    if (conv) renderTranscript(this.transcript, conv, this.store, this.images, { markdown: this.markdown });
+    if (conv) renderTranscript(this.transcript, conv, this.store, this.images, this.transcriptOptions());
     this.drawnRevision = this.store.revision;
+  }
+
+  private transcriptOptions(): { markdown: boolean; moderator: boolean } {
+    return { markdown: this.markdown, moderator: this.conn?.moderator ?? false };
   }
 
   private renderComposerHint(): void {
@@ -1765,8 +2070,27 @@ export class App {
     // A news notice is a link the transcript cannot follow on its own:
     // opening the article means swapping the chat pane for the reader.
     this.transcript.addEventListener('click', (e) => {
+      const act = (e.target as Element | null)?.closest<HTMLElement>('button[data-act]');
+      const line = act ? lineOf(act) : undefined;
+      if (act && line) {
+        const conv = this.store.conversation(this.store.active);
+        if (!conv) return;
+        const run = act.dataset.act === 'redact' ? this.redactLine(line) : this.reportLine(line, conv);
+        run.catch((err: unknown) => this.say(moderationProblem(err)));
+        return;
+      }
       const link = (e.target as Element | null)?.closest<HTMLElement>('a[data-article]');
-      if (!link) return;
+      if (!link) {
+        // A touch screen has no hover to bring a line's buttons up, so a
+        // tap on the line does — and a tap on another line moves them.
+        if (!matchMedia('(hover: none)').matches) return;
+        const row = (e.target as Element | null)?.closest('.line');
+        if (!row || (e.target as Element).closest('a, button, img')) return;
+        const was = row.classList.contains('picked');
+        for (const el of this.transcript.querySelectorAll('.line.picked')) el.classList.remove('picked');
+        row.classList.toggle('picked', !was);
+        return;
+      }
       e.preventDefault();
       this.openNewsArticle(Number(link.dataset.article));
     });
@@ -1811,6 +2135,8 @@ export class App {
           pane(this.chatPane, 'chat', 'Chat', 320),
           pane(this.news.el, 'news', 'News', 360),
           pane(this.files.el, 'files', 'Files', 320),
+          // Off until a moderator logs in: nobody else has any reports.
+          offPane(pane(this.moderation.el, 'reports', 'Reports', 360)),
         ),
         // Both live inside `.panes` rather than the document, so the
         // slide-in panel is bounded by the pane area and never covers

@@ -14,6 +14,7 @@
  * name repeated eleven times.
  */
 
+import { lineReport } from '../moderation';
 import { continuesRun, type Conversation, type Line } from '../state';
 import type { Store } from '../state';
 import { clock, fill, h, linkify } from './dom';
@@ -30,6 +31,20 @@ export interface TranscriptOptions {
    *  exactly as typed, with only its bare URLs made links. The line keeps
    *  its source either way, so flipping it redraws what is already here. */
   markdown: boolean;
+  /** This session may redact public lines, so a line with an id offers
+   *  to. Anyone may report. */
+  moderator?: boolean;
+}
+
+/** The line each drawn row is, for a click on one of its buttons to
+ *  find. A map rather than an index on the row: trimming and merging
+ *  move indices, and a row never changes which line it is. */
+const rows = new WeakMap<Element, Line>();
+
+/** The line a row inside the transcript was drawn from. */
+export function lineOf(el: Element): Line | undefined {
+  const row = el.closest('.line');
+  return row ? rows.get(row) : undefined;
 }
 
 export function renderTranscript(
@@ -42,7 +57,7 @@ export function renderTranscript(
   const nodes: HTMLElement[] = [];
   let prev: Line | undefined;
   for (const line of conv.lines) {
-    nodes.push(lineEl(line, prev, store, media, opts));
+    nodes.push(lineEl(line, prev, conv, store, media, opts));
     prev = line;
   }
   fill(el, ...nodes);
@@ -59,7 +74,7 @@ export function appendLine(
 ): void {
   const atBottom = isAtBottom(el);
   const prev = conv.lines[conv.lines.length - 2];
-  el.append(lineEl(line, prev, store, media, opts));
+  el.append(lineEl(line, prev, conv, store, media, opts));
   while (el.childElementCount > conv.lines.length) el.firstElementChild?.remove();
   if (atBottom) scrollToEnd(el);
 }
@@ -100,11 +115,45 @@ function stamp(line: Line, prev: Line | undefined): string {
 function lineEl(
   line: Line,
   prev: Line | undefined,
+  conv: Conversation,
   store: Store,
   media: MediaCache,
   opts: TranscriptOptions,
 ): HTMLElement {
-  if (line.kind !== 'chat') return eventLine(line, prev, media, opts);
+  const el = line.kind === 'chat' ? chatLine(line, prev, store, media, opts) : eventLine(line, prev, media, opts);
+  const acts = actions(line, conv, store, opts);
+  if (acts) el.append(acts);
+  rows.set(el, line);
+  return el;
+}
+
+/** What can be done to a line from where it is drawn: report it, and
+ *  for a moderator, redact it. Buttons carry only a verb; the shell
+ *  finds the line with `lineOf` and does the rest. */
+function actions(line: Line, conv: Conversation, store: Store, opts: TranscriptOptions): HTMLElement | null {
+  const report = lineReport(line, conv, store.self, (uid) => store.user(uid) !== undefined) !== null;
+  const redact =
+    !!opts.moderator &&
+    conv.kind === 'lobby' &&
+    line.id !== undefined &&
+    !line.deleted &&
+    (line.kind === 'chat' || line.kind === 'action');
+  if (!report && !redact) return null;
+  return h(
+    'span',
+    { class: 'line-actions' },
+    report ? h('button', { type: 'button', class: 'ghost small', dataset: { act: 'report' }, title: 'Tell the moderators about this' }, 'Report') : null,
+    redact ? h('button', { type: 'button', class: 'ghost small danger', dataset: { act: 'redact' }, title: 'Remove this line for everyone' }, 'Redact') : null,
+  );
+}
+
+function chatLine(
+  line: Line,
+  prev: Line | undefined,
+  store: Store,
+  media: MediaCache,
+  opts: TranscriptOptions,
+): HTMLElement {
 
   const from = line.from;
   const sameSpeaker = continuesRun(prev, line);

@@ -21,6 +21,9 @@ export const ROSTER_SCALE = 2;
 
 export interface RosterHooks {
   onMessage: (u: User) => void;
+  /** Everything else that can be done to someone: report them, and for
+   *  those who may, kick, ban or purge. */
+  onMore: (u: User) => void;
   /** Dismiss the panel. Only reachable on the narrow layout, where the
    *  roster slides in over the conversation. */
   onClose: () => void;
@@ -116,9 +119,19 @@ function row(u: User, store: Store, media: VoiceSession, hooks: RosterHooks): HT
       h('span', { class: 'nick' }, u.nick),
       status ? h('span', { class: 'status' }, status) : null,
     ),
-    marks.length ? h('span', { class: 'marks' }, ...marks) : null,
+    // Always there, empty or not, so the menu button lines up down the list.
+    h('span', { class: 'marks' }, ...marks),
   );
   if (!me) {
+    // A button of its own rather than a right-click: a phone has none,
+    // and a menu nobody can find is a feature nobody has.
+    const more = h('button', { class: 'ghost person-more', type: 'button', title: `More for ${u.nick}` }, '\u22ef');
+    more.onclick = (e) => {
+      e.stopPropagation();
+      hooks.onMore(u);
+    };
+    more.onkeydown = (e) => e.stopPropagation();
+    el.append(more);
     el.onclick = () => hooks.onMessage(u);
     el.onkeydown = (e) => {
       if (e.key === 'Enter' || e.key === ' ') {

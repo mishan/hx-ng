@@ -1,0 +1,12 @@
+{
+  "_comment": "config.json for the build GitHub Pages serves at https://hx.foggyden.org/. The Pages workflow copies it over the default one in dist/; the repo's public/config.json stays generic.",
+
+  "_defaultServer": "The page is on https, so this has to be wss://: a browser refuses a plain ws:// socket from a secure page.",
+  "defaultServer": "wss://hxd.foggyden.org",
+
+  "servers": [],
+  "title": "Hotline",
+
+  "_allowCustomServer": "true: this build is also a client for anybody's server, not only this one. hxd-ng answers the page's cross-origin fetches with CORS for exactly this.",
+  "allowCustomServer": true
+}

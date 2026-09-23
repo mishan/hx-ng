@@ -98,6 +98,38 @@ The ng spec mandates WSS in production for its own reasons; the same
 certificate serves the page. `localhost` counts as secure, which is why
 the development setup above works unencrypted on the machine itself.
 
+### Installing it
+
+The client is an installable web app: `public/manifest.webmanifest` and
+the icons beside it land in `dist/` like `config.json`, and every URL in
+the manifest is relative, so it works wherever `dist/` is mounted.
+Chromium on the desktop and Android offers **Install**; Safari on iOS
+has **Add to Home Screen**. Either way it opens in a window of its own,
+with no address bar.
+
+On iOS this is not cosmetic. Safari exposes web push only to a page
+opened from the Home Screen, so there, installing is what makes the
+**Notify** button appear at all. The same secure-context rule applies.
+
+Two things follow from how browsers treat an installed app:
+
+- **On iOS it is a new device.** A Home Screen app has storage of its
+  own, apart from Safari's: its own IndexedDB, so its own device keys to
+  enroll ([`docs/identity-keys.md`](docs/identity-keys.md)), its own
+  remembered server, its own notification registrations. Chromium
+  shares one profile between the tab and the installed window, so there
+  it is the same device.
+- **There is no app-wide service worker.** Nothing is cached for
+  offline use: without its socket the client has nothing to show, and a
+  cached shell would be one more thing to go stale after a deploy. The
+  only workers are the notification ones, each scoped under `push/`.
+
+A deployment that wants its own name under the icon edits `name` and
+`short_name` in `manifest.webmanifest`, and `apple-mobile-web-app-title`
+in `index.html` for iOS. The icons are rasterized from `public/icon.svg`
+and `tools/icon-maskable.svg` by `tools/build-app-icons.sh`, which needs
+`rsvg-convert`. Like `icons.png`, the PNGs are committed.
+
 ## Tests
 
 ```sh
@@ -358,6 +390,7 @@ published name like anybody else would.
 | `src/push/`, `src/sw.ts` | notifications: permission, subscription and registration in the page; the service worker that draws them |
 | `test/`, `packages/hotline-ng/test/` | the tests, kept out of `src` so the published package ships neither them nor a test runner |
 | `tools/build-icons.py` | `icons.rsrc` → sprite sheet |
+| `tools/build-app-icons.sh` | the app icon → the manifest's and iOS's PNGs |
 
 There is no UI framework, on purpose: this client doubles as a readable
 reference for the protocol, and a reader chasing a bug should not have to

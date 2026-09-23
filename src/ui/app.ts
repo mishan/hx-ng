@@ -208,6 +208,14 @@ export class App {
     'People',
   );
   private mailBtn = h('button', { class: 'ghost mail-button', hidden: true }, 'Mail');
+  /** The title bar's less-used buttons: in the row on a wide screen, in
+   *  a menu behind `moreBtn` on a narrow one. */
+  private extras = h('div', { class: 'topbar-extras', role: 'menu' });
+  private moreBtn = h(
+    'button',
+    { class: 'ghost topbar-more', type: 'button', title: 'More', ariaHasPopup: 'menu', ariaExpanded: 'false' },
+    '\u22ef',
+  );
   /** How far `msg_read` has been told we have got. Selecting the same
    *  conversation twice does not ask again, and two marks in flight
    *  cannot write each other's answers. */
@@ -1651,6 +1659,25 @@ export class App {
       keepingPlace(this.transcript, () => this.renderTranscript());
     };
 
+    // What a phone has no room for in the bar. On a wide screen the box
+    // is `display: contents` and these are ordinary buttons in the row;
+    // on a narrow one it is a menu that ⋯ opens, and picking anything
+    // in it closes it.
+    this.extras.append(this.notifyBtn, installButton(), themeBtn, mdBtn, identityBtn, debugBtn);
+    this.moreBtn.onclick = (e) => {
+      e.stopPropagation();
+      this.showExtras(!this.extras.classList.contains('open'));
+    };
+    this.extras.addEventListener('click', (e) => {
+      if ((e.target as Element).closest('button')) this.showExtras(false);
+    });
+    document.addEventListener('click', (e) => {
+      if (!this.extras.contains(e.target as Node)) this.showExtras(false);
+    });
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') this.showExtras(false);
+    });
+
     this.pill.onclick = () => this.debug.toggle(true);
     this.notifyBtn.onclick = () => void this.togglePush();
     this.meButton.onclick = () => void this.editSelf();
@@ -1754,12 +1781,8 @@ export class App {
         this.pill,
         this.mailBtn,
         this.peopleBtn,
-        this.notifyBtn,
-        installButton(),
-        themeBtn,
-        mdBtn,
-        identityBtn,
-        debugBtn,
+        this.extras,
+        this.moreBtn,
       ),
       h(
         'div',
@@ -1789,6 +1812,12 @@ export class App {
         this.tiler,
       ),
     );
+  }
+
+  private showExtras(open: boolean): void {
+    this.extras.classList.toggle('open', open);
+    this.moreBtn.classList.toggle('on', open);
+    this.moreBtn.setAttribute('aria-expanded', String(open));
   }
 
   /** Open or close the narrow-layout roster panel.

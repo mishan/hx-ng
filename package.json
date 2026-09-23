@@ -21,7 +21,7 @@
     "icons": "python3 tools/build-icons.py ../gtkhx/icons.rsrc public"
   },
   "dependencies": {
-    "mullion": "^0.1.1"
+    "mullion": "^0.2.0"
   },
   "devDependencies": {
     "@playwright/test": "^1.63.0",

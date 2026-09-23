@@ -121,3 +121,33 @@ test('a narrow window is the shell it always was', async ({ page }) => {
 
   await page.screenshot({ path: 'test-results/tiler-narrow.png' });
 });
+
+test('a phone keeps the title bar on the screen, the rest behind ⋯', async ({ browser }) => {
+  const context = await browser.newContext({ viewport: { width: 320, height: 568 }, hasTouch: true, isMobile: true });
+  const page = await context.newPage();
+  await logIn(page);
+
+  // Nothing in the bar reaches past the right edge of the screen.
+  const buttons = page.locator('.topbar button');
+  for (let i = 0; i < (await buttons.count()); i++) {
+    const b = await buttons.nth(i).boundingBox();
+    if (b && b.width > 0) expect(b.x + b.width).toBeLessThanOrEqual(320);
+  }
+
+  // The buttons that do not fit are a menu, which a pick and a tap
+  // outside both close.
+  const menu = page.locator('.topbar-extras');
+  await expect(page.getByRole('button', { name: 'Identity' })).toBeHidden();
+  await page.locator('.topbar-more').tap();
+  await expect(menu).toBeVisible();
+  await menu.getByRole('button', { name: 'Markdown' }).tap();
+  await expect(menu).toBeHidden();
+  await page.locator('.topbar-more').tap();
+  await page.locator('.transcript').tap();
+  await expect(menu).toBeHidden();
+
+  // A finger's worth of button.
+  const box = await page.locator('.topbar-more').boundingBox();
+  expect(box!.height).toBeGreaterThanOrEqual(44);
+  await context.close();
+});

@@ -143,11 +143,19 @@ function askCreateChoice(container: HTMLElement): Promise<boolean> {
   });
 }
 
+export interface ConnectScreen {
+  el: HTMLElement;
+  /** Point the form at a server and account without connecting: what a
+   *  notification tapped on this screen was for. A server the config
+   *  does not let this form change is left as it is. */
+  fill(d: { url: string; login: string }): void;
+}
+
 export function connectScreen(
   config: AppConfig,
   onConnect: (d: Details) => Promise<void>,
   onIdentityKeys: () => void,
-): HTMLElement {
+): ConnectScreen {
   const saved = remembered(config);
   let chosenIcon = saved.icon;
 
@@ -275,7 +283,17 @@ export function connectScreen(
   };
 
   queueMicrotask(() => (saved.login ? password.input : login.input).focus());
-  return h('div', { class: 'connect' }, form);
+  return {
+    el: h('div', { class: 'connect' }, form),
+    fill(d) {
+      if (config.allowCustomServer) url.input.value = d.url;
+      if (d.login && login.input.value.trim() !== d.login) {
+        login.input.value = d.login;
+        password.input.value = '';
+      }
+      (login.input.value ? password.input : login.input).focus();
+    },
+  };
 }
 
 function field(

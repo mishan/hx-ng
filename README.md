@@ -1,8 +1,8 @@
 # hx-ng
 
 A browser client for the **Hotline-ng** wire: public chat, the user list
-with the classic icons, private messages, threaded news, and the voice
-and video the SFU already serves. It never sees the legacy wire, and the server cannot
+with the classic icons, private messages, threaded news, notifications
+while you are away, and the voice and video the SFU already serves. It never sees the legacy wire, and the server cannot
 tell it apart from any other ng client. The protocol it speaks is
 [`hotline-ng.md`](https://github.com/mishan/hxd-ng/blob/main/docs/hotline-ng.md).
 
@@ -90,6 +90,9 @@ ssh -L 5701:localhost:5701 -L 5700:localhost:5700 titan
 # or a real certificate in front of both, which is what production wants
 # anyway: https for the page, wss:// for the ng endpoint
 ```
+
+Notifications have the same requirement: outside a secure context there
+is no `navigator.serviceWorker`, and the **Notify** button is not drawn.
 
 The ng spec mandates WSS in production for its own reasons; the same
 certificate serves the page. `localhost` counts as secure, which is why
@@ -310,6 +313,21 @@ Typed into the composer:
   lists `text/markdown`, and an article written that way is posted
   saying so: the one place this client tells a server a body is markdown. Nothing either dialect produces is ever handed
   to the HTML parser: the library parses, and the page draws text nodes.
+- **Notifications are asked for, per server and per account.** Where the
+  login reply offers `push`, **Notify** in the title bar says first what
+  a notification from that server will carry (the text, only the sender,
+  or only that something arrived; the server decides, and applies it
+  before it encrypts), then asks the browser, subscribes with the
+  server's own VAPID key and sends `push_register`. Each server and
+  account gets its own service worker registration, scoped under
+  `push/`, because a subscription is bound to one server's key: turning
+  one off touches no other, and two people sharing a browser are not
+  notified about each other's mail. The worker draws a private message
+  or a news notice, collapsed per conversation or per thread, and a tap
+  opens that conversation or article. Every login re-registers, which
+  puts right a changed endpoint or a server that has changed its key
+  since. Logging out leaves notifications on, since being away is what
+  they are for. Only **Notify** turns them off.
 - **Negotiation is serialised, and inbound video is read from the
   transceivers.** Both are the difference between a picture and a black
   rectangle; `packages/hotline-ng/README.md` says why.
@@ -337,6 +355,7 @@ published name like anybody else would.
 | `src/ui/` | the shell, roster, transcript, composer, icon picker, video tiles, debug drawer |
 | `src/ui/tiles.ts` | the video strip, and everything a browser needs before it will paint a `<video>` |
 | `src/ui/media.ts` | inline images: one fetch per handle, the blob URLs, and the sized placeholder they replace |
+| `src/push/`, `src/sw.ts` | notifications: permission, subscription and registration in the page; the service worker that draws them |
 | `test/`, `packages/hotline-ng/test/` | the tests, kept out of `src` so the published package ships neither them nor a test runner |
 | `tools/build-icons.py` | `icons.rsrc` → sprite sheet |
 

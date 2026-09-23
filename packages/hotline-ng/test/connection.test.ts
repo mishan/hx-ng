@@ -410,6 +410,42 @@ describe('the message requests', () => {
   });
 });
 
+describe('push devices', () => {
+  const PUSH = { vapid: 'BEl6', types: ['webpush', 'unifiedpush'], content: 'sender' as const };
+
+  it('adopts the login reply’s push block, and keeps it for a resume', async () => {
+    server.on('login', () => ({ ok: loginOk({ caps: ['inbox', 'push'], push: PUSH }) }));
+    const conn = await connect();
+    expect(conn.push).toEqual(PUSH);
+    const saved = JSON.parse(sessionStorage.getItem('hxd-ng.session')!) as { push: unknown };
+    expect(saved.push).toEqual(PUSH);
+  });
+
+  it('has none where the server offers none', async () => {
+    const conn = await connect();
+    expect(conn.push).toBeNull();
+  });
+
+  it('sends the frames the wire specifies', async () => {
+    const conn = await connect();
+    server.on('push_register', () => ({ ok: { devid: 'hx-0123456789' } }));
+    server.on('push_unregister', () => ({ ok: {} }));
+    const ok = await conn.pushRegister({
+      type: 'webpush',
+      endpoint: 'https://push.example/abc',
+      p256dh: 'BPk',
+      auth: 'c2VjcmV0',
+      devid: 'hx-0123456789',
+    });
+    await conn.pushUnregister({ devid: 'hx-0123456789' });
+    await conn.pushUnregister();
+
+    expect(ok.devid).toBe('hx-0123456789');
+    expect(server.sent('push_register')[0]?.params).toMatchObject({ endpoint: 'https://push.example/abc' });
+    expect(server.sent('push_unregister').map((f) => f.params)).toEqual([{ devid: 'hx-0123456789' }, {}]);
+  });
+});
+
 describe('identity login', () => {
   const identityCreds = (getToken: () => Promise<string>): Credentials => ({
     ...CREDS,

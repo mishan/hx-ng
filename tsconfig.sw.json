@@ -1,0 +1,24 @@
+{
+  // The service worker, with the WebWorker library and only the files it
+  // bundles. The DOM library stays too: the protocol module names one
+  // WebRTC type, as a shape the worker never uses, and the WebWorker
+  // library has no such type.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "lib": [
+      "ES2022",
+      "DOM",
+      "WebWorker"
+    ],
+    "types": [],
+    "paths": {
+      "@hotline-ng/client": [
+        "packages/hotline-ng/src/protocol.ts"
+      ]
+    }
+  },
+  "exclude": [],
+  "include": [
+    "src/sw.ts"
+  ]
+}

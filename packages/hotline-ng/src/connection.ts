@@ -63,6 +63,10 @@ import {
   type NewsThreadsParams,
   type NewsTreeOk,
   type NewsTreeParams,
+  type PushConfig,
+  type PushRegisterOk,
+  type PushRegisterParams,
+  type PushUnregisterParams,
   type ReplyFrame,
   type ResumeOk,
   type SelfUser,
@@ -161,6 +165,7 @@ interface Saved {
   historyId: number;
   media: MediaLimits | null;
   news: NewsConfig | null;
+  push?: PushConfig | null;
 }
 
 const SAVED_KEY = 'hxd-ng.session';
@@ -261,6 +266,10 @@ export class Connection {
   /** What this session may do with the server's news, from the same two
    *  places. `null` means the server has none: no News view at all. */
   news: NewsConfig | null = null;
+  /** How this server sends notifications, from the same two places.
+   *  `null` means it sends none, or this session has no mailbox to be
+   *  notified about: offer nothing. */
+  push: PushConfig | null = null;
   /** Round-trip time of the last explicit `ping`, in milliseconds. */
   rtt: number | null = null;
 
@@ -292,6 +301,7 @@ export class Connection {
       this.lastHistoryId = saved.historyId ?? 0;
       this.media = saved.media ?? null;
       this.news = saved.news ?? null;
+      this.push = saved.push ?? null;
     } else if (opts.resumeOnly) {
       throw new Error('no session to resume');
     }
@@ -414,6 +424,7 @@ export class Connection {
     this.video = ok.video ?? null;
     this.media = ok.media ?? null;
     this.news = ok.news ?? null;
+    this.push = ok.push ?? null;
     // Only a session that may detach is worth remembering: without the
     // permission a resume can only ever answer session_expired, and
     // storing a token we know is useless just invites a confusing
@@ -963,6 +974,25 @@ export class Connection {
     return this.request<NewsSeenOk>('news_seen', { ...scope, up_to: upTo });
   }
 
+  // --- push devices (hxd-ng's docs/push-notifications.md §8) ------------
+  //
+  // The server never asks for a device: the client gets the user's
+  // permission, subscribes with `push.vapid`, and hands over what the
+  // browser gave it. `logout` leaves devices registered on purpose —
+  // being away is when a notification is worth having.
+
+  /** Register this device, or replace its endpoint. Idempotent per
+   *  `devid`, so a client re-registers on every login. */
+  pushRegister(params: PushRegisterParams): Promise<PushRegisterOk> {
+    return this.request<PushRegisterOk>('push_register', params);
+  }
+
+  /** Stop notifying a device. See `PushUnregisterParams` for why the
+   *  empty request means this device and not every one. */
+  pushUnregister(params: PushUnregisterParams = {}): Promise<Record<string, never>> {
+    return this.request('push_unregister', params);
+  }
+
   async ping(): Promise<number> {
     const t0 = performance.now();
     await this.request('ping', {});
@@ -1031,6 +1061,7 @@ export class Connection {
       historyId: this.lastHistoryId,
       media: this.media,
       news: this.news,
+      push: this.push,
     });
   }
 

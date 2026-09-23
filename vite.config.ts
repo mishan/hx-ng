@@ -24,8 +24,24 @@ export default defineConfig({
     // itself should be running `npm run dev` against real sources.
     sourcemap: false,
   },
+  worker: {
+    rolldownOptions: {
+      output: {
+        // The one worker is the notifications service worker, and it has
+        // to sit at the root: a service worker's scope may not reach
+        // above the directory its script is in, and its scopes are
+        // `push/…` beside `index.html`. Unhashed, so a new build is an
+        // update to the same registration rather than a second one.
+        entryFileNames: '[name].js',
+      },
+    },
+  },
   server: {
     port: 5701,
+    // In development the service worker is served from `/src/`, and a
+    // worker may claim a scope above its own directory only when the
+    // response says so. The build puts it at the root and needs nothing.
+    headers: { 'Service-Worker-Allowed': '/' },
     // A phone on the LAN is the whole point of the ng wire, and it
     // cannot reach a dev server bound to loopback.
     host: true,

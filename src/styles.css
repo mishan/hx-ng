@@ -1472,10 +1472,11 @@ button.ghost.danger:hover { color: var(--admin); border-color: var(--admin); }
    the chrome — a line of chat is not a button. */
 @media (pointer: coarse) {
   .topbar button, .rail-item, .roster-close, .crumb,
-  .news-bar button, .news-search, .files-bar button, .identity-bar button, .composer-input {
+  .news-bar button, .news-search, .files-bar button, .identity-bar button, .composer-input,
+  .line-actions button, .person-more, dialog.ask button, .mod-head button, .mod-actions button {
     min-height: 44px;
   }
-  .pill, .roster-close, .topbar-more, .news-bar button.ghost {
+  .pill, .roster-close, .topbar-more, .news-bar button.ghost, .person-more {
     min-width: 44px;
     justify-content: center;
   }
@@ -1484,7 +1485,10 @@ button.ghost.danger:hover { color: var(--admin); border-color: var(--admin); }
      phone, and a rule that outranked `.people-toggle { display: none }`
      would draw buttons that belong to the phone layout and do nothing
      there. */
-  :where(.topbar button, .news-bar button, .roster-close) { display: inline-flex; align-items: center; }
+  :where(.topbar button, .news-bar button, .roster-close, .line-actions button, .person-more, .mod-head button, .mod-actions button) {
+    display: inline-flex;
+    align-items: center;
+  }
 }
 
 /* --- asking for a reason ---------------------------------------------- */

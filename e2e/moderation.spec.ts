@@ -129,4 +129,33 @@ db = "server.sqlite"
     await expect(bob.locator('.line', { hasText: 'disconnected by an administrator' }).first()).toBeVisible();
     await expect(alice.locator('.person', { hasText: 'Bob' })).toHaveCount(0);
   });
+
+  test('on a touch screen, the moderation controls are a finger’s size', async ({ browser }) => {
+    const bob = await logIn(browser, server, 'bob');
+    const context = await browser.newContext({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
+    const page = await context.newPage();
+    await page.goto(`/?server=${encodeURIComponent(server.wsUrl)}`);
+    await page.getByLabel('Account').fill('mod');
+    await page.getByLabel('Password').fill('pw');
+    await page.getByRole('button', { name: 'Connect', exact: true }).click();
+    await expect(page.locator('.app')).toBeVisible();
+
+    const tall = async (what: import('@playwright/test').Locator) =>
+      expect((await what.boundingBox())!.height).toBeGreaterThanOrEqual(44);
+
+    await say(bob, 'a line to tap');
+    const line = page.locator('.transcript .line.chat', { hasText: 'a line to tap' });
+    // No hover on a touch screen: a tap on the line brings its buttons up.
+    await line.tap();
+    await tall(line.getByRole('button', { name: 'Report' }));
+    await tall(line.getByRole('button', { name: 'Redact' }));
+
+    await line.getByRole('button', { name: 'Report' }).tap();
+    await tall(page.locator('dialog.ask').getByRole('button', { name: 'Cancel' }));
+    await page.locator('dialog.ask').getByRole('button', { name: 'Cancel' }).tap();
+
+    await page.locator('.people-toggle').tap();
+    await tall(page.locator('.person:not(.away)', { hasText: 'Bob' }).locator('.person-more'));
+    await context.close();
+  });
 });

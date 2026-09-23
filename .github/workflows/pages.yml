@@ -1,0 +1,52 @@
+name: Pages
+
+# The client, built from main, at https://hx.foggyden.org/.
+#
+# It is served from an origin of its own rather than
+# mishan.github.io/hx-ng: IndexedDB, localStorage and service workers
+# are per origin, and every Pages project on an account shares that
+# one, so any of them could use this client's device keys.
+#
+# The custom domain lives in the repository's Pages settings, not in a
+# CNAME file: a deployment from Actions ignores one.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Never cancel a deployment halfway; a newer push waits its turn.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      # CI has already gated what reaches main; this only builds it.
+      - run: npx vite build
+      # Where this deployment connects to, in place of the generic
+      # config.json that derives a server from the page's own host,
+      # which on Pages would be nothing.
+      - run: cp deploy/pages/config.json dist/config.json
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+      - id: deployment
+        uses: actions/deploy-pages@v4

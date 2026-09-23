@@ -72,6 +72,19 @@ Precedence, most specific first:
 | `config.json` | what this deployment is for |
 | the page's origin | `ws://<this host>:5700` |
 
+### The hosted build
+
+Every push to main is built and published by GitHub Pages at
+**https://hx.foggyden.org/** (`.github/workflows/pages.yml`), with
+`deploy/pages/config.json` in place of the generic `config.json`: it
+connects to `wss://hl.foggyden.org/ws` by default and still lets you
+type any other server. That works because hxd-ng answers the page's
+cross-origin fetches with CORS, and a WebSocket is not subject to it.
+
+It has a domain of its own rather than `mishan.github.io/hx-ng` because
+storage is per origin: every Pages project on an account shares that
+one, and any of them could use this client's device keys.
+
 ### Serving it to a phone, and why voice needs https
 
 `getUserMedia` and `getDisplayMedia` do not merely *fail* outside a
@@ -391,6 +404,7 @@ published name like anybody else would.
 | `test/`, `packages/hotline-ng/test/` | the tests, kept out of `src` so the published package ships neither them nor a test runner |
 | `tools/build-icons.py` | `icons.rsrc` → sprite sheet |
 | `tools/build-app-icons.sh` | the app icon → the manifest's and iOS's PNGs |
+| `deploy/pages/` | what the hosted build at hx.foggyden.org connects to |
 
 There is no UI framework, on purpose: this client doubles as a readable
 reference for the protocol, and a reader chasing a bug should not have to

@@ -2,9 +2,14 @@ import './styles.css';
 import 'mullion/panes.css';
 import './panes-hx.css';
 import { loadConfig } from './config';
+import { listenForInstall } from './install';
 import { App } from './ui/app';
 import { loadIcons } from './ui/icons';
 import { pinToVisualViewport } from './ui/viewport';
+
+// Before anything is awaited: Chromium offers the install at load, and
+// an offer made while the config is in flight would otherwise be lost.
+listenForInstall();
 
 async function boot(): Promise<void> {
   const root = document.getElementById('root');

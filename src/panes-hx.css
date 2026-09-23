@@ -59,7 +59,8 @@ body.tiled .panebody > .rail,
 body.tiled .panebody > .roster,
 body.tiled .panebody > .chat-pane,
 body.tiled .panebody > .news,
-body.tiled .panebody > .files-view {
+body.tiled .panebody > .files-view,
+body.tiled .panebody > .mod-view {
   flex: 1 1 auto;
   min-height: 0;
 }
@@ -71,6 +72,7 @@ body.tiled .panebody > .files-view {
    draw an empty pane from it, so here it means nothing. */
 body.tiled .panebody > .chat-pane[hidden],
 body.tiled .panebody > .news[hidden],
-body.tiled .panebody > .files-view[hidden] {
+body.tiled .panebody > .files-view[hidden],
+body.tiled .panebody > .mod-view[hidden] {
   display: flex !important;
 }

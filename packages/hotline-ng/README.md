@@ -169,6 +169,32 @@ one. In the worker, `parsePushPayload` reads a decrypted body into a
 `PushMessagePayload` or a `PushNewsPayload`, with whatever the server's
 content policy left in it.
 
+### Moderation
+
+Anyone may `report` a line, an image, a message they received, a person
+or an article. The rest is a moderator's, which the login reply says as
+`self.moderator` and `Connection.moderator` keeps across a resume, whose
+own `self` does not say: `reports` and `reportClose`, the acts `redact`,
+`revoke` and `purge`, and `moderationLog`. `kick` asks the kick
+privilege instead, and `purge` inside it both. Every act takes a reason
+and closes every open report on what it removed, so a caller that acts
+on a report does not close it as well.
+
+```ts
+const { id, follow_up } = await conn.report({ line: 42, reason: 'Not how we talk here' });
+
+if (conn.moderator) {
+  conn.on('report', (r) => showReport(r));
+  conn.on('report_closed', ({ id }) => dropReport(id));
+  await conn.redact(42, 'slur');
+  await conn.kick({ uid: 7, ban: 86_400, purge: 3600, reason: 'flooding' });
+}
+conn.on('chat_redacted', ({ id }) => blankLine(id));
+```
+
+`no_such_user` from these means nobody by that name, not nobody who can
+be messaged, so `moderationErrorText` is the wording to show for them.
+
 ### `VoiceSession` — the SFU
 
 Layered on a `Connection`, because video is layered on the voice session

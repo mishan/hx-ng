@@ -5,6 +5,7 @@ import {
   isEvent,
   isFingerprint,
   isReply,
+  moderationErrorText,
   newGuid,
   parsePushPayload,
   parseRecvMid,
@@ -30,6 +31,21 @@ describe('frame discrimination', () => {
 
   it('reads seq 0, for the same reason', () => {
     expect(isEvent({ seq: 0, ev: 'x', data: {} })).toBe(true);
+  });
+});
+
+describe('moderationErrorText', () => {
+  it('does not call a kick target someone who cannot be messaged', () => {
+    const e = { code: 'no_such_user', text: 'There is nobody by that name.' };
+    expect(errorText(e)).toMatch(/messaged/);
+    expect(moderationErrorText(e)).toBe('There is nobody by that name.');
+  });
+
+  it('covers every code the moderation requests can answer with', () => {
+    // docs/moderation.md §5.
+    for (const code of ['no_such_target', 'no_such_line', 'no_such_media', 'no_such_user', 'no_such_report', 'own_report', 'protected', 'rate_limited', 'not_available']) {
+      expect(moderationErrorText({ code, text: '' })).not.toBe(code);
+    }
   });
 });
 

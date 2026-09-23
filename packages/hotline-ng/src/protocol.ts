@@ -100,6 +100,11 @@ export interface SelfIdentity extends RosterIdentity {
 /** `self` in the login reply: a roster row plus what only its owner sees. */
 export interface SelfUser extends User {
   identity?: SelfIdentity;
+  /** This session may moderate: redact, revoke, purge, and read and
+   *  close reports. A fact about the session, not an access bit, and
+   *  present only when true. The login reply carries it and the resume
+   *  reply does not, so `Connection.moderator` is what to read. */
+  moderator?: boolean;
 }
 
 /** The `from` object on chat, msg and broadcast events: a uid and the
@@ -237,6 +242,9 @@ export interface LoginOk {
   /** Present when the server sends notifications *and* this session
    *  has a mailbox to be notified about — never to a guest. */
   push?: PushConfig;
+  /** Present for a moderator, so a badge can be drawn before any
+   *  `report` event arrives — the way `inbox` is for mail. */
+  moderation?: ModerationCounts;
 }
 
 export interface ResumeParams {
@@ -959,6 +967,195 @@ function tryJson(s: string): unknown {
   }
 }
 
+// --- Moderation (hxd-ng's docs/moderation.md §5) ------------------------
+
+/** The login reply's `moderation` block. */
+export interface ModerationCounts {
+  /** Reports waiting for a moderator. */
+  open: number;
+}
+
+/**
+ * A person, named one of three ways — exactly one, as for `BlockParams`.
+ * `uid` is someone on the roster now; `login` and `fingerprint` reach
+ * someone who has gone, which is who a report or a purge is usually
+ * about.
+ */
+export type PersonRef =
+  | { uid: number; login?: never; fingerprint?: never }
+  | { login: string; uid?: never; fingerprint?: never }
+  | { fingerprint: string; uid?: never; login?: never };
+
+/** What a report is about. */
+export type ReportKind = 'line' | 'media' | 'msg' | 'user' | 'article';
+
+/**
+ * Filing a report: exactly one target, and a reason, which is required
+ * and at most 1024 characters.
+ *
+ * `msg` is an inbox id, and only its recipient may name it; the server
+ * copies the stored body into the report. A private message with no
+ * inbox row — a server without one, or one sent to a guest — is
+ * reported as its sender (`user`) with the text pasted as `evidence`,
+ * which the server marks unverified: it is the reporter's word, not a
+ * row it can vouch for.
+ */
+export type ReportParams = { reason: string; evidence?: string } & (
+  | { line: number; media?: never; msg?: never; user?: never; article?: never }
+  | { media: string; line?: never; msg?: never; user?: never; article?: never }
+  | { msg: number; line?: never; media?: never; user?: never; article?: never }
+  | { user: PersonRef; line?: never; media?: never; msg?: never; article?: never }
+  | { article: number; line?: never; media?: never; msg?: never; user?: never }
+);
+
+export interface ReportOk {
+  /** A second report of the same thing by the same reporter is the
+   *  first one, and answers with its id. */
+  id: number;
+  /** `removed` when what was reported had already gone: the report is
+   *  closed at once, with no moderator involved. */
+  outcome: 'open' | 'removed';
+  /** Whether the reporter will hear how it ends. False for a guest,
+   *  who has no mailbox to be told through later. */
+  follow_up: boolean;
+}
+
+/** Whose a reported thing is, as far as a moderator is shown. Every
+ *  field is absent that is not known. */
+export interface ReportSubject {
+  login?: string;
+  nick?: string;
+  fingerprint?: string;
+}
+
+export interface ReportTarget {
+  kind: ReportKind;
+  /** The line's sender, the image's uploader, the message's sender, the
+   *  article's author, or the person reported. */
+  from: ReportSubject;
+  line?: number;
+  /** For `media`, the reported handle. For `line`, the image the line
+   *  carried: the report made it this moderator's to fetch. */
+  media?: string;
+  msg?: number;
+  article?: number;
+}
+
+/** How a report ended. `removed` is an act — a redaction, revocation,
+ *  purge or deletion closes every open report on what it took;
+ *  `dismissed` and `duplicate` are `reportClose`. */
+export type ReportOutcome = 'removed' | 'dismissed' | 'duplicate';
+
+export interface ReportClosure {
+  at: number;
+  /** The moderator's login, or `cli` for the operator. */
+  by: string;
+  outcome: ReportOutcome;
+  note?: string;
+  /** For a duplicate, the report it duplicates. */
+  of?: number;
+}
+
+export interface Report {
+  id: number;
+  /** Unix seconds. */
+  at: number;
+  status: 'open' | 'closed';
+  /** Absent for a guest reporter, who has no name to give. */
+  by?: { login: string };
+  target: ReportTarget;
+  reason: string;
+  /** A reported message's body, or what a reporter pasted. */
+  evidence?: string;
+  /** False when `evidence` is only the reporter's word. */
+  verified: boolean;
+  closed?: ReportClosure;
+}
+
+export interface ReportsParams {
+  /** Default `open`. */
+  status?: 'open' | 'closed' | 'all';
+  /** Page backwards from this report id, exclusive. */
+  before?: number;
+  /** 1–100, default 50. */
+  limit?: number;
+}
+
+export interface ReportsOk {
+  /** Newest first. */
+  reports: Report[];
+  has_more: boolean;
+}
+
+/** Closing a report without acting on it. Removing what was reported
+ *  is an act, and closes it by itself. */
+export interface ReportCloseParams {
+  id: number;
+  outcome: 'dismissed' | 'duplicate';
+  note?: string;
+  /** Required with `duplicate`: the report this one repeats. */
+  of?: number;
+}
+
+/** A person's recent output: lines, images and articles. `since` is in
+ *  seconds, default an hour. A guest has no identity to purge by and is
+ *  refused; kick them instead. */
+export type PurgeParams = PersonRef & { since?: number; reason: string };
+
+export interface PurgeOk {
+  lines: number;
+  media: number;
+  articles: number;
+}
+
+/**
+ * Disconnect someone, needing the kick privilege rather than `moderator`.
+ * `ban` is in seconds, at most a year. `purge` takes their last that-many
+ * seconds of output with them, needs `moderator` as well, and requires a
+ * `reason`; a guest is kicked with nothing purged.
+ */
+export interface KickParams {
+  uid: number;
+  ban?: number;
+  purge?: number;
+  reason?: string;
+}
+
+/** What a moderation act was. */
+export type ModerationActKind = 'redact' | 'revoke' | 'purge' | 'close' | 'news_delete' | 'news_node_delete';
+
+/** One row of the audit trail. `target` carries whichever of its fields
+ *  the act had. */
+export interface ModerationAct {
+  id: number;
+  kind: ModerationActKind;
+  at: number;
+  /** The moderator's login, or `cli`. */
+  by: string;
+  target: {
+    line?: number;
+    media?: string;
+    article?: number;
+    report?: number;
+    login?: string;
+    fingerprint?: string;
+  };
+  reason: string;
+  /** What was removed, until the server scrubs it; absent after. */
+  evidence?: string;
+}
+
+export interface ModerationLogParams {
+  before?: number;
+  limit?: number;
+}
+
+export interface ModerationLogOk {
+  /** Newest first. */
+  entries: ModerationAct[];
+  has_more: boolean;
+}
+
 // --- Voice --------------------------------------------------------------
 
 export interface VoiceParticipant {
@@ -1055,6 +1252,15 @@ export interface Events {
    *  The line that carried it keeps its metadata, so the right response
    *  is to drop the picture and leave the placeholder. */
   media_revoked: { id: string };
+  /** A moderator redacted a public line. It keeps its id and place and
+   *  loses its words; a client blanks it where it is drawn, and
+   *  `history` answers it as a tombstone from now on. */
+  chat_redacted: { id: number };
+  /** A report was filed. Moderators only. */
+  report: Report;
+  /** A report was closed. It reaches the reporter, with `yours` true,
+   *  and every moderator. */
+  report_closed: { id: number; outcome: ReportOutcome; yours: boolean };
   /**
    * An article was posted somewhere this session may read. **Cache
    * invalidation, not a notification**: it goes to every reader, so a
@@ -1187,6 +1393,15 @@ export const ERROR_TEXT: Record<string, string> = {
   // Push devices.
   too_many_devices: 'This account has as many devices getting notifications as this server allows. Turn them off on one first.',
   no_capability: 'This device’s key is not trusted with that. Use a device that is.',
+  // Moderation. A kick, a purge or a report on a person answers
+  // `no_such_user` too, and the message wording above is wrong for
+  // those: `moderationErrorText` is what a caller of them wants.
+  no_such_target: 'There is nothing like that to report. It may have gone already.',
+  no_such_line: 'That line is not in the server’s history.',
+  no_such_media: 'That image is gone.',
+  no_such_report: 'There is no such report.',
+  own_report: 'That report is about you. Another moderator closes it.',
+  protected: 'That user cannot be moderated by you.',
   server_error: 'The server had a problem with that. It has been logged.',
 };
 
@@ -1195,4 +1410,11 @@ export function errorText(e: WireError): string {
   // has said nothing, and nothing rendered as an error message is worse
   // than the bare code — at least a code can be looked up.
   return ERROR_TEXT[e.code] || e.text || e.code;
+}
+
+/** `errorText` for the moderation requests, where `no_such_user` means
+ *  nobody by that name at all, not nobody who can be messaged. */
+export function moderationErrorText(e: WireError): string {
+  if (e.code === 'no_such_user') return 'There is nobody by that name.';
+  return errorText(e);
 }

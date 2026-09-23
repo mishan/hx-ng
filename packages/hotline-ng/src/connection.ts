@@ -36,11 +36,15 @@ import {
   type InboxOk,
   type InboxParams,
   type ChatParams,
+  type KickParams,
   type LoginOk,
   type LoginParams,
   type Media,
   type MediaLimits,
   type MsgOk,
+  type ModerationCounts,
+  type ModerationLogOk,
+  type ModerationLogParams,
   type MsgParams,
   type NewsArticle,
   type StagedNewsAttachment,
@@ -67,7 +71,14 @@ import {
   type PushRegisterOk,
   type PushRegisterParams,
   type PushUnregisterParams,
+  type PurgeOk,
+  type PurgeParams,
   type ReplyFrame,
+  type ReportCloseParams,
+  type ReportOk,
+  type ReportParams,
+  type ReportsOk,
+  type ReportsParams,
   type ResumeOk,
   type SelfUser,
   type ServerFrame,
@@ -166,6 +177,8 @@ interface Saved {
   media: MediaLimits | null;
   news: NewsConfig | null;
   push?: PushConfig | null;
+  moderator?: boolean;
+  moderation?: ModerationCounts | null;
 }
 
 const SAVED_KEY = 'hxd-ng.session';
@@ -270,6 +283,13 @@ export class Connection {
    *  `null` means it sends none, or this session has no mailbox to be
    *  notified about: offer nothing. */
   push: PushConfig | null = null;
+  /** May this session moderate? From the login reply's `self`, and
+   *  kept here because the resume reply's `self` does not say. */
+  moderator = false;
+  /** Open reports as the login reply counted them, for a moderator;
+   *  `null` otherwise. A starting point: `report` and `report_closed`
+   *  move it from there, and nothing here does. */
+  moderation: ModerationCounts | null = null;
   /** Round-trip time of the last explicit `ping`, in milliseconds. */
   rtt: number | null = null;
 
@@ -302,6 +322,8 @@ export class Connection {
       this.media = saved.media ?? null;
       this.news = saved.news ?? null;
       this.push = saved.push ?? null;
+      this.moderator = saved.moderator ?? false;
+      this.moderation = saved.moderation ?? null;
     } else if (opts.resumeOnly) {
       throw new Error('no session to resume');
     }
@@ -425,6 +447,8 @@ export class Connection {
     this.media = ok.media ?? null;
     this.news = ok.news ?? null;
     this.push = ok.push ?? null;
+    this.moderator = ok.self.moderator === true;
+    this.moderation = ok.moderation ?? null;
     // Only a session that may detach is worth remembering: without the
     // permission a resume can only ever answer session_expired, and
     // storing a token we know is useless just invites a confusing
@@ -993,6 +1017,59 @@ export class Connection {
     return this.request('push_unregister', params);
   }
 
+  // --- moderation (hxd-ng's docs/moderation.md §5) ---------------------
+  //
+  // `report` is anyone's. The rest answer `access_denied` to a session
+  // that is not `moderator`, except `kick`, which asks the kick
+  // privilege instead. Every act takes a reason and writes an audit row
+  // before it does anything; acting on what a report named closes that
+  // report as `removed` without a separate `reportClose`.
+
+  /** Report a line, an image, a message you received, a person or an
+   *  article. Rate-limited per account. */
+  report(params: ReportParams): Promise<ReportOk> {
+    return this.request<ReportOk>('report', params);
+  }
+
+  /** Reports, newest first. */
+  reports(params: ReportsParams = {}): Promise<ReportsOk> {
+    return this.request<ReportsOk>('reports', params);
+  }
+
+  /** Dismiss a report, or close it as a duplicate of another. A
+   *  moderator may not dismiss one about themselves. */
+  reportClose(params: ReportCloseParams): Promise<Record<string, never>> {
+    return this.request('report_close', params);
+  }
+
+  /** Take a public line's words back. It keeps its id and place, every
+   *  reader is told with `chat_redacted`, and an image it carried is
+   *  revoked with it. */
+  redact(id: number, reason: string): Promise<Record<string, never>> {
+    return this.request('redact', { id, reason });
+  }
+
+  /** Drop an image's bytes now. `block`, the server's default, also
+   *  refuses the same canonical bytes if they are uploaded again. */
+  revoke(media: string, reason: string, block?: boolean): Promise<Record<string, never>> {
+    return this.request('revoke', block === undefined ? { media, reason } : { media, reason, block });
+  }
+
+  /** Take a person's recent lines, images and articles. */
+  purge(params: PurgeParams): Promise<PurgeOk> {
+    return this.request<PurgeOk>('purge', params);
+  }
+
+  /** Disconnect someone, and optionally ban them and purge their output. */
+  kick(params: KickParams): Promise<Record<string, never>> {
+    return this.request('kick', params);
+  }
+
+  /** The audit trail, newest first. */
+  moderationLog(params: ModerationLogParams = {}): Promise<ModerationLogOk> {
+    return this.request<ModerationLogOk>('moderation_log', params);
+  }
+
   async ping(): Promise<number> {
     const t0 = performance.now();
     await this.request('ping', {});
@@ -1062,6 +1139,8 @@ export class Connection {
       media: this.media,
       news: this.news,
       push: this.push,
+      moderator: this.moderator,
+      moderation: this.moderation,
     });
   }
 

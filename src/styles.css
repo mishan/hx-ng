@@ -491,6 +491,22 @@ button.call:disabled { opacity: 0.45; cursor: default; }
   padding: 0.09rem 0;
 }
 .line.cont { padding-top: 0; }
+
+/* Report, and for a moderator Redact: out of the way until the pointer
+   is on the line, or on a touch screen until the line is tapped. */
+.line { position: relative; }
+.line-actions {
+  position: absolute;
+  top: 0;
+  right: 0.25rem;
+  display: none;
+  gap: 0.25rem;
+  padding: 0.1rem;
+  border-radius: 6px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+.line:hover > .line-actions, .line.picked > .line-actions, .line-actions:focus-within { display: flex; }
 .line:not(.cont) { margin-top: 0.35rem; }
 
 .line .time {
@@ -718,6 +734,10 @@ button.call:disabled { opacity: 0.45; cursor: default; }
 .person.admin .nick { color: var(--admin); font-weight: 620; }
 .person.me .nick { font-weight: 620; }
 .person.away { opacity: 0.55; }
+.person { grid-template-columns: auto minmax(0, 1fr) auto auto; }
+.person-more { padding: 0 0.4rem; line-height: 1.4; opacity: 0.5; }
+.person:hover .person-more, .person-more:focus-visible { opacity: 1; }
+@media (hover: none) { .person-more { opacity: 1; } }
 
 .marks { display: flex; gap: 0.2rem; }
 .mark { font-size: 0.72rem; line-height: 1; color: var(--muted); }
@@ -986,7 +1006,7 @@ dialog.picker header input { width: 9rem; }
 
 /* The chat pane and the news reader take turns in the main column, under
    the call bar and the tiles. */
-.chat-pane, .news, .files-view {
+.chat-pane, .news, .files-view, .mod-view {
   flex: 1;
   min-height: 0;
   min-width: 0;
@@ -1459,3 +1479,54 @@ button.ghost.danger:hover { color: var(--admin); border-color: var(--admin); }
      there. */
   :where(.topbar button, .news-bar button, .roster-close) { display: inline-flex; align-items: center; }
 }
+
+/* --- asking for a reason ---------------------------------------------- */
+
+dialog.picker.ask { width: min(30rem, 100vw - 1.5rem); }
+dialog.picker.ask form { display: contents; }
+.ask-body { padding: 0.9rem 1rem; display: flex; flex-direction: column; gap: 0.75rem; overflow-y: auto; }
+.ask-body p { margin: 0; color: var(--muted); }
+.ask-field { display: flex; flex-direction: column; gap: 0.3rem; }
+.ask-field > span { font-size: 0.8rem; color: var(--muted); }
+.ask-field textarea { resize: vertical; font: inherit; }
+.ask-check { display: flex; align-items: center; gap: 0.4rem; }
+.ask-choices button { text-align: left; }
+button.primary.danger { background: var(--admin); border-color: var(--admin); }
+button.ghost.danger { color: var(--admin); }
+
+/* --- reports ---------------------------------------------------------- */
+
+.mod-head {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.45rem 0.75rem;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface);
+  flex: none;
+  flex-wrap: wrap;
+}
+.mod-head h2 { margin: 0 0.5rem 0 0; font-size: 1rem; }
+.mod-head button.on { border-color: var(--accent); color: var(--accent); }
+.mod-error, .mod-notice { margin: 0.5rem 0.75rem 0; }
+.mod-error { color: var(--admin); }
+.mod-list { flex: 1; min-height: 0; overflow-y: auto; padding: 0.5rem 0.75rem 1rem; display: flex; flex-direction: column; gap: 0.6rem; }
+.mod-list > button { align-self: center; }
+.mod-report, .mod-act {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 0.6rem 0.75rem;
+  background: var(--surface);
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  min-width: 0;
+}
+.mod-report.closed { opacity: 0.75; }
+.mod-report-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.5rem; }
+.mod-report-head .muted { font-size: 0.75rem; margin-left: auto; }
+.mod-id { color: var(--muted); font-variant-numeric: tabular-nums; }
+.mod-reason { margin: 0; padding-left: 0.6rem; border-left: 3px solid var(--line); white-space: pre-wrap; overflow-wrap: anywhere; }
+.mod-evidence { font-size: 0.9rem; white-space: pre-wrap; overflow-wrap: anywhere; }
+.mod-image img { max-width: min(100%, 420px); max-height: 320px; border-radius: 6px; }
+.mod-actions { display: flex; flex-wrap: wrap; gap: 0.35rem; }

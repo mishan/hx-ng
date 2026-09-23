@@ -446,6 +446,65 @@ describe('push devices', () => {
   });
 });
 
+describe('moderation', () => {
+  it('takes the moderator flag from login and keeps it across a resume that does not say', async () => {
+    server.on('login', () => ({ ok: loginOk({ self: { ...me(1, 'Alice'), moderator: true }, moderation: { open: 3 } }) }));
+    const first = await connect();
+    expect(first.moderator).toBe(true);
+    expect(first.moderation).toEqual({ open: 3 });
+
+    // The resume reply's `self` is a roster row and carries no flag.
+    server.on('resume', () => ({ ok: { replay: 0, self: user(1, 'Alice') } }));
+    server.on('sync', () => ({ ok: { server: { name: 'Test', subject: 'hi' }, users: [], seq: 0 } }));
+    const second = new Connection(CREDS);
+    await second.start();
+    expect(second.moderator).toBe(true);
+    expect(second.moderation).toEqual({ open: 3 });
+  });
+
+  it('is nobody’s by default', async () => {
+    const conn = await connect();
+    expect(conn.moderator).toBe(false);
+    expect(conn.moderation).toBeNull();
+  });
+
+  it('sends the frames the wire specifies', async () => {
+    const conn = await connect();
+    for (const req of ['report_close', 'redact', 'revoke', 'kick']) server.on(req, () => ({ ok: {} }));
+    server.on('report', () => ({ ok: { id: 7, outcome: 'open', follow_up: true } }));
+    server.on('reports', () => ({ ok: { reports: [], has_more: false } }));
+    server.on('purge', () => ({ ok: { lines: 2, media: 1, articles: 0 } }));
+    server.on('moderation_log', () => ({ ok: { entries: [], has_more: false } }));
+
+    expect(await conn.report({ line: 42, reason: 'slur' })).toEqual({ id: 7, outcome: 'open', follow_up: true });
+    await conn.report({ user: { login: 'bob' }, reason: 'spam', evidence: 'buy now' });
+    await conn.reports({ status: 'all', before: 9 });
+    await conn.reportClose({ id: 7, outcome: 'duplicate', of: 6 });
+    await conn.redact(42, 'slur');
+    await conn.revoke('AAAA', 'gore');
+    await conn.revoke('BBBB', 'mine', false);
+    expect(await conn.purge({ uid: 2, since: 600, reason: 'flood' })).toEqual({ lines: 2, media: 1, articles: 0 });
+    await conn.kick({ uid: 2, ban: 3600, purge: 3600, reason: 'flood' });
+    await conn.moderationLog();
+
+    expect(server.sent('report').map((f) => f.params)).toEqual([
+      { line: 42, reason: 'slur' },
+      { user: { login: 'bob' }, reason: 'spam', evidence: 'buy now' },
+    ]);
+    expect(server.sent('reports')[0]?.params).toEqual({ status: 'all', before: 9 });
+    expect(server.sent('report_close')[0]?.params).toEqual({ id: 7, outcome: 'duplicate', of: 6 });
+    expect(server.sent('redact')[0]?.params).toEqual({ id: 42, reason: 'slur' });
+    // Unsaid is the server's default, which is to block.
+    expect(server.sent('revoke').map((f) => f.params)).toEqual([
+      { media: 'AAAA', reason: 'gore' },
+      { media: 'BBBB', reason: 'mine', block: false },
+    ]);
+    expect(server.sent('purge')[0]?.params).toEqual({ uid: 2, since: 600, reason: 'flood' });
+    expect(server.sent('kick')[0]?.params).toEqual({ uid: 2, ban: 3600, purge: 3600, reason: 'flood' });
+    expect(server.sent('moderation_log')[0]?.params).toEqual({});
+  });
+});
+
 describe('identity login', () => {
   const identityCreds = (getToken: () => Promise<string>): Credentials => ({
     ...CREDS,

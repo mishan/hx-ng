@@ -30,6 +30,7 @@ import {
   blocksText,
   errorText,
   markedSpans,
+  moderationErrorText,
   newsScopeOf,
   parseArticle,
   referenceSpans,
@@ -71,6 +72,7 @@ import {
   trailTo,
   type DraftAttachment,
 } from '../news';
+import { ask } from './ask';
 import { fill, h, linkify } from './dom';
 import { blockNodes, wrapSelection } from './markdown';
 import { MediaCache } from './media';
@@ -887,15 +889,52 @@ export class NewsView {
   private async deleteArticle(a: NewsArticle): Promise<void> {
     const conn = this.hooks.conn();
     if (!conn) return;
-    const whose = isOwn(a.from, this.hooks.me()) ? 'your article' : `${a.from.nick}’s article`;
-    if (!confirm(`Delete ${whose} “${a.subject}”? Its replies stay where they are.`)) return;
+    // Someone else's article is a moderation act, and goes on the record
+    // with a reason; one's own is only a delete.
+    let reason: string | undefined;
+    if (isOwn(a.from, this.hooks.me())) {
+      if (!confirm(`Delete your article “${a.subject}”? Its replies stay where they are.`)) return;
+    } else {
+      const answer = await ask({
+        title: `Delete ${a.from.nick || 'a guest'}’s article`,
+        body: `“${a.subject}” becomes a tombstone; its replies stay where they are. The deletion is kept on the moderation record.`,
+        fields: [{ kind: 'text', name: 'reason', label: 'Reason', max: 512 }],
+        ok: 'Delete',
+        danger: true,
+      });
+      if (!answer) return;
+      reason = String(answer.reason);
+    }
     try {
-      await conn.newsDelete(a.id);
+      await conn.newsDelete(a.id, reason);
       await this.load();
     } catch (e) {
       this.error = describe(e);
       this.render();
     }
+  }
+
+  private async reportArticle(a: NewsArticle): Promise<void> {
+    const conn = this.hooks.conn();
+    if (!conn) return;
+    const answer = await ask({
+      title: `Report “${a.subject}”`,
+      body: 'The moderators are shown the article.',
+      fields: [{ kind: 'textarea', name: 'reason', label: 'What is wrong with it', required: true, max: 1024 }],
+      ok: 'Report',
+    });
+    if (!answer) return;
+    try {
+      const ok = await conn.report({ article: a.id, reason: String(answer.reason) });
+      this.notice =
+        ok.outcome === 'removed'
+          ? 'Thank you — that has already been removed.'
+          : `Report #${ok.id} is with the moderators.${ok.follow_up ? ' You will hear how it ends.' : ''}`;
+      this.error = null;
+    } catch (e) {
+      this.error = e instanceof WireFailure ? moderationErrorText(e.wire) : describe(e);
+    }
+    this.render();
   }
 
   private async toggleBacklinks(a: NewsArticle): Promise<void> {
@@ -1452,6 +1491,11 @@ export class NewsView {
       const del = h('button', { class: 'danger' }, 'Delete');
       del.onclick = () => void this.deleteArticle(a);
       actions.push(del);
+    }
+    if (!a.deleted && !isOwn(a.from, this.hooks.me())) {
+      const report = h('button', {}, 'Report');
+      report.onclick = () => void this.reportArticle(a);
+      actions.push(report);
     }
     if (a.referenced_by > 0) {
       const open = this.backlinks.has(a.id);

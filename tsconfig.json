@@ -35,6 +35,11 @@
       ]
     }
   },
+  // The service worker needs the WebWorker library, which does not mix
+  // with this program's, so it has one of its own: `tsconfig.sw.json`.
+  "exclude": [
+    "src/sw.ts"
+  ],
   "include": [
     "src",
     "packages/hotline-ng/src",

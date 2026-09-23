@@ -234,6 +234,9 @@ export interface LoginOk {
   /** Present exactly when `caps` lists `news`: what this session may do
    *  there, and the ceilings it will be held to. */
   news?: NewsConfig;
+  /** Present when the server sends notifications *and* this session
+   *  has a mailbox to be notified about — never to a guest. */
+  push?: PushConfig;
 }
 
 export interface ResumeParams {
@@ -794,6 +797,168 @@ export interface NewsSearchOk {
   capped: boolean;
 }
 
+// --- Push notifications (hxd-ng's docs/push-notifications.md §8) -------
+
+/** How much of a message a notification carries: the text, only who it
+ *  is from, or only that something arrived. The server applies it
+ *  before encrypting, so a client is never sent what it would have to
+ *  be trusted to hide. */
+export type PushContent = 'full' | 'sender' | 'generic';
+
+/** The login reply's `push` block (push-notifications.md §8.1). */
+export interface PushConfig {
+  /** The server's VAPID public key, base64url, uncompressed P-256: the
+   *  `applicationServerKey` a subscription for this server is made with. */
+  vapid: string;
+  /** What `push_register` accepts here. */
+  types: string[];
+  /** What a notification will say, so a client can tell its user
+   *  before it asks the browser for permission. */
+  content: PushContent;
+}
+
+/**
+ * A Web Push subscription, as `PushSubscription.toJSON()` spells it.
+ * Declared here rather than taken from the DOM's types so that this
+ * module stays plain data and `pushSubscriptionParams` runs anywhere.
+ */
+export interface PushSubscriptionData {
+  endpoint?: string;
+  keys?: Record<string, string>;
+}
+
+export interface PushRegisterParams {
+  /** `webpush` from a browser, `unifiedpush` from a distributor. Both
+   *  are Web Push on the wire. Omitted means `webpush`. */
+  type?: 'webpush' | 'unifiedpush';
+  endpoint: string;
+  /** The subscription's P-256 public key, base64url. */
+  p256dh: string;
+  /** The subscription's 16-byte auth secret, base64url. */
+  auth: string;
+  /** Required on a password session, ignored on an identity one — the
+   *  device certificate names the device there. 8 to 64 printable ASCII
+   *  characters, and never 64 lowercase hex, which is how an identity
+   *  device's id is spelled. */
+  devid?: string;
+}
+
+export interface PushRegisterOk {
+  /** The id the server filed this device under: the client's own on a
+   *  password session, the device fingerprint on an identity one. */
+  devid: string;
+}
+
+/**
+ * Omitting `devid` means *this* device, never every device — the request
+ * a client sends most is "turn notifications off here". Every device is
+ * `all: true`, said on purpose. A password session has no device the
+ * server can find by itself, so it names its own `devid`.
+ */
+export interface PushUnregisterParams {
+  devid?: string;
+  all?: boolean;
+}
+
+/** Turn a subscription into the parameters `push_register` takes, or
+ *  `null` if it lacks an endpoint or either key. */
+export function pushSubscriptionParams(
+  sub: PushSubscriptionData,
+  devid?: string,
+): PushRegisterParams | null {
+  const p256dh = sub.keys?.p256dh;
+  const auth = sub.keys?.auth;
+  if (!sub.endpoint || !p256dh || !auth) return null;
+  const params: PushRegisterParams = { type: 'webpush', endpoint: sub.endpoint, p256dh, auth };
+  if (devid !== undefined) params.devid = devid;
+  return params;
+}
+
+/**
+ * What a push carries, once the device has decrypted it
+ * (webpush-gateway.md §4). What is absent depends on the server's
+ * `content`: `sender` drops `text` and `excerpt`, and `generic` drops
+ * the names and the subject as well, keeping only enough to open the
+ * right thing.
+ */
+export type PushPayload = PushMessagePayload | PushNewsPayload;
+
+export interface PushMessagePayload {
+  kind: 'message';
+  /** The message's id in the inbox, as a string. */
+  id: string;
+  /** How many messages this mailbox has unread, this one included. */
+  unread: number;
+  /** The sender's login. Absent for a guest, and under `generic`. */
+  from?: string;
+  from_nick?: string;
+  text?: string;
+}
+
+export interface PushNewsPayload {
+  kind: 'news';
+  reason: NewsNotifyReason;
+  article: number;
+  root: number;
+  category: number;
+  scope: NewsScopeKind;
+  target: number;
+  unread: number;
+  from_nick?: string;
+  subject?: string;
+  excerpt?: string;
+}
+
+/** Read a decrypted push body, or `null` for anything that is not one
+ *  of the two kinds. Unknown fields are kept; an unknown `kind` is not
+ *  an error, just nothing this client knows how to show. */
+export function parsePushPayload(raw: unknown): PushPayload | null {
+  const v = typeof raw === 'string' ? tryJson(raw) : raw;
+  if (!v || typeof v !== 'object') return null;
+  const o = v as Record<string, unknown>;
+  const str = (k: string) => (typeof o[k] === 'string' ? (o[k] as string) : undefined);
+  const num = (k: string) => (typeof o[k] === 'number' && Number.isFinite(o[k]) ? (o[k] as number) : undefined);
+  const opt = <T extends object>(out: T, k: string): T => {
+    const s = str(k);
+    if (s !== undefined) (out as Record<string, unknown>)[k] = s;
+    return out;
+  };
+  if (o.kind === 'message') {
+    const id = str('id') ?? (num('id') !== undefined ? String(num('id')) : undefined);
+    if (id === undefined) return null;
+    const out: PushMessagePayload = { kind: 'message', id, unread: num('unread') ?? 0 };
+    for (const k of ['from', 'from_nick', 'text']) opt(out, k);
+    return out;
+  }
+  if (o.kind === 'news') {
+    const article = num('article');
+    const reason = str('reason');
+    const scope = str('scope');
+    if (article === undefined || !reason || (scope !== 'thread' && scope !== 'category')) return null;
+    const out: PushNewsPayload = {
+      kind: 'news',
+      reason: reason as NewsNotifyReason,
+      article,
+      root: num('root') ?? article,
+      category: num('category') ?? 0,
+      scope,
+      target: num('target') ?? 0,
+      unread: num('unread') ?? 0,
+    };
+    for (const k of ['from_nick', 'subject', 'excerpt']) opt(out, k);
+    return out;
+  }
+  return null;
+}
+
+function tryJson(s: string): unknown {
+  try {
+    return JSON.parse(s);
+  } catch {
+    return null;
+  }
+}
+
 // --- Voice --------------------------------------------------------------
 
 export interface VoiceParticipant {
@@ -964,6 +1129,7 @@ export const CAP_HISTORY = 'history';
 export const CAP_MEDIA = 'media';
 export const CAP_NEWS = 'news';
 export const CAP_FILES = 'files';
+export const CAP_PUSH = 'push';
 
 /**
  * `resync_required` is not a failure: the session is still alive and the
@@ -1018,6 +1184,9 @@ export const ERROR_TEXT: Record<string, string> = {
   // has nowhere to keep them.
   no_mailbox: 'You have no mailbox on this server, so there is nowhere to keep what you follow.',
   too_many_subs: 'You follow as much as this server allows. Unfollow something first.',
+  // Push devices.
+  too_many_devices: 'This account has as many devices getting notifications as this server allows. Turn them off on one first.',
+  no_capability: 'This device’s key is not trusted with that. Use a device that is.',
   server_error: 'The server had a problem with that. It has been logged.',
 };
 

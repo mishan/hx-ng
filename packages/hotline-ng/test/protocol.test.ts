@@ -6,7 +6,9 @@ import {
   isFingerprint,
   isReply,
   newGuid,
+  parsePushPayload,
   parseRecvMid,
+  pushSubscriptionParams,
   sendMid,
   type ServerFrame,
 } from '../src/protocol';
@@ -134,5 +136,47 @@ describe('isFingerprint', () => {
   it('rejects 52 characters that could not be base32 at all', () => {
     expect(isFingerprint('!'.repeat(52))).toBe(false);
     expect(isFingerprint('a'.repeat(51) + '-')).toBe(false);
+  });
+});
+
+describe('push', () => {
+  it('turns a browser subscription into push_register params', () => {
+    const sub = { endpoint: 'https://push.example/abc', expirationTime: null, keys: { p256dh: 'BPk', auth: 'c2Vj' } };
+    expect(pushSubscriptionParams(sub, 'hx-0123456789')).toEqual({
+      type: 'webpush',
+      endpoint: 'https://push.example/abc',
+      p256dh: 'BPk',
+      auth: 'c2Vj',
+      devid: 'hx-0123456789',
+    });
+    expect(pushSubscriptionParams({ endpoint: 'https://push.example/abc', keys: { p256dh: 'BPk' } })).toBeNull();
+    expect(pushSubscriptionParams({ keys: { p256dh: 'BPk', auth: 'c2Vj' } })).toBeNull();
+  });
+
+  it('reads a message notice at every level of content policy', () => {
+    // `full`, `sender` and `generic`, as hxd-ng's payload builder writes them.
+    const full = '{"kind":"message","id":"42","unread":3,"from_nick":"Alice","from":"alice","text":"hi"}';
+    expect(parsePushPayload(full)).toEqual({
+      kind: 'message', id: '42', unread: 3, from: 'alice', from_nick: 'Alice', text: 'hi',
+    });
+    expect(parsePushPayload({ kind: 'message', id: '42', unread: 1, from_nick: 'Alice', from: 'alice' }))
+      .not.toHaveProperty('text');
+    expect(parsePushPayload({ kind: 'message', id: '42', unread: 1 })).toEqual({ kind: 'message', id: '42', unread: 1 });
+  });
+
+  it('reads a news notice', () => {
+    const p = parsePushPayload({
+      kind: 'news', reason: 'reply', article: 412, root: 398, category: 3,
+      scope: 'thread', target: 398, unread: 2, from_nick: 'Alice', subject: 'Hello',
+    });
+    expect(p).toMatchObject({ kind: 'news', article: 412, scope: 'thread', target: 398, subject: 'Hello' });
+  });
+
+  it('refuses what is not a notice', () => {
+    expect(parsePushPayload('not json')).toBeNull();
+    expect(parsePushPayload({ kind: 'mystery' })).toBeNull();
+    expect(parsePushPayload({ kind: 'message' })).toBeNull();
+    expect(parsePushPayload({ kind: 'news', reason: 'reply', article: 1, scope: 'galaxy' })).toBeNull();
+    expect(parsePushPayload(null)).toBeNull();
   });
 });

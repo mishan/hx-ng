@@ -141,6 +141,34 @@ session-bound token is never retried silently. An unknown, expired or
 unauthorized token rejects with `not_found`, and a resume from a file the
 server cannot read from an offset with `range_unsupported`.
 
+### Push devices
+
+The server never asks for a device. Where the login reply offers
+`push`, `conn.push` holds the server's VAPID key and its content policy;
+the caller asks its user, subscribes, and hands over what the browser
+gave back. The subscription and the service worker are the caller's,
+because they are the page's; this package holds only the two requests
+and the shapes.
+
+```ts
+if (conn.push) {
+  const sub = await registration.pushManager.subscribe({
+    userVisibleOnly: true,
+    applicationServerKey: base64urlDecode(conn.push.vapid),
+  });
+  const { devid } = await conn.pushRegister(pushSubscriptionParams(sub.toJSON(), myDeviceId)!);
+  // …and later, to turn this device off:
+  await conn.pushUnregister({ devid });
+}
+```
+
+`devid` is required on a password session and ignored on an identity
+one, where the device certificate names the device; keep one per install,
+because a new one per registration adds a device rather than replacing
+one. In the worker, `parsePushPayload` reads a decrypted body into a
+`PushMessagePayload` or a `PushNewsPayload`, with whatever the server's
+content policy left in it.
+
 ### `VoiceSession` — the SFU
 
 Layered on a `Connection`, because video is layered on the voice session

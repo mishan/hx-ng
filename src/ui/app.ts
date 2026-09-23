@@ -64,6 +64,8 @@ import { MediaCache } from './media';
 import { NewsView } from './news';
 import { appendLine, isAtBottom, keepingPlace, renderTranscript, scrollToEnd } from './transcript';
 import { wrapSelection } from './markdown';
+import { contentWords, disablePush, enablePush, pushEnabled, pushSupported, refreshPush } from '../push/client';
+import { isPushOpenMessage, parseOpenParam, type PushOpen } from '../push/notice';
 import { createPanes, type PaneNode, type Panes } from 'mullion';
 
 /** Mark an element as one of the tiler's panes.
@@ -212,6 +214,12 @@ export class App {
   private filesOpen = false;
   /** The account typed at the connect form, or `null` for a guest. */
   private account: string | null = null;
+  /** Notifications on this device, for this server and account. Shown
+   *  only where the server offers them and the browser can take them. */
+  private notifyBtn = h('button', { class: 'ghost', hidden: true }, 'Notify');
+  /** What a notification that opened this page asked to be shown, until
+   *  there is a session to show it in. */
+  private pendingOpen: PushOpen = parseOpenParam(new URLSearchParams(location.search).get('open'));
 
   constructor(
     private root: HTMLElement,
@@ -257,6 +265,25 @@ export class App {
         this.showRoster(false);
       }
     });
+
+    // A notification tapped while this page is open: its worker says
+    // what it was about, and focuses the page.
+    if (pushSupported()) {
+      navigator.serviceWorker.addEventListener('message', (e) => {
+        if (!isPushOpenMessage(e.data)) return;
+        if (e.data.server !== this.url) {
+          this.say(`That notification was from ${e.data.server}, and this page is connected somewhere else.`);
+          return;
+        }
+        this.followPush(e.data.open);
+      });
+    }
+    // Once read, `?open=` has done its job; a reload should not redo it.
+    if (new URLSearchParams(location.search).has('open')) {
+      const url = new URL(location.href);
+      url.searchParams.delete('open');
+      history.replaceState(history.state, '', url);
+    }
   }
 
   mount(): void {
@@ -411,6 +438,7 @@ export class App {
         // it opens a picker whose upload can only fail with "not logged
         // in" — inert chrome saying something this client cannot do.
         this.attachBtn.hidden = true;
+        this.notifyBtn.hidden = true;
         if (this.pingTimer !== null) {
           clearInterval(this.pingTimer);
           this.pingTimer = null;
@@ -468,6 +496,81 @@ export class App {
     this.pingTimer = window.setInterval(() => {
       if (conn.state === 'online') void conn.ping().then(() => this.renderPill());
     }, 15000);
+    void this.initPush(conn);
+    this.followPush(this.pendingOpen);
+    this.pendingOpen = {};
+  }
+
+  // --- notifications ----------------------------------------------------
+
+  /** The account notifications are filed under here, for keeping one
+   *  person's worker apart from another's in a shared browser. */
+  private pushAccount(): string {
+    return this.conn?.self?.identity?.account ?? this.account ?? '';
+  }
+
+  /** Offer the switch where it can work, and bring a device that already
+   *  had notifications on up to date: a changed endpoint, or a server
+   *  that has changed its key since. */
+  private async initPush(conn: Connection): Promise<void> {
+    const offered = conn.push !== null && pushSupported();
+    this.notifyBtn.hidden = !offered;
+    if (!offered) return;
+    try {
+      await refreshPush(conn, this.url, this.pushAccount());
+    } catch (e) {
+      this.say(`Notifications on this device could not be renewed: ${this.problem(e)}`);
+    }
+    await this.paintNotify();
+  }
+
+  private async paintNotify(): Promise<void> {
+    const on = await pushEnabled(this.url, this.pushAccount()).catch(() => false);
+    this.notifyBtn.classList.toggle('on', on);
+    this.notifyBtn.setAttribute('aria-pressed', String(on));
+    this.notifyBtn.title = on
+      ? 'Notifications: on for this device. Click to turn them off here.'
+      : 'Notifications: off. Click to be notified here of private messages and news while you are away.';
+  }
+
+  private async togglePush(): Promise<void> {
+    const conn = this.conn;
+    if (!conn?.push) return;
+    const server = this.url;
+    const account = this.pushAccount();
+    try {
+      // The painted state, not a fresh look at the registration: that is
+      // a promise, and Safari takes the permission prompt only while the
+      // click that asked for it is still the thing running.
+      if (this.notifyBtn.getAttribute('aria-pressed') === 'true') {
+        await disablePush(conn, server, account);
+        this.say('Notifications are off on this device.');
+      } else {
+        // Before the browser's own prompt, what the server will send: the
+        // only point at which somebody can decide knowing it.
+        if (!confirm(`${contentWords(conn.push.content)}\n\nTurn on notifications for this device?`)) return;
+        await enablePush(conn, server, account);
+        this.say('Notifications are on. Private messages and news for you will reach this device while you are away.');
+      }
+    } catch (e) {
+      this.say(this.problem(e));
+    }
+    await this.paintNotify();
+  }
+
+  /** Show what a notification was about: the conversation with whoever
+   *  wrote, or the article. */
+  private followPush(open: PushOpen): void {
+    if (!this.conn) return;
+    if (open.msg) {
+      this.select(this.store.openPm({ login: open.msg, nick: open.nick ?? open.msg }).id);
+    } else if (open.article !== undefined) {
+      this.openNewsArticle(open.article);
+    }
+  }
+
+  private problem(e: unknown): string {
+    return e instanceof WireFailure ? errorText(e.wire) : e instanceof Error ? e.message : String(e);
   }
 
   private bindEvents(conn: Connection): void {
@@ -1507,6 +1610,7 @@ export class App {
     };
 
     this.pill.onclick = () => this.debug.toggle(true);
+    this.notifyBtn.onclick = () => void this.togglePush();
     this.meButton.onclick = () => void this.editSelf();
     this.mailBtn.onclick = () =>
       this.loadMail().catch((e: Error) =>
@@ -1608,6 +1712,7 @@ export class App {
         this.pill,
         this.mailBtn,
         this.peopleBtn,
+        this.notifyBtn,
         themeBtn,
         mdBtn,
         identityBtn,

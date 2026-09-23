@@ -38,7 +38,7 @@ import {
   type VideoKind,
 } from '@hotline-ng/client';
 
-import type { AppConfig } from '../config';
+import { serverFromUrl, type AppConfig } from '../config';
 import { notifyText } from '../news';
 import {
   addressOf,
@@ -50,7 +50,7 @@ import {
   Store,
   styleToKind,
 } from '../state';
-import { connectScreen, remembered, type Details } from './connect';
+import { connectScreen, remembered, type ConnectScreen, type Details } from './connect';
 import { DebugPanel } from './debug';
 import { clock, fill, h } from './dom';
 import { FilesView } from './files';
@@ -65,7 +65,7 @@ import { NewsView } from './news';
 import { appendLine, isAtBottom, keepingPlace, renderTranscript, scrollToEnd } from './transcript';
 import { wrapSelection } from './markdown';
 import { contentWords, disablePush, enablePush, pushEnabled, pushSupported, refreshPush } from '../push/client';
-import { isPushOpenMessage, parseOpenParam, type PushOpen } from '../push/notice';
+import { isPushOpenMessage, parseOpenParam, type PushOpen, type PushOpenReply } from '../push/notice';
 import { createPanes, type PaneNode, type Panes } from 'mullion';
 
 /** Mark an element as one of the tiler's panes.
@@ -105,6 +105,23 @@ const LAYOUT: PaneNode = {
 /** Codes that mean "not for you, not now, not ever on this session":
  *  no log configured, no privilege, or a request this server will not
  *  parse. Asking again would only produce the same answer. */
+/** A notification's ask, held for a session it belongs to. */
+interface PendingOpen {
+  server: string;
+  account: string;
+  open: PushOpen;
+}
+
+/** The ask a notification opened this page with: `?open=`, and the
+ *  `?server=` and `?account=` it was for, which its worker always sets. */
+function pendingFromUrl(): PendingOpen | null {
+  const q = new URLSearchParams(location.search);
+  const server = serverFromUrl();
+  const account = q.get('account');
+  if (!q.has('open') || server === null || account === null) return null;
+  return { server, account, open: parseOpenParam(q.get('open')) };
+}
+
 const HISTORY_REFUSALS = new Set(['not_available', 'access_denied', 'bad_request']);
 
 const THEME_KEY = 'hxd-ng.theme';
@@ -217,9 +234,13 @@ export class App {
   /** Notifications on this device, for this server and account. Shown
    *  only where the server offers them and the browser can take them. */
   private notifyBtn = h('button', { class: 'ghost', hidden: true }, 'Notify');
-  /** What a notification that opened this page asked to be shown, until
-   *  there is a session to show it in. */
-  private pendingOpen: PushOpen = parseOpenParam(new URLSearchParams(location.search).get('open'));
+  /** What a notification tapped before there was a session asked to be
+   *  shown, and whose it was: kept until a login to that server as that
+   *  account, and shown only then. Either the `?open=` a notice opened
+   *  this page with, or one tapped while this page sat at the form. */
+  private pendingOpen: PendingOpen | null = pendingFromUrl();
+  /** The connect form, while it is up. */
+  private connectForm: ConnectScreen | null = null;
 
   constructor(
     private root: HTMLElement,
@@ -266,32 +287,42 @@ export class App {
       }
     });
 
-    // A notification tapped while this page is open: its worker says
-    // what it was about, and focuses the page.
+    // A notification tapped while this page is open: its worker asks
+    // whose this page is, and if it picks this one, says to act.
     if (pushSupported()) {
       navigator.serviceWorker.addEventListener('message', (e) => {
         if (!isPushOpenMessage(e.data)) return;
-        if (e.data.server !== this.url) {
-          this.say(`That notification was from ${e.data.server}, and this page is connected somewhere else.`);
-          return;
+        const m = e.data;
+        const here = this.pushReply(m.server, m.account);
+        if (m.act && here === 'match') this.followPush(m.open);
+        if (m.act && here === 'idle') {
+          this.pendingOpen = { server: m.server, account: m.account, open: m.open };
+          this.connectForm?.fill({ url: m.server, login: m.account });
         }
-        this.followPush(e.data.open);
+        e.ports[0]?.postMessage(here);
       });
     }
     // Once read, `?open=` has done its job; a reload should not redo it.
-    if (new URLSearchParams(location.search).has('open')) {
+    // `?server=` stays: it is what the form was pointed at.
+    const q = new URLSearchParams(location.search);
+    if (q.has('open') || q.has('account')) {
       const url = new URL(location.href);
       url.searchParams.delete('open');
+      url.searchParams.delete('account');
       history.replaceState(history.state, '', url);
     }
   }
 
   mount(): void {
-    const screen = connectScreen(
+    this.connectForm = connectScreen(
       this.config,
       (d) => this.connect(d),
       () => this.identityPanel.toggle(true),
     );
+    if (this.pendingOpen?.account) {
+      this.connectForm.fill({ url: this.pendingOpen.server, login: this.pendingOpen.account });
+    }
+    const screen = this.connectForm.el;
     this.root.append(screen, this.shell, this.debug.el, this.identityPanel.el);
 
     // After the shell is in the document: the tiler finds its panes with
@@ -472,6 +503,7 @@ export class App {
     }
 
     for (const el of this.root.querySelectorAll('.connect')) el.remove();
+    this.connectForm = null;
     this.shell.hidden = false;
     this.url = d.url;
     this.media.limits = conn.video;
@@ -497,8 +529,9 @@ export class App {
       if (conn.state === 'online') void conn.ping().then(() => this.renderPill());
     }, 15000);
     void this.initPush(conn);
-    this.followPush(this.pendingOpen);
-    this.pendingOpen = {};
+    const pending = this.pendingOpen;
+    this.pendingOpen = null;
+    if (pending && this.pushReply(pending.server, pending.account) === 'match') this.followPush(pending.open);
   }
 
   // --- notifications ----------------------------------------------------
@@ -556,6 +589,14 @@ export class App {
       this.say(this.problem(e));
     }
     await this.paintNotify();
+  }
+
+  /** Whose this page is, as a notification's worker asks it: a notice
+   *  for one account is never shown in another's session, even on the
+   *  same server in the same browser. */
+  private pushReply(server: string, account: string): PushOpenReply {
+    if (!this.url) return 'idle';
+    return server === this.url && account === this.pushAccount() ? 'match' : 'other';
   }
 
   /** Show what a notification was about: the conversation with whoever

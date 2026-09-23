@@ -147,6 +147,47 @@ test('notifications turn on, draw a push, and turn off', async ({ page, context 
   expect(await page.evaluate(registered, scope)).toBe(false);
 });
 
+/** Ask the page what the service worker asks it when a notice is
+ *  tapped, and return its answer. Dispatched on the container directly:
+ *  a headless browser has no way to tap a notification. */
+function askPage(msg: { server: string; account: string; open: object; act: boolean }): Promise<string> {
+  const w = globalThis as any;
+  return new Promise((resolve) => {
+    const ch = new w.MessageChannel();
+    ch.port1.onmessage = (e: { data: string }) => resolve(e.data);
+    w.navigator.serviceWorker.dispatchEvent(
+      new w.MessageEvent('message', { data: { type: 'hx-push-open', ...msg }, ports: [ch.port2] }),
+    );
+  });
+}
+
+test('a tapped notice goes only to a page logged in as its account', async ({ page }) => {
+  await logIn(page);
+  const url = server!.wsUrl.replace('127.0.0.1', 'localhost');
+  const bobs = { server: url, account: 'bob', open: { msg: 'carol', nick: 'Carol' }, act: true };
+  expect(await page.evaluate(askPage, bobs)).toBe('other');
+  expect(await page.evaluate(askPage, { ...bobs, server: 'wss://elsewhere.example', account: 'ann' })).toBe('other');
+  await expect(page.locator('.rail-item', { hasText: 'Carol' })).toHaveCount(0);
+
+  expect(await page.evaluate(askPage, { ...bobs, account: 'ann', act: false })).toBe('match');
+  await expect(page.locator('.rail-item', { hasText: 'Carol' })).toHaveCount(0);
+  expect(await page.evaluate(askPage, { ...bobs, account: 'ann' })).toBe('match');
+  await expect(page.locator('.rail-item.on', { hasText: 'Carol' })).toBeVisible();
+});
+
+test('a notice tapped at the connect form opens once logged in', async ({ page }) => {
+  const url = server!.wsUrl.replace('127.0.0.1', 'localhost');
+  await page.goto('/');
+  await expect(page.getByLabel('Account')).toBeVisible();
+  const anns = { server: url, account: 'ann', open: { msg: 'carol', nick: 'Carol' }, act: true };
+  expect(await page.evaluate(askPage, anns)).toBe('idle');
+  await expect(page.getByLabel('Account')).toHaveValue('ann');
+  await page.getByLabel('Password').fill('pw');
+  await page.getByRole('button', { name: 'Connect', exact: true }).click();
+  await expect(page.locator('.app')).toBeVisible();
+  await expect(page.locator('.rail-item.on', { hasText: 'Carol' })).toBeVisible();
+});
+
 test('a server without push offers no switch', async ({ page }) => {
   const plain = await startServer(NG_PORT + 1, {
     sections: `

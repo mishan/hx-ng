@@ -15,7 +15,14 @@
  */
 
 import { parsePushPayload } from '../packages/hotline-ng/src/protocol.js';
-import { noticeFor, openFor, openParam, type PushOpen, type PushOpenMessage } from './push/notice';
+import {
+  noticeFor,
+  openFor,
+  openParam,
+  type PushOpen,
+  type PushOpenMessage,
+  type PushOpenReply,
+} from './push/notice';
 
 declare const self: ServiceWorkerGlobalScope;
 
@@ -51,22 +58,52 @@ self.addEventListener('notificationclick', (e) => {
   e.waitUntil(follow((e.notification.data ?? {}) as PushOpen));
 });
 
-/** Bring the app forward, on the thing the notice was about. A window
- *  that is already open is told and focused; otherwise a new one opens
- *  on this server, with `?open=` for it to act on once logged in. */
+/** Bring the app forward, on the thing the notice was about. Every open
+ *  window is asked whose it is: one logged in to this server as this
+ *  account is told and focused; failing that, one still at the connect
+ *  form is pointed at it; failing both, a new one opens on this server,
+ *  with `?open=` for it to act on once logged in. A window on another
+ *  server or account is never handed a notice that is not its own. */
 async function follow(open: PushOpen): Promise<void> {
   const windows = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
   const app = new URL('../../', self.registration.scope);
-  const ours = windows.filter((w) => new URL(w.url).pathname.startsWith(app.pathname));
-  const target = ours.find((w) => w.focused) ?? ours.find((w) => w.visibilityState === 'visible') ?? ours[0];
-  if (target) {
-    const msg: PushOpenMessage = { type: 'hx-push-open', server, account, open };
-    target.postMessage(msg);
+  const ours = windows
+    .filter((w) => new URL(w.url).pathname.startsWith(app.pathname))
+    .sort((a, b) => nearness(a) - nearness(b));
+  const msg: PushOpenMessage = { type: 'hx-push-open', server, account, open, act: false };
+  const replies = await Promise.all(ours.map((w) => ask(w, msg)));
+  const target = ours.find((_, i) => replies[i] === 'match') ?? ours.find((_, i) => replies[i] === 'idle');
+  // Asked again, since the page may have logged in or out in between.
+  const took = target ? await ask(target, { ...msg, act: true }) : null;
+  if (target && (took === 'match' || took === 'idle')) {
     await target.focus().catch(() => undefined);
     return;
   }
   app.searchParams.set('server', server);
+  app.searchParams.set('account', account);
   const o = openParam(open);
   if (o) app.searchParams.set('open', o);
   await self.clients.openWindow(app.href);
+}
+
+/** The window somebody is looking at first, then one that is on screen. */
+function nearness(w: WindowClient): number {
+  return w.focused ? 0 : w.visibilityState === 'visible' ? 1 : 2;
+}
+
+/** How long a window has to answer. One that is still loading, or is
+ *  a build of this client from before the question, may never do so. */
+const ASK_MS = 1000;
+
+function ask(w: WindowClient, msg: PushOpenMessage): Promise<PushOpenReply | null> {
+  return new Promise((resolve) => {
+    const ch = new MessageChannel();
+    const timer = setTimeout(() => resolve(null), ASK_MS);
+    ch.port1.onmessage = (e) => {
+      clearTimeout(timer);
+      ch.port1.close();
+      resolve(e.data as PushOpenReply);
+    };
+    w.postMessage(msg, [ch.port2]);
+  });
 }

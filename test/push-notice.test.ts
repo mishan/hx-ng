@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { noticeFor, openFor, openParam, parseOpenParam } from '../src/push/notice';
+import { isPushOpenMessage, noticeFor, openFor, openParam, parseOpenParam } from '../src/push/notice';
 
 describe('noticeFor', () => {
   it('says what a message says, when the server sent it', () => {
@@ -56,5 +56,23 @@ describe('opening a notice', () => {
     expect(parseOpenParam('article:nope')).toEqual({});
     expect(parseOpenParam('msg:')).toEqual({});
     expect(parseOpenParam(null)).toEqual({});
+  });
+});
+
+describe('isPushOpenMessage', () => {
+  const ok = { type: 'hx-push-open', server: 'wss://x', account: 'ann', open: { msg: 'bob' }, act: false };
+
+  it('takes what the worker sends', () => {
+    expect(isPushOpenMessage(ok)).toBe(true);
+    expect(isPushOpenMessage({ ...ok, account: '' })).toBe(true);
+  });
+
+  it('refuses one that does not say whose it is, or whether to act', () => {
+    const { account: _account, ...noAccount } = ok;
+    const { act: _act, ...noAct } = ok;
+    expect(isPushOpenMessage(noAccount)).toBe(false);
+    expect(isPushOpenMessage(noAct)).toBe(false);
+    expect(isPushOpenMessage({ ...ok, open: null })).toBe(false);
+    expect(isPushOpenMessage(null)).toBe(false);
   });
 });

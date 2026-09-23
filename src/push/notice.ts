@@ -89,15 +89,31 @@ export function parseOpenParam(s: string | null): PushOpen {
   return Number.isSafeInteger(article) && article > 0 ? { article } : {};
 }
 
-/** The message a service worker posts to a window that is already open. */
+/** What a service worker asks each open window when a notice is
+ *  tapped, with a port for the answer. Asked first with `act` off, to
+ *  find the right window without disturbing any; then with `act` on, of
+ *  the one window chosen, which shows what the notice was about. */
 export interface PushOpenMessage {
   type: 'hx-push-open';
   server: string;
   account: string;
   open: PushOpen;
+  act: boolean;
 }
+
+/** A window's answer: logged in to that server as that account, not
+ *  logged in anywhere yet, or busy with some other server or account. */
+export type PushOpenReply = 'match' | 'idle' | 'other';
 
 export function isPushOpenMessage(v: unknown): v is PushOpenMessage {
   const m = v as Partial<PushOpenMessage> | null;
-  return !!m && m.type === 'hx-push-open' && typeof m.server === 'string' && typeof m.open === 'object';
+  return (
+    !!m &&
+    m.type === 'hx-push-open' &&
+    typeof m.server === 'string' &&
+    typeof m.account === 'string' &&
+    typeof m.open === 'object' &&
+    m.open !== null &&
+    typeof m.act === 'boolean'
+  );
 }

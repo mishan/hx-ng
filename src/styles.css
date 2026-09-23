@@ -1452,6 +1452,10 @@ button.ghost.danger:hover { color: var(--admin); border-color: var(--admin); }
     min-width: 44px;
     justify-content: center;
   }
-  /* Taller than their text now, so the text is centered in them. */
-  .topbar button, .news-bar button, .roster-close { display: inline-flex; align-items: center; }
+  /* Taller than their text now, so the text is centered in them. Under
+     `:where`, which weighs nothing: a tablet is coarse and wider than a
+     phone, and a rule that outranked `.people-toggle { display: none }`
+     would draw buttons that belong to the phone layout and do nothing
+     there. */
+  :where(.topbar button, .news-bar button, .roster-close) { display: inline-flex; align-items: center; }
 }

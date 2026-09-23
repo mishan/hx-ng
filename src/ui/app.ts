@@ -187,7 +187,7 @@ export class App {
   private composer = h('textarea', {
     class: 'composer-input',
     rows: 1,
-    placeholder: 'Say something…',
+    placeholder: 'Say something to everyone…',
     spellcheck: true,
   });
   private composerHint = h('span', { class: 'composer-hint' });
@@ -210,10 +210,12 @@ export class App {
   private mailBtn = h('button', { class: 'ghost mail-button', hidden: true }, 'Mail');
   /** The title bar's less-used buttons: in the row on a wide screen, in
    *  a menu behind `moreBtn` on a narrow one. */
-  private extras = h('div', { class: 'topbar-extras', role: 'menu' });
+  private extras = h('div', { class: 'topbar-extras', id: 'topbar-extras' });
+  /** A disclosure rather than an ARIA menu: what it shows are ordinary
+   *  buttons, and on a wide screen the same buttons sit in the row. */
   private moreBtn = h(
     'button',
-    { class: 'ghost topbar-more', type: 'button', title: 'More', ariaHasPopup: 'menu', ariaExpanded: 'false' },
+    { class: 'ghost topbar-more', type: 'button', title: 'More', ariaExpanded: 'false' },
     '\u22ef',
   );
   /** How far `msg_read` has been told we have got. Selecting the same
@@ -1512,7 +1514,7 @@ export class App {
   private renderComposerHint(): void {
     const conv = this.store.conversation(this.store.active);
     const pm = conv?.kind === 'pm';
-    this.composer.placeholder = pm ? `Message ${conv.title}…` : 'Say something…';
+    this.composer.placeholder = pm ? `Message ${conv.title}…` : 'Say something to everyone…';
     // `transport` is on every roster row whether or not the server runs
     // the identity endpoints, and this is what it is for: a private
     // message to a session on a plain TCP legacy socket crosses the
@@ -1671,11 +1673,18 @@ export class App {
     this.extras.addEventListener('click', (e) => {
       if ((e.target as Element).closest('button')) this.showExtras(false);
     });
-    document.addEventListener('click', (e) => {
-      if (!this.extras.contains(e.target as Node)) this.showExtras(false);
+    this.moreBtn.setAttribute('aria-controls', this.extras.id);
+    // `pointerdown`, not `click`: iOS sends no click for a tap on
+    // something that is not listening for one, so a tap on the empty
+    // bar would leave the menu open. ⋯ is left to its own click.
+    document.addEventListener('pointerdown', (e) => {
+      const t = e.target as Node;
+      if (!this.extras.contains(t) && !this.moreBtn.contains(t)) this.showExtras(false);
     });
     document.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape') this.showExtras(false);
+      if (e.key !== 'Escape' || !this.extras.classList.contains('open')) return;
+      this.showExtras(false);
+      this.moreBtn.focus();
     });
 
     this.pill.onclick = () => this.debug.toggle(true);
@@ -1781,8 +1790,9 @@ export class App {
         this.pill,
         this.mailBtn,
         this.peopleBtn,
-        this.extras,
+        // ⋯ first, so Tab goes from it into what it opened.
         this.moreBtn,
+        this.extras,
       ),
       h(
         'div',

@@ -131,7 +131,7 @@ function lineEl(
  *  for a moderator, redact it. Buttons carry only a verb; the shell
  *  finds the line with `lineOf` and does the rest. */
 function actions(line: Line, conv: Conversation, store: Store, opts: TranscriptOptions): HTMLElement | null {
-  const report = lineReport(line, conv, store.self?.uid) !== null;
+  const report = lineReport(line, conv, store.self, (uid) => store.user(uid) !== undefined) !== null;
   const redact =
     !!opts.moderator &&
     conv.kind === 'lobby' &&

@@ -59,27 +59,37 @@ describe('what reporting a line names', () => {
   const lobby = s.conversation(LOBBY)!;
   const pm = s.openPm({ uid: 5, login: 'bob', nick: 'Bob' });
   const line = (over: Partial<Line>): Line => ({ t: 1, kind: 'chat', text: 'words', from: { uid: 5, nick: 'Bob' }, ...over });
+  const me = { uid: 1, nick: 'Me' };
 
   it('names a public line by its id, and a stored message by its inbox id', () => {
-    expect(lineReport(line({ id: 42 }), lobby, 1)).toEqual({ line: 42 });
-    expect(lineReport(line({ id: 9 }), pm, 1)).toEqual({ msg: 9 });
+    expect(lineReport(line({ id: 42 }), lobby, me)).toEqual({ line: 42 });
+    expect(lineReport(line({ id: 9 }), pm, me)).toEqual({ msg: 9 });
   });
 
   it('falls back to the sender, with the words as evidence, when nothing was stored', () => {
-    expect(lineReport(line({ from: { uid: 5, nick: 'Bob', login: 'bob' } }), pm, 1)).toEqual({
+    expect(lineReport(line({ from: { uid: 5, nick: 'Bob', login: 'bob' } }), pm, me)).toEqual({
       user: { login: 'bob' },
       evidence: 'words',
     });
-    expect(lineReport(line({}), lobby, 1)).toEqual({ user: { uid: 5 }, evidence: 'words' });
+    expect(lineReport(line({}), lobby, me)).toEqual({ user: { uid: 5 }, evidence: 'words' });
   });
 
   it('names nothing for one’s own line, a notice, a local line or a blank one', () => {
-    expect(lineReport(line({ id: 1, from: { uid: 1, nick: 'Me' } }), lobby, 1)).toBeNull();
-    expect(lineReport(line({ kind: 'notice' }), lobby, 1)).toBeNull();
-    expect(lineReport(line({ local: true }), pm, 1)).toBeNull();
-    expect(lineReport(line({ id: 3, deleted: true, kind: 'deleted' }), lobby, 1)).toBeNull();
+    expect(lineReport(line({ id: 1, from: { uid: 1, nick: 'Me' } }), lobby, me)).toBeNull();
+    expect(lineReport(line({ kind: 'notice' }), lobby, me)).toBeNull();
+    expect(lineReport(line({ local: true }), pm, me)).toBeNull();
+    expect(lineReport(line({ id: 3, deleted: true, kind: 'deleted' }), lobby, me)).toBeNull();
     // Mail that waited has uid 0 and, from a guest, no login: nobody to name.
-    expect(lineReport(line({ from: { uid: 0, nick: 'Guest' } }), pm, 1)).toBeNull();
+    expect(lineReport(line({ from: { uid: 0, nick: 'Guest' } }), pm, me)).toBeNull();
+  });
+
+  it('knows one’s own history lines by the name on them', () => {
+    expect(lineReport(line({ id: 7, from: { nick: 'Me', icon: 1 } }), lobby, me)).toBeNull();
+    expect(lineReport(line({ id: 8, from: { nick: 'Bob', icon: 1 } }), lobby, me)).toEqual({ line: 8 });
+  });
+
+  it('does not name a uid that has left the roster', () => {
+    expect(lineReport(line({}), lobby, me, () => false)).toBeNull();
   });
 });
 
@@ -111,6 +121,24 @@ describe('the report queue', () => {
     q.closed(5);
     expect(q.count).toBe(2);
     expect(q.has(5)).toBe(false);
+  });
+
+  it('does not count a close twice once a listing has reached the end', () => {
+    const q = new ReportQueue();
+    q.page([report(3)], true, false);
+    // Closed while the listing was out: the listing already left it out.
+    q.closed(2);
+    expect(q.count).toBe(1);
+    q.closed(3);
+    expect(q.count).toBe(0);
+  });
+
+  it('counts a close it cannot see while the listing is partial', () => {
+    const q = new ReportQueue();
+    q.reset(9);
+    q.page([report(3)], true, true);
+    q.closed(1);
+    expect(q.count).toBe(8);
   });
 
   it('never counts below nothing', () => {

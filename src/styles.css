@@ -499,14 +499,21 @@ button.call:disabled { opacity: 0.45; cursor: default; }
   position: absolute;
   top: 0;
   right: 0.25rem;
-  display: none;
+  display: flex;
   gap: 0.25rem;
   padding: 0.1rem;
   border-radius: 6px;
   background: var(--surface);
   box-shadow: var(--shadow);
+  /* Invisible rather than not displayed, which would take the buttons
+     out of the tab order too and leave a keyboard no way to report. */
+  opacity: 0;
+  pointer-events: none;
 }
-.line:hover > .line-actions, .line.picked > .line-actions, .line-actions:focus-within { display: flex; }
+.line:hover > .line-actions, .line.picked > .line-actions, .line-actions:focus-within {
+  opacity: 1;
+  pointer-events: auto;
+}
 .line:not(.cont) { margin-top: 0.35rem; }
 
 .line .time {

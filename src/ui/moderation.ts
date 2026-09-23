@@ -54,6 +54,11 @@ export class ModerationView {
   private generation = 0;
   /** Blob URLs of images a moderator asked to see, released on reset. */
   private urls: string[] = [];
+  /** Bumped by every `report` and `report_closed`. A listing of open
+   *  reports replaces what is held, so one that was asked for before an
+   *  event and answered after it would undo the event — a close put
+   *  back, a filing lost. Such a listing is asked for again instead. */
+  private events = 0;
 
   constructor(private hooks: ModerationHooks) {}
 
@@ -75,6 +80,9 @@ export class ModerationView {
     this.queue.reset(open);
     this.closed = [];
     this.log = [];
+    this.openMore = false;
+    this.closedMore = false;
+    this.logMore = false;
     this.error = null;
     this.notice = null;
     this.tab = 'open';
@@ -87,14 +95,16 @@ export class ModerationView {
    *  them; the first page of open reports restates both. */
   async recount(): Promise<void> {
     const conn = this.hooks.conn();
-    if (!conn?.moderator) return;
+    if (!conn?.moderator || !conn.moderation) return;
     const gen = this.generation;
+    const seen = this.events;
     try {
       const page = await conn.reports({ status: 'open', limit: PAGE });
       if (gen !== this.generation) return;
+      if (seen !== this.events) return void this.recount();
       this.queue.page(page.reports, true, page.has_more);
       this.openMore = page.has_more;
-      this.hooks.onCount();
+      this.counted();
       if (this.onScreen) this.render();
     } catch {
       /* the badge keeps the count it had; the view says why when opened */
@@ -102,14 +112,16 @@ export class ModerationView {
   }
 
   onReport(r: Report): void {
+    this.events++;
     if (!this.queue.filed(r)) return;
-    this.hooks.onCount();
+    this.counted();
     if (this.onScreen && this.tab === 'open') this.render();
   }
 
   onClosed(id: number): void {
+    this.events++;
     this.queue.closed(id);
-    this.hooks.onCount();
+    this.counted();
     // What was open may be on the closed tab now; that tab refetches
     // when it is next picked.
     if (this.onScreen) this.render();
@@ -119,15 +131,17 @@ export class ModerationView {
     const conn = this.hooks.conn();
     if (!conn) return;
     const gen = this.generation;
+    const seen = this.events;
     const tab = this.tab;
     try {
       if (tab === 'open') {
         const before = first ? undefined : this.queue.list().at(-1)?.id;
         const page = await conn.reports({ status: 'open', limit: PAGE, ...(before !== undefined ? { before } : {}) });
         if (gen !== this.generation) return;
+        if (first && seen !== this.events) return void this.load(true);
         this.queue.page(page.reports, first, page.has_more);
         this.openMore = page.has_more;
-        this.hooks.onCount();
+        this.counted();
       } else if (tab === 'closed') {
         const before = first ? undefined : this.closed.at(-1)?.id;
         const page = await conn.reports({ status: 'closed', limit: PAGE, ...(before !== undefined ? { before } : {}) });
@@ -147,6 +161,14 @@ export class ModerationView {
       this.error = problem(e);
     }
     if (tab === this.tab) this.render();
+  }
+
+  /** The count moved. The rail is told, and so is the session's own
+   *  record of it, which is what a reload starts the badge from. */
+  private counted(): void {
+    const conn = this.hooks.conn();
+    if (conn?.moderation) conn.moderation.open = this.queue.count;
+    this.hooks.onCount();
   }
 
   private pick(tab: Tab): void {

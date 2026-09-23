@@ -78,17 +78,29 @@ export function personRef(arg: string, onRoster: User | undefined): PersonRef {
  * target left is the sender, with the words pasted as evidence, which
  * the server files as unverified: the reporter's word for it.
  */
-export function lineReport(line: Line, conv: Conversation, selfUid: number | undefined): Omit<ReportParams, 'reason'> | null {
+export function lineReport(
+  line: Line,
+  conv: Conversation,
+  me: { uid: number; nick: string } | null | undefined,
+  here: (uid: number) => boolean = () => true,
+): Omit<ReportParams, 'reason'> | null {
   if (line.local || line.deleted) return null;
   if (line.kind !== 'chat' && line.kind !== 'action') return null;
   const from = line.from;
-  if (from?.uid !== undefined && from.uid > 0 && from.uid === selfUid) return null;
+  if (from?.uid !== undefined && from.uid > 0 && from.uid === me?.uid) return null;
+  // A line out of history names its sender by nick alone — no uid, no
+  // login — so one's own lines from before a reload are known only by
+  // the name on them. Someone else of the same name loses the button on
+  // those lines and keeps `/report`; the other way round, every line of
+  // one's own would offer to report oneself.
+  if (from?.uid === undefined && !from?.login && me && from?.nick === me.nick) return null;
   if (line.id !== undefined) return conv.kind === 'lobby' ? { line: line.id } : { msg: line.id };
   // A uid is someone on the roster now, which is who a live line with no
-  // id came from; a login outlives them.
+  // id came from, and only while they are: after that it names nobody,
+  // or somebody else. A login outlives them.
   const who: PersonRef | null = from?.login
     ? { login: from.login }
-    : from?.uid !== undefined && from.uid > 0
+    : from?.uid !== undefined && from.uid > 0 && here(from.uid)
       ? { uid: from.uid }
       : null;
   return who ? { user: who, evidence: line.text } : null;
@@ -165,10 +177,14 @@ export class ReportQueue {
   count = 0;
   /** Open reports held, by id. */
   private held = new Map<number, Report>();
+  /** The last listing reached the end, so what is held is every open
+   *  report there is, and a close of one not held is one already gone. */
+  private complete = false;
 
   reset(count = 0): void {
     this.count = count;
     this.held.clear();
+    this.complete = false;
   }
 
   /** A `report` event. False when it was already held — a replay — and
@@ -182,7 +198,7 @@ export class ReportQueue {
 
   /** A `report_closed` event. */
   closed(id: number): void {
-    this.held.delete(id);
+    if (!this.held.delete(id) && this.complete) return;
     this.count = Math.max(0, this.count - 1);
   }
 
@@ -192,6 +208,10 @@ export class ReportQueue {
   page(reports: Report[], first: boolean, hasMore: boolean): void {
     if (first) this.held.clear();
     for (const r of reports) if (r.status === 'open') this.held.set(r.id, r);
+    this.complete = !hasMore;
+    // Short of the end, the count is only known to be at least what is
+    // held — a count saved before a reload may be higher than the truth,
+    // but nothing here can say by how much.
     if (!hasMore) this.count = this.held.size;
     else this.count = Math.max(this.count, this.held.size);
   }

@@ -79,6 +79,14 @@ db = "server.sqlite"
     // Nobody is offered a report of their own line.
     await expect(bob.locator('.transcript .line.chat', { hasText: 'something unkind' }).locator('button[data-act]')).toHaveCount(0);
 
+    // A keyboard reaches the buttons too: out of sight until then, and
+    // not out of the tab order.
+    const report = line.getByRole('button', { name: 'Report' });
+    await expect(line.locator('.line-actions')).toHaveCSS('opacity', '0');
+    await report.focus();
+    await expect(line.locator('.line-actions')).toHaveCSS('opacity', '1');
+    await report.blur();
+
     // --- alice reports it ------------------------------------------------
     await line.hover();
     await line.getByRole('button', { name: 'Report' }).click();

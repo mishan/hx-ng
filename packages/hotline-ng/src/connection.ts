@@ -286,9 +286,11 @@ export class Connection {
   /** May this session moderate? From the login reply's `self`, and
    *  kept here because the resume reply's `self` does not say. */
   moderator = false;
-  /** Open reports as the login reply counted them, for a moderator;
-   *  `null` otherwise. A starting point: `report` and `report_closed`
-   *  move it from there, and nothing here does. */
+  /** Open reports as the login reply counted them, for a moderator on
+   *  a server that keeps reports; `null` otherwise. A starting point:
+   *  `report` and `report_closed` move it from there, and nothing here
+   *  does — a caller that keeps it current has it saved with the session
+   *  on the next event, so a reload starts from the count it left. */
   moderation: ModerationCounts | null = null;
   /** Round-trip time of the last explicit `ping`, in milliseconds. */
   rtt: number | null = null;

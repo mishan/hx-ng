@@ -556,8 +556,11 @@ export class App {
     // after a reload, when the count is the one saved with the session
     // and the events since have been replayed on top of it.
     this.moderation.reset(conn.moderation?.open ?? 0);
-    this.panes?.available('reports', conn.moderator);
-    if (conn.moderator) void this.moderation.recount();
+    // A moderator on a server that keeps no reports can still redact,
+    // but has no queue to open.
+    const reports = conn.moderator && conn.moderation !== null;
+    this.panes?.available('reports', reports);
+    if (reports) void this.moderation.recount();
     this.renderAll();
     this.composer.focus();
     // Conversations live in memory and die with the page; the mailbox
@@ -1040,48 +1043,17 @@ export class App {
         );
       }
 
-      // Moderation. Each is the menu's act without the menu; anything left
-      // out of the line is asked for, as the menu would.
-      case 'report': {
-        const [who, ...why] = rest;
-        if (!who) return this.say('Usage: /report <nick, account or fingerprint> [reason]');
-        const target = this.findUser(who);
-        const ref = personRef(who, target);
-        const reason = why.join(' ').trim();
-        if (!reason) return this.reportPerson(target?.nick ?? who, ref);
-        return this.fileReport({ user: ref, reason });
-      }
+      // Moderation, answered here rather than by `send`'s catch: these say
+      // `no_such_user` for nobody by that name, and the message wording
+      // that catch would use gets that wrong.
+      case 'report':
       case 'kick':
-      case 'ban': {
-        const [who, ...more] = rest;
-        const usage = word === 'ban' ? 'Usage: /ban <nick> <10m, 2h, 3d, 1w…> [reason]' : 'Usage: /kick <nick> [reason]';
-        if (!who) return this.say(usage);
-        const target = this.findUser(who);
-        if (!target) return this.say(`Nobody here is called ${who}.`);
-        let ban: number | undefined;
-        if (word === 'ban') {
-          ban = parseDuration(more.shift() ?? '') ?? undefined;
-          if (ban === undefined) return this.say(usage);
-        }
-        const reason = more.join(' ').trim();
-        // A kick's reason is optional, so there is nothing to ask for:
-        // what was typed is what is done. The menu is where a purge goes
-        // with it.
-        await conn.kick({ uid: target.uid, ...(ban ? { ban } : {}), ...(reason ? { reason } : {}) });
-        return;
-      }
-      case 'purge': {
-        const [who, ...more] = rest;
-        const usage = 'Usage: /purge <nick, account or fingerprint> [10m, 2h, 3d…] [reason]';
-        if (!who) return this.say(usage);
-        const target = this.findUser(who);
-        const since = more.length ? parseDuration(more[0]!) : null;
-        if (since !== null) more.shift();
-        const reason = more.join(' ').trim();
-        return this.purge(target?.nick ?? who, personRef(who, target), { since: since ?? 3600, reason });
-      }
+      case 'ban':
+      case 'purge':
+        return this.moderationCommand(word!.toLowerCase(), rest).catch((e: unknown) => this.say(moderationProblem(e)));
       case 'reports':
         if (!conn.moderator) return this.say('Only a moderator reads the reports.');
+        if (!conn.moderation) return this.say('This server keeps no reports.');
         return this.showReports(true);
 
       case 'nick':
@@ -1126,6 +1098,54 @@ export class App {
         );
       default:
         return this.say(`Unknown command: /${word}`);
+    }
+  }
+
+  /** `/report`, `/kick`, `/ban` and `/purge`: the menu's acts without
+   *  the menu, and anything left out of the line asked for as the menu
+   *  would. */
+  private async moderationCommand(word: string, rest: string[]): Promise<void> {
+    const conn = this.conn;
+    if (!conn) return;
+    switch (word) {
+      case 'report': {
+        const [who, ...why] = rest;
+        if (!who) return this.say('Usage: /report <nick, account or fingerprint> [reason]');
+        const target = this.findUser(who);
+        const ref = personRef(who, target);
+        const reason = why.join(' ').trim();
+        if (!reason) return this.reportPerson(target?.nick ?? who, ref);
+        return this.fileReport({ user: ref, reason });
+      }
+      case 'kick':
+      case 'ban': {
+        const [who, ...more] = rest;
+        const usage = word === 'ban' ? 'Usage: /ban <nick> <10m, 2h, 3d, 1w…> [reason]' : 'Usage: /kick <nick> [reason]';
+        if (!who) return this.say(usage);
+        const target = this.findUser(who);
+        if (!target) return this.say(`Nobody here is called ${who}.`);
+        let ban: number | undefined;
+        if (word === 'ban') {
+          ban = parseDuration(more.shift() ?? '') ?? undefined;
+          if (ban === undefined) return this.say(usage);
+        }
+        const reason = more.join(' ').trim();
+        // A kick's reason is optional, so there is nothing to ask for:
+        // what was typed is what is done. The menu is where a purge goes
+        // with it.
+        await conn.kick({ uid: target.uid, ...(ban ? { ban } : {}), ...(reason ? { reason } : {}) });
+        return;
+      }
+      case 'purge': {
+        const [who, ...more] = rest;
+        const usage = 'Usage: /purge <nick, account or fingerprint> [10m, 2h, 3d…] [reason]';
+        if (!who) return this.say(usage);
+        const target = this.findUser(who);
+        const since = more.length ? parseDuration(more[0]!) : null;
+        if (since !== null) more.shift();
+        const reason = more.join(' ').trim();
+        return this.purge(target?.nick ?? who, personRef(who, target), { since: since ?? 3600, reason });
+      }
     }
   }
 
@@ -1271,7 +1291,7 @@ export class App {
 
   /** Report a line from where it is drawn. */
   private async reportLine(line: Line, conv: Conversation): Promise<void> {
-    const target = lineReport(line, conv, this.store.self?.uid);
+    const target = lineReport(line, conv, this.store.self, (uid) => this.store.user(uid) !== undefined);
     if (!target) return;
     const who = line.from?.nick || 'someone';
     const pasted = 'user' in target && target.user !== undefined;
@@ -1756,7 +1776,7 @@ export class App {
       files.onclick = () => this.showFiles(true);
     }
     let reports: HTMLElement | null = null;
-    if (conn?.moderator && conn.state !== 'offline') {
+    if (conn?.moderator && conn.moderation && conn.state !== 'offline') {
       const open = this.moderation.queue.count;
       reports = h(
         'button',

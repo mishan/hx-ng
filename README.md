@@ -77,7 +77,7 @@ Precedence, most specific first:
 Every push to main is built and published by GitHub Pages at
 **https://hx.foggyden.org/** (`.github/workflows/pages.yml`), with
 `deploy/pages/config.json` in place of the generic `config.json`: it
-connects to `wss://hl.foggyden.org/ws` by default and still lets you
+connects to `wss://hxd.foggyden.org` by default and still lets you
 type any other server. That works because hxd-ng answers the page's
 cross-origin fetches with CORS, and a WebSocket is not subject to it.
 

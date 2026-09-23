@@ -79,6 +79,10 @@ test('the shell tiles, and the three views become tabs', async ({ page }) => {
   await expect(page.locator('#panetab-news')).toHaveAttribute('aria-selected', 'true');
   await expect(page.locator('#pane-news')).toBeVisible();
   await expect(page.locator('#pane-chat')).toBeHidden();
+  // The reader itself, not only the pane around it: the view's own
+  // `hidden` is set on every connect, and a pane can be on screen and
+  // empty.
+  await expect(page.locator('#news')).toBeVisible();
 
   await page.screenshot({ path: 'test-results/tiler-news.png' });
 
@@ -86,6 +90,12 @@ test('the shell tiles, and the three views become tabs', async ({ page }) => {
   // never had: back to chat without going through the rail.
   await page.click('#panetab-chat');
   await expect(page.locator('#pane-chat')).toBeVisible();
+  await expect(page.locator('#chat')).toBeVisible();
+
+  // Files, the same way.
+  await page.click('#panetab-files');
+  await expect(page.locator('#files')).toBeVisible();
+  await page.click('#panetab-chat');
 
   // A pane closed to the drawer and brought back.
   await page.click('#paneshut-roster');

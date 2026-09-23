@@ -59,7 +59,18 @@ body.tiled .panebody > .rail,
 body.tiled .panebody > .roster,
 body.tiled .panebody > .chat-pane,
 body.tiled .panebody > .news,
-body.tiled .panebody > .files {
+body.tiled .panebody > .files-view {
   flex: 1 1 auto;
   min-height: 0;
+}
+
+/* Tiled, the layout says which of these is on screen, by hiding the pane
+   around it, and the view's own `hidden` is the untiled shell's switch.
+   It is still set -- by a reset on every connect, and by whatever the
+   shell last showed before the window grew -- and the global rule would
+   draw an empty pane from it, so here it means nothing. */
+body.tiled .panebody > .chat-pane[hidden],
+body.tiled .panebody > .news[hidden],
+body.tiled .panebody > .files-view[hidden] {
+  display: flex !important;
 }

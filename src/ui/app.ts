@@ -57,6 +57,7 @@ import { FilesView } from './files';
 import { icon } from './icons';
 import { pickIcon } from './iconpicker';
 import { IdentityPanel } from './identity';
+import { installButton } from './install';
 import { takeScanFragment, type Scanned } from '../identity/scan';
 import { renderRoster } from './roster';
 import { Tiles } from './tiles';
@@ -1754,6 +1755,7 @@ export class App {
         this.mailBtn,
         this.peopleBtn,
         this.notifyBtn,
+        installButton(),
         themeBtn,
         mdBtn,
         identityBtn,

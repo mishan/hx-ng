@@ -19,6 +19,7 @@ import { planIdentityLogin } from '../identity/login';
 import { h, type Props } from './dom';
 import { icon, DEFAULT_ICON } from './icons';
 import { pickIcon } from './iconpicker';
+import { installButton } from './install';
 
 export interface Details {
   url: string;
@@ -203,7 +204,7 @@ export function connectScreen(
     error,
     h('div', { class: 'button-row' }, submit, identityBtn),
     identityChooser,
-    h('p', {}, identityKeysLink),
+    h('p', { class: 'button-row' }, identityKeysLink, installButton()),
   );
 
   // Always shown rather than hidden pending an async `getActiveDevice()`

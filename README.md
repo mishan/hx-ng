@@ -120,6 +120,14 @@ Chromium on the desktop and Android offers **Install**; Safari on iOS
 has **Add to Home Screen**. Either way it opens in a window of its own,
 with no address bar.
 
+Where Chromium is ready to install it, the client says so itself: an
+**Install** button on the connect form and in the title bar, which
+brings up the browser's own install dialog and goes away once the app
+is installed. Chromium announces that with `beforeinstallprompt`, early
+in the load, so `src/install.ts` listens from the first line of
+`main.ts`. Safari and Firefox have no such event, and there the
+browser's menu is the only way in.
+
 On iOS this is not cosmetic. Safari exposes web push only to a page
 opened from the Home Screen, so there, installing is what makes the
 **Notify** button appear at all. The same secure-context rule applies.

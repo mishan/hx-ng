@@ -197,6 +197,12 @@ input:focus-visible, textarea:focus-visible, button:focus-visible {
 }
 .topbar > * { flex: none; }
 
+/* The less-used buttons: part of the row where there is room for them,
+   a menu behind ⋯ where there is not (below). */
+.topbar-extras { display: contents; }
+.topbar-extras > * { flex: none; }
+.topbar-more { display: none; }
+
 .server { display: flex; align-items: baseline; gap: 0.6rem; min-width: 0; overflow: hidden; flex: 0 1 auto; }
 .server-name {
   font-weight: 620;
@@ -474,6 +480,9 @@ button.call:disabled { opacity: 0.45; cursor: default; }
    child does that without the overflow trap `justify-content: flex-end`
    sets for content taller than the box. */
 .transcript > :first-child { margin-top: auto; }
+/* And said again for a line, whose own `margin-top` would otherwise
+   outrank it and leave a quiet room hanging from the top. */
+.transcript > .line:first-child { margin-top: auto; }
 
 .line {
   display: grid;
@@ -1245,7 +1254,10 @@ button.ghost.danger:hover { color: var(--admin); border-color: var(--admin); }
 @media (max-width: 44rem) {
   .news-article { margin-left: calc(var(--depth, 0) * 0.5rem); padding: 0.5rem 0.6rem; }
   .crumb { max-width: 8rem; }
-  .news-search { width: 7rem; }
+  /* The search takes whatever the buttons leave, rather than a width
+     too narrow to show its own placeholder. */
+  .news-search { flex: 1 1 6rem; width: auto; }
+  .news-bar .spacer { display: none; }
   .news-bar, .news-body {
     padding-left: max(0.75rem, env(safe-area-inset-left));
     padding-right: max(0.75rem, env(safe-area-inset-right));
@@ -1337,7 +1349,36 @@ button.ghost.danger:hover { color: var(--admin); border-color: var(--admin); }
   .line.cont .gutter, .line.cont .name { display: none; }
   .line.broadcast .name { display: inline; margin-right: 0.4rem; }
 
-  .topbar { gap: 0.35rem; }
+  .topbar { gap: 0.35rem; position: relative; overflow: visible; }
+  /* The server name is the one thing in the bar allowed to shrink, so
+     the spacer beside it must not take its room. */
+  .topbar > .spacer { flex: 0 0 0; margin-left: auto; }
+  .topbar-more { display: inline-flex; justify-content: center; }
+  .topbar-extras {
+    display: none;
+    position: absolute;
+    top: calc(100% + 0.25rem);
+    right: max(0.75rem, env(safe-area-inset-right));
+    z-index: 40;
+    min-width: 12rem;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0.35rem;
+    padding: 0.5rem;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    box-shadow: var(--shadow);
+  }
+  .topbar-extras.open { display: flex; }
+  .topbar .topbar-extras button.ghost { text-align: left; font-size: 0.9rem; }
+
+  /* Where the placeholder already says whose conversation this is, the
+     hint beside the box is a quarter of a phone's width saying it
+     again. The warning is not: it takes a row of its own above. */
+  .composer { flex-wrap: wrap; }
+  .composer-hint:not(.warn) { display: none; }
+  .composer-hint.warn { order: -1; flex-basis: 100%; padding-bottom: 0; }
   .identity .nick { display: none; }
   /* The coloured dot is the whole message at this width; the round-trip
      time behind it is one tap away in the debug drawer. */
@@ -1397,4 +1438,24 @@ button.ghost.danger:hover { color: var(--admin); border-color: var(--admin); }
 @media (max-height: 30rem) {
   .tiles { max-height: calc(var(--app-height, 100dvh) * 0.55); }
   .debug { height: 60dvh; }
+}
+
+/* A finger, not a pointer: nothing in the chrome smaller than one.
+   44px is Apple's number and near enough Android's 48dp, and it is only
+   the chrome — a line of chat is not a button. */
+@media (pointer: coarse) {
+  .topbar button, .rail-item, .roster-close, .crumb,
+  .news-bar button, .news-search, .files-bar button, .identity-bar button, .composer-input {
+    min-height: 44px;
+  }
+  .pill, .roster-close, .topbar-more, .news-bar button.ghost {
+    min-width: 44px;
+    justify-content: center;
+  }
+  /* Taller than their text now, so the text is centered in them. Under
+     `:where`, which weighs nothing: a tablet is coarse and wider than a
+     phone, and a rule that outranked `.people-toggle { display: none }`
+     would draw buttons that belong to the phone layout and do nothing
+     there. */
+  :where(.topbar button, .news-bar button, .roster-close) { display: inline-flex; align-items: center; }
 }

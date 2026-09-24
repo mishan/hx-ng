@@ -140,12 +140,27 @@ test('notifications turn on, draw a push, and turn off', async ({ page, context 
   });
   await expect.poll(() => page.evaluate(shownIn, scope)).toEqual([{ title: 'Bob', body: 'Sent you a private message (2 unread).', tag: 'msg:bob' }]);
 
+  // Counted for the icon's badge, where every worker and page can see
+  // it; and seen, once the page redraws what is unread with the app on
+  // screen.
+  await expect.poll(() => page.evaluate(awayCount)).toBe(1);
+  await page.locator('.rail-item').first().click();
+  await expect.poll(() => page.evaluate(awayCount)).toBe(0);
+
   // And off: the server is told, and the worker goes with the subscription.
   await notify.click();
   await expect(page.locator('.transcript')).toContainText('Notifications are off');
   await expect(notify).toHaveAttribute('aria-pressed', 'false');
   expect(await page.evaluate(registered, scope)).toBe(false);
 });
+
+/** What the service workers have counted for the badge, as the page
+ *  reads it. Runs in the page, hence the `any`. */
+async function awayCount(): Promise<number> {
+  const w = globalThis as any;
+  const hit = await (await w.caches.open('hx-badge')).match('/hx-badge/away');
+  return hit ? Number(await hit.text()) : 0;
+}
 
 /** Ask the page what the service worker asks it when a notice is
  *  tapped, and return its answer. Dispatched on the container directly:

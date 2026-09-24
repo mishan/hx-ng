@@ -72,6 +72,7 @@ import { NewsView } from './news';
 import { appendLine, isAtBottom, keepingPlace, lineOf, renderTranscript, scrollToEnd } from './transcript';
 import { wrapSelection } from './markdown';
 import { contentWords, disablePush, enablePush, pushEnabled, pushSupported, refreshPush } from '../push/client';
+import { awayCount, clearAway, showBadge } from '../push/badge';
 import { isPushOpenMessage, parseOpenParam, type PushOpen, type PushOpenReply } from '../push/notice';
 import { createPanes, type PaneNode, type Panes } from 'mullion';
 
@@ -335,6 +336,13 @@ export class App {
         this.menuBtn.focus();
       }
     });
+
+    // Coming back to the app is seeing what the badge counted, whether
+    // or not there is a session to have counted it in.
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') this.renderUnreadTitle();
+    });
+    void this.paintBadge(0);
 
     // A notification tapped while this page is open: its worker asks
     // whose this page is, and if it picks this one, says to act.
@@ -1883,6 +1891,20 @@ export class App {
     const total = [...this.store.conversations.values()].reduce((n, c) => n + c.unread, 0);
     const name = this.store.server.name || this.config.title;
     document.title = total ? `(${total}) ${name}` : name;
+    void this.paintBadge(total);
+  }
+
+  /** The icon's badge says what the title says. Out of sight, what the
+   *  service worker counted meanwhile may be more, and the larger of the
+   *  two is the one that is not wrong; on screen, the worker's count has
+   *  been seen and goes. */
+  private async paintBadge(total: number): Promise<void> {
+    if (document.visibilityState === 'visible') {
+      await clearAway();
+      await showBadge(total);
+    } else {
+      await showBadge(Math.max(total, await awayCount()));
+    }
   }
 
   /** The voice and video controls, rebuilt from scratch on every change:

@@ -6,8 +6,10 @@
  * a subscription is bound to one server's key), each with its own scope
  * under `push/`, and the server and account ride in this script's own
  * URL so each copy knows whose it is. No page is ever inside those
- * scopes: this worker caches nothing and intercepts no fetch. All it
- * does is draw what arrives and open the app when it is tapped.
+ * scopes: this worker intercepts no fetch, and the one thing it keeps
+ * is a count for the app's badge (`push/badge.ts`). All it does is draw
+ * what arrives, count it on the icon, and open the app when it is
+ * tapped.
  *
  * Bundled on its own, so it imports the protocol module directly rather
  * than the package index — that would drag `Connection` and
@@ -15,6 +17,7 @@
  */
 
 import { parsePushPayload } from '../packages/hotline-ng/src/protocol.js';
+import { countAway, showBadge } from './push/badge';
 import {
   noticeFor,
   openFor,
@@ -45,11 +48,14 @@ self.addEventListener('push', (e) => {
   const payload = parsePushPayload(raw);
   const notice = noticeFor(payload);
   e.waitUntil(
-    self.registration.showNotification(notice.title, {
-      body: notice.body,
-      tag: notice.tag,
-      data: openFor(payload),
-    }),
+    Promise.all([
+      self.registration.showNotification(notice.title, {
+        body: notice.body,
+        tag: notice.tag,
+        data: openFor(payload),
+      }),
+      countAway().then((n) => showBadge(n)),
+    ]),
   );
 });
 

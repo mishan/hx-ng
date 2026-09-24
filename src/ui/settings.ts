@@ -49,12 +49,14 @@ export function openSettings(s: Settings): void {
   };
 
   const debug = h('button', { class: 'ghost', type: 'button' }, 'Open the debug drawer');
+  // `close()` rather than removing the dialog outright, so the browser
+  // gives the focus back to whatever opened it.
   debug.onclick = () => {
-    done();
+    dialog.close();
     s.openDebug();
   };
   const ok = h('button', { class: 'primary', type: 'button' }, 'Done');
-  ok.onclick = () => done();
+  ok.onclick = () => dialog.close();
 
   const dialog = h(
     'dialog',

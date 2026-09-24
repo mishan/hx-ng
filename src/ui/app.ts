@@ -230,7 +230,14 @@ export class App {
    *  same list of buttons a wide screen has in a column. */
   private menuBtn = h(
     'button',
-    { class: 'ghost menu-toggle', type: 'button', title: 'Conversations and more', ariaExpanded: 'false' },
+    {
+      class: 'ghost menu-toggle',
+      type: 'button',
+      title: 'Conversations and more',
+      // Its text is a glyph, and a glyph is what a screen reader would say.
+      ariaLabel: 'Conversations and more',
+      ariaExpanded: 'false',
+    },
     '\u2630',
   );
   /** The bottom of the drawer, which holds the title bar's buttons while
@@ -1803,15 +1810,15 @@ export class App {
       reports.onclick = () => this.showReports(true);
     }
     const [lobby, ...rest] = items;
-    fill(
-      this.rail,
-      h('div', { class: 'rail-head' }, 'Conversations'),
-      lobby,
-      news,
-      files,
-      reports,
-      ...rest,
-      this.drawerFoot,
+    // Everything above the drawer's foot is redrawn and the foot is left
+    // where it is: taken out and put back, it would drop the focus from
+    // whichever of its buttons had it, every time anything arrived.
+    if (this.drawerFoot.parentNode !== this.rail) this.rail.append(this.drawerFoot);
+    while (this.rail.firstChild !== this.drawerFoot) this.rail.firstChild!.remove();
+    this.drawerFoot.before(
+      ...[h('div', { class: 'rail-head' }, 'Conversations'), lobby, news, files, reports, ...rest].filter(
+        (el): el is HTMLElement => !!el,
+      ),
     );
     this.paintMenuUnread();
   }
@@ -1819,11 +1826,15 @@ export class App {
   /** A dot on ☰ for anything unread behind it, which on a phone is
    *  everything the rail and the mailbox count. */
   private paintMenuUnread(): void {
+    // News and Reports count only while the rail has them to show, on
+    // the same terms `renderRail` draws them.
+    const conn = this.conn;
+    const live = !!conn && conn.state !== 'offline';
     const any =
       [...this.store.conversations.values()].some((c) => c.unread > 0) ||
       (this.store.mail?.unread ?? 0) > 0 ||
-      (this.conn?.news ? this.news.unread > 0 : false) ||
-      (this.conn?.moderator ? this.moderation.queue.count > 0 : false);
+      (live && !!conn.news && this.news.unread > 0) ||
+      (live && conn.moderator && !!conn.moderation && this.moderation.queue.count > 0);
     this.menuBtn.classList.toggle('unread', any);
   }
 
@@ -1980,9 +1991,16 @@ export class App {
     // foot — is somewhere to go, so the drawer gets out of the way.
     this.menuBtn.setAttribute('aria-controls', 'rail');
     this.menuBtn.onclick = () => this.showDrawer(!document.body.classList.contains('show-drawer'));
+    // By the time this runs, what was picked has had its click: a
+    // conversation has focused the composer and Settings its dialog.
+    // Anything else would leave the focus on a button that is sliding
+    // out of sight, so it goes back to ☰.
     this.rail.addEventListener('click', (e) => {
-      const b = (e.target as Element).closest('button, .rail-close');
-      if (b && !b.classList.contains('rail-close')) this.showDrawer(false);
+      if (!document.body.classList.contains('show-drawer')) return;
+      if (!(e.target as Element).closest('button')) return;
+      this.showDrawer(false);
+      const at = document.activeElement;
+      if (!at || at === document.body || this.rail.contains(at)) this.menuBtn.focus();
     });
     const phone = matchMedia(PHONE);
     phone.addEventListener('change', () => this.placeTopbar(phone.matches));

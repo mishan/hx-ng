@@ -144,9 +144,27 @@ test('a phone keeps the title bar on the screen, the rest in a drawer behind ☰
   await expect(drawer).toBeVisible();
   await expect(menu).toHaveAttribute('aria-expanded', 'true');
   await expect(drawer.getByRole('button', { name: 'Identity' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Conversations and more' })).toBeVisible();
   await drawer.getByRole('button', { name: /News/ }).tap();
   await expect(drawer).toBeHidden();
   await expect(page.locator('.news')).toBeVisible();
+  // Not left on a button that has slid out of sight.
+  await expect(menu).toBeFocused();
+
+  // What arrives while the drawer is open redraws the rail, and the
+  // focus stays where it was.
+  await menu.tap();
+  const settings = drawer.getByRole('button', { name: 'Settings' });
+  await settings.focus();
+  const other = await context.newPage();
+  await logIn(other);
+  await other.locator('.composer-input').fill('while you were reading');
+  await other.locator('.composer-input').press('Enter');
+  await expect(drawer.locator('.rail-item.unread')).toHaveCount(1);
+  await expect(settings).toBeFocused();
+  await other.close();
+  await page.keyboard.press('Escape');
+  await expect(menu).toBeFocused();
 
   await menu.tap();
   await expect(drawer).toBeVisible();
@@ -187,8 +205,10 @@ test('settings are one dialog, and take effect as they are changed', async ({ pa
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
   await dialog.getByText('System', { exact: true }).click();
   await expect(page.locator('html')).not.toHaveAttribute('data-theme', /./);
-  await page.keyboard.press('Escape');
+  // Done hands the focus back to what opened the dialog, as Escape does.
+  await dialog.getByRole('button', { name: 'Done' }).click();
   await expect(dialog).toBeHidden();
+  await expect(page.getByRole('button', { name: 'Settings' })).toBeFocused();
 });
 
 test('a tablet is not given the phone’s buttons', async ({ browser }) => {

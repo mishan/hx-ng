@@ -24,14 +24,46 @@ read_chat = true
 send_chat = true
 ${access}`;
 
-async function logIn(browser: Browser, server: RunningServer, login: string): Promise<Page> {
+async function logIn(browser: Browser, server: RunningServer, login: string, init?: () => void): Promise<Page> {
   const page = await (await browser.newContext()).newPage();
+  if (init) await page.addInitScript(init);
   await page.goto(`/?server=${encodeURIComponent(server.wsUrl)}`);
   await page.getByLabel('Account').fill(login);
   await page.getByLabel('Password').fill('pw');
   await page.getByRole('button', { name: 'Connect', exact: true }).click();
   await expect(page.locator('.app')).toBeVisible();
   return page;
+}
+
+/** Count what the page asks the server, by request name. Runs in the
+ *  page, hence the `any`. */
+function countRequests(): void {
+  const w = globalThis as any;
+  w.__sent = {};
+  const send = w.WebSocket.prototype.send;
+  w.WebSocket.prototype.send = function (this: unknown, data: string) {
+    try {
+      const req = JSON.parse(data).req;
+      w.__sent[req] = (w.__sent[req] ?? 0) + 1;
+    } catch {
+      /* not a request */
+    }
+    return send.call(this, data);
+  };
+}
+
+const sent = (page: Page, req: string): Promise<number> =>
+  page.evaluate((r) => (globalThis as any).__sent[r] ?? 0, req);
+
+/** The browser tab put away or brought back. A headless page is always
+ *  visible, so the document says otherwise and says it changed. */
+function tabHidden(page: Page, hidden: boolean): Promise<void> {
+  return page.evaluate((h) => {
+    const d = (globalThis as any).document;
+    Object.defineProperty(d, 'hidden', { configurable: true, get: () => h });
+    Object.defineProperty(d, 'visibilityState', { configurable: true, get: () => (h ? 'hidden' : 'visible') });
+    d.dispatchEvent(new Event('visibilitychange'));
+  }, hidden);
 }
 
 async function say(page: Page, text: string): Promise<void> {
@@ -128,6 +160,33 @@ db = "server.sqlite"
     await mod.locator('dialog.ask').getByRole('button', { name: 'Disconnect', exact: true }).click();
     await expect(bob.locator('.line', { hasText: 'disconnected by an administrator' }).first()).toBeVisible();
     await expect(alice.locator('.person', { hasText: 'Bob' })).toHaveCount(0);
+  });
+
+  test('the queue is fetched once when opened, and not again when the browser tab comes back', async ({ browser }) => {
+    const mod = await logIn(browser, server, 'mod', countRequests);
+    const alice = await logIn(browser, server, 'alice');
+    // Counted from once the login's own asking has settled: the badge's
+    // count is a `reports` request too, the same shape as the queue's.
+    let base = -1;
+    await expect.poll(async () => {
+      const [a] = [await sent(mod, 'reports'), await mod.waitForTimeout(300)];
+      const b = await sent(mod, 'reports');
+      base = b;
+      return a === b;
+    }).toBe(true);
+    await mod.locator('.rail-item', { hasText: 'Reports' }).click();
+    await expect(mod.locator('.mod-view')).toBeVisible();
+    await expect.poll(() => sent(mod, 'reports')).toBe(base + 1);
+
+    // A report filed while the tab is put away is drawn when it comes
+    // back, from the event that told of it rather than a fetch.
+    const before = await mod.locator('.mod-report').count();
+    await tabHidden(mod, true);
+    await say(alice, '/report Mod while nobody was looking');
+    await expect(alice.locator('.line.system').last()).toContainText('is with the moderators');
+    await tabHidden(mod, false);
+    await expect(mod.locator('.mod-report')).toHaveCount(before + 1);
+    expect(await sent(mod, 'reports')).toBe(base + 1);
   });
 
   test('on a touch screen, the moderation controls are a finger’s size', async ({ browser }) => {

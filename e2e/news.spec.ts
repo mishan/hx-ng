@@ -337,7 +337,7 @@ max_depth = 4
     await expect(hostile.locator('img')).toHaveCount(0);
   });
 
-  test("the Markdown switch keeps the reader's place, and a block message is a block on a phone", async ({ browser }) => {
+  test("the markdown setting keeps the reader's place, and a block message is a block on a phone", async ({ browser }) => {
     const editor = await logIn(browser, server, 'editor');
     await editor.setViewportSize({ width: 1000, height: 500 });
     const input = editor.locator('.composer-input');
@@ -361,9 +361,10 @@ max_depth = 4
     const before = await place();
     expect(before.index).toBeGreaterThan(0);
 
-    const toggle = editor.getByRole('button', { name: 'Markdown', exact: true });
     for (const drawn of [0, 40]) {
-      await toggle.click();
+      await editor.getByRole('button', { name: 'Settings' }).click();
+      await editor.getByRole('checkbox', { name: /Render markdown/ }).click();
+      await editor.keyboard.press('Escape');
       await expect(transcript.locator('strong')).toHaveCount(drawn);
       const after = await place();
       expect(after.index).toBe(before.index);

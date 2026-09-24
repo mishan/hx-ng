@@ -64,6 +64,7 @@ import { IdentityPanel } from './identity';
 import { installButton } from './install';
 import { takeScanFragment, type Scanned } from '../identity/scan';
 import { renderRoster } from './roster';
+import { openSettings, type Theme } from './settings';
 import { Tiles } from './tiles';
 import { MediaCache } from './media';
 import { closedForReporter, ModerationView, problem as moderationProblem } from './moderation';
@@ -139,7 +140,9 @@ const HISTORY_REFUSALS = new Set(['not_available', 'access_denied', 'bad_request
 const THEME_KEY = 'hxd-ng.theme';
 const SELF_VIEW_KEY = 'hxd-ng.selfview';
 const MARKDOWN_KEY = 'hxd-ng.markdown';
-type Theme = 'auto' | 'dark' | 'light';
+/** The phone layout, as `styles.css` draws it: where the rail is a
+ *  drawer and the title bar's buttons live at its foot. */
+const PHONE = '(max-width: 44rem)';
 
 export class App {
   private store = new Store();
@@ -219,16 +222,20 @@ export class App {
     'People',
   );
   private mailBtn = h('button', { class: 'ghost mail-button', hidden: true }, 'Mail');
-  /** The title bar's less-used buttons: in the row on a wide screen, in
-   *  a menu behind `moreBtn` on a narrow one. */
-  private extras = h('div', { class: 'topbar-extras', id: 'topbar-extras' });
-  /** A disclosure rather than an ARIA menu: what it shows are ordinary
-   *  buttons, and on a wide screen the same buttons sit in the row. */
-  private moreBtn = h(
+  /** The title bar's less-used buttons: in the row on a wide screen,
+   *  at the foot of the drawer on a phone. */
+  private extras = h('div', { class: 'topbar-extras' });
+  /** Opens the rail as a drawer from the left; only on a phone. A
+   *  disclosure rather than an ARIA menu: what it shows is the rail, the
+   *  same list of buttons a wide screen has in a column. */
+  private menuBtn = h(
     'button',
-    { class: 'ghost topbar-more', type: 'button', title: 'More', ariaExpanded: 'false' },
-    '\u22ef',
+    { class: 'ghost menu-toggle', type: 'button', title: 'Conversations and more', ariaExpanded: 'false' },
+    '\u2630',
   );
+  /** The bottom of the drawer, which holds the title bar's buttons while
+   *  the layout is a phone's. Empty, and not drawn, otherwise. */
+  private drawerFoot = h('div', { class: 'rail-foot' });
   /** How far `msg_read` has been told we have got. Selecting the same
    *  conversation twice does not ask again, and two marks in flight
    *  cannot write each other's answers. */
@@ -315,6 +322,10 @@ export class App {
       }
       if (e.key === 'Escape' && document.body.classList.contains('show-roster')) {
         this.showRoster(false);
+      }
+      if (e.key === 'Escape' && document.body.classList.contains('show-drawer')) {
+        this.showDrawer(false);
+        this.menuBtn.focus();
       }
     });
 
@@ -1648,6 +1659,7 @@ export class App {
     this.mailBtn.title = this.store.mailExhausted
       ? `${mail.unread} unread of ${mail.total} stored — all of it is loaded`
       : `${mail.unread} unread of ${mail.total} stored. Click to load earlier messages.`;
+    this.paintMenuUnread();
   }
 
   private push(id: ConvId, line: Line, fresh = true): void {
@@ -1791,7 +1803,28 @@ export class App {
       reports.onclick = () => this.showReports(true);
     }
     const [lobby, ...rest] = items;
-    fill(this.rail, h('div', { class: 'rail-head' }, 'Conversations'), lobby, news, files, reports, ...rest);
+    fill(
+      this.rail,
+      h('div', { class: 'rail-head' }, 'Conversations'),
+      lobby,
+      news,
+      files,
+      reports,
+      ...rest,
+      this.drawerFoot,
+    );
+    this.paintMenuUnread();
+  }
+
+  /** A dot on ☰ for anything unread behind it, which on a phone is
+   *  everything the rail and the mailbox count. */
+  private paintMenuUnread(): void {
+    const any =
+      [...this.store.conversations.values()].some((c) => c.unread > 0) ||
+      (this.store.mail?.unread ?? 0) > 0 ||
+      (this.conn?.news ? this.news.unread > 0 : false) ||
+      (this.conn?.moderator ? this.moderation.queue.count > 0 : false);
+    this.menuBtn.classList.toggle('unread', any);
   }
 
   private renderRoster(): void {
@@ -1927,70 +1960,32 @@ export class App {
     // what decides which case we are in.
     this.peopleBtn.onclick = () =>
       this.showRoster(!document.body.classList.contains('show-roster'));
-    this.scrim.onclick = () => this.showRoster(false);
-
-    const debugBtn = h('button', { class: 'ghost', title: 'Wire trace and session state (⇧⌘D)' }, 'Debug');
-    debugBtn.onclick = () => this.debug.toggle();
+    this.scrim.onclick = () => {
+      this.showRoster(false);
+      this.showDrawer(false);
+    };
 
     const identityBtn = h('button', { class: 'ghost', title: 'Device keys, enrollment, and renewal' }, 'Identity');
     identityBtn.onclick = () => this.identityPanel.toggle();
 
-    const themeBtn = h('button', { class: 'ghost', title: 'Theme' });
-    const paintTheme = (t: Theme) => (themeBtn.textContent = t === 'auto' ? 'Auto' : t === 'dark' ? 'Dark' : 'Light');
-    paintTheme(readTheme());
-    themeBtn.onclick = () => {
-      const next: Theme = readTheme() === 'auto' ? 'dark' : readTheme() === 'dark' ? 'light' : 'auto';
-      this.applyTheme(next);
-      paintTheme(next);
-    };
+    // Theme, markdown and the rest are this browser's, set once and left
+    // alone; a dialog holds them rather than a switch each in the bar.
+    const settingsBtn = h('button', { class: 'ghost', title: 'Theme, markdown, video and debugging' }, 'Settings');
+    settingsBtn.onclick = () => this.openSettings();
 
-    // Unlike GtkHx, which keeps the rendering a row was built with, this
-    // redraws what is already on screen: every line still holds the text
-    // it arrived as, so there is nothing to keep alive that is not
-    // already kept.
-    const mdBtn = h('button', { class: 'ghost' }, 'Markdown');
-    const paintMarkdown = () => {
-      mdBtn.classList.toggle('on', this.markdown);
-      mdBtn.setAttribute('aria-pressed', String(this.markdown));
-      mdBtn.title = this.markdown
-        ? 'Render markdown: on. Chat is drawn as **bold**, `code` and the rest. Click to show it exactly as typed.'
-        : 'Render markdown: off. Chat is shown exactly as typed. Click to draw markdown.';
-    };
-    paintMarkdown();
-    mdBtn.onclick = () => {
-      this.markdown = !this.markdown;
-      writeMarkdown(this.markdown);
-      paintMarkdown();
-      // Only how the lines are drawn changes, so a reader back in the
-      // history stays on what they were reading.
-      keepingPlace(this.transcript, () => this.renderTranscript());
-    };
+    this.extras.append(this.notifyBtn, installButton(), identityBtn, settingsBtn);
 
-    // What a phone has no room for in the bar. On a wide screen the box
-    // is `display: contents` and these are ordinary buttons in the row;
-    // on a narrow one it is a menu that ⋯ opens, and picking anything
-    // in it closes it.
-    this.extras.append(this.notifyBtn, installButton(), themeBtn, mdBtn, identityBtn, debugBtn);
-    this.moreBtn.onclick = (e) => {
-      e.stopPropagation();
-      this.showExtras(!this.extras.classList.contains('open'));
-    };
-    this.extras.addEventListener('click', (e) => {
-      if ((e.target as Element).closest('button')) this.showExtras(false);
+    // On a phone the rail is a drawer from the left, and ☰ opens it.
+    // Anything picked in it — a conversation, a reader, a button at its
+    // foot — is somewhere to go, so the drawer gets out of the way.
+    this.menuBtn.setAttribute('aria-controls', 'rail');
+    this.menuBtn.onclick = () => this.showDrawer(!document.body.classList.contains('show-drawer'));
+    this.rail.addEventListener('click', (e) => {
+      const b = (e.target as Element).closest('button, .rail-close');
+      if (b && !b.classList.contains('rail-close')) this.showDrawer(false);
     });
-    this.moreBtn.setAttribute('aria-controls', this.extras.id);
-    // `pointerdown`, not `click`: iOS sends no click for a tap on
-    // something that is not listening for one, so a tap on the empty
-    // bar would leave the menu open. ⋯ is left to its own click.
-    document.addEventListener('pointerdown', (e) => {
-      const t = e.target as Node;
-      if (!this.extras.contains(t) && !this.moreBtn.contains(t)) this.showExtras(false);
-    });
-    document.addEventListener('keydown', (e) => {
-      if (e.key !== 'Escape' || !this.extras.classList.contains('open')) return;
-      this.showExtras(false);
-      this.moreBtn.focus();
-    });
+    const phone = matchMedia(PHONE);
+    phone.addEventListener('change', () => this.placeTopbar(phone.matches));
 
     this.pill.onclick = () => this.debug.toggle(true);
     this.notifyBtn.onclick = () => void this.togglePush();
@@ -2108,14 +2103,13 @@ export class App {
       h(
         'header',
         { class: 'topbar' },
+        this.menuBtn,
         h('div', { class: 'server' }, this.serverName, this.subject),
         h('div', { class: 'spacer' }),
         this.meButton,
         this.pill,
         this.mailBtn,
         this.peopleBtn,
-        // ⋯ first, so Tab goes from it into what it opened.
-        this.moreBtn,
         this.extras,
       ),
       h(
@@ -2148,12 +2142,56 @@ export class App {
         this.tiler,
       ),
     );
+    this.placeTopbar(phone.matches);
   }
 
-  private showExtras(open: boolean): void {
-    this.extras.classList.toggle('open', open);
-    this.moreBtn.classList.toggle('on', open);
-    this.moreBtn.setAttribute('aria-expanded', String(open));
+  /** Where the title bar's own buttons go: in the bar, or on a phone,
+   *  where the bar has room for little more than the server's name, at
+   *  the foot of the drawer. Moved rather than drawn twice, so each is
+   *  still the one button that paints itself. */
+  private placeTopbar(phone: boolean): void {
+    if (phone) {
+      this.drawerFoot.append(this.meButton, this.mailBtn, this.extras);
+    } else {
+      this.pill.before(this.meButton);
+      this.pill.after(this.mailBtn);
+      this.peopleBtn.after(this.extras);
+      this.showDrawer(false);
+    }
+  }
+
+  /** Open or close the rail as a drawer, on a phone. Out the same ways
+   *  as the roster: ☰ again, the scrim, Escape, or picking something. */
+  private showDrawer(open: boolean): void {
+    if (open) this.showRoster(false);
+    document.body.classList.toggle('show-drawer', open);
+    this.menuBtn.classList.toggle('on', open);
+    this.menuBtn.setAttribute('aria-expanded', String(open));
+  }
+
+  private openSettings(): void {
+    openSettings({
+      theme: readTheme(),
+      setTheme: (t) => this.applyTheme(t),
+      markdown: this.markdown,
+      // Only how the lines are drawn changes, so a reader back in the
+      // history stays on what they were reading. Every line still holds
+      // the text it arrived as, so there is nothing to redraw from that
+      // is not already kept.
+      setMarkdown: (on) => {
+        this.markdown = on;
+        writeMarkdown(on);
+        keepingPlace(this.transcript, () => this.renderTranscript());
+      },
+      selfView: this.selfView,
+      setSelfView: (on) => {
+        this.selfView = on;
+        writeSelfView(on);
+        this.applySelfView();
+        this.renderCallbar();
+      },
+      openDebug: () => this.debug.toggle(true),
+    });
   }
 
   /** Open or close the narrow-layout roster panel.
@@ -2164,6 +2202,7 @@ export class App {
    *  confined to the pane area), the scrim behind it, Escape, and
    *  picking someone to message. */
   private showRoster(open: boolean): void {
+    if (open) this.showDrawer(false);
     document.body.classList.toggle('show-roster', open);
     this.peopleBtn.classList.toggle('on', open);
     this.peopleBtn.setAttribute('aria-expanded', String(open));

@@ -198,10 +198,12 @@ input:focus-visible, textarea:focus-visible, button:focus-visible {
 .topbar > * { flex: none; }
 
 /* The less-used buttons: part of the row where there is room for them,
-   a menu behind ⋯ where there is not (below). */
+   at the foot of the drawer where there is not (below). */
 .topbar-extras { display: contents; }
 .topbar-extras > * { flex: none; }
-.topbar-more { display: none; }
+/* ☰, and the foot of the drawer it opens: a phone's alone. */
+.menu-toggle { display: none; }
+.rail-foot { display: none; }
 
 .server { display: flex; align-items: baseline; gap: 0.6rem; min-width: 0; overflow: hidden; flex: 0 1 auto; }
 .server-name {
@@ -1376,29 +1378,73 @@ button.ghost.danger:hover { color: var(--admin); border-color: var(--admin); }
   .line.cont .gutter, .line.cont .name { display: none; }
   .line.broadcast .name { display: inline; margin-right: 0.4rem; }
 
-  .topbar { gap: 0.35rem; position: relative; overflow: visible; }
+  .topbar { gap: 0.35rem; }
   /* The server name is the one thing in the bar allowed to shrink, so
      the spacer beside it must not take its room. */
   .topbar > .spacer { flex: 0 0 0; margin-left: auto; }
-  .topbar-more { display: inline-flex; justify-content: center; }
-  .topbar-extras {
-    display: none;
+
+  /* The rail, which a wider screen draws as a column or a strip of
+     tabs, is a drawer from the left: the roster's mirror, confined to
+     the pane area the same way and for the same reason — ☰ stays on
+     screen to close it. `visibility` goes with the slide so that what
+     is off screen is out of the Tab order too. */
+  .menu-toggle { display: inline-flex; justify-content: center; font-size: 1.25rem; line-height: 1; position: relative; }
+  .menu-toggle.on { border-color: var(--accent); color: var(--accent); }
+  .menu-toggle.unread::after {
+    content: '';
     position: absolute;
-    top: calc(100% + 0.25rem);
-    right: max(0.75rem, env(safe-area-inset-right));
-    z-index: 40;
-    min-width: 12rem;
-    flex-direction: column;
-    align-items: stretch;
-    gap: 0.35rem;
-    padding: 0.5rem;
-    background: var(--surface);
-    border: 1px solid var(--line);
-    border-radius: 10px;
-    box-shadow: var(--shadow);
+    top: 0.2rem;
+    right: 0.2rem;
+    width: 0.5rem;
+    height: 0.5rem;
+    border-radius: 50%;
+    background: var(--accent);
   }
-  .topbar-extras.open { display: flex; }
-  .topbar .topbar-extras button.ghost { text-align: left; font-size: 0.9rem; }
+  .rail {
+    position: absolute;
+    inset: 0 auto 0 0;
+    width: min(18rem, 82vw);
+    z-index: 20;
+    display: flex;
+    flex-direction: column;
+    gap: 0.1rem;
+    overflow-x: hidden;
+    overflow-y: auto;
+    border-bottom: 0;
+    border-right: 1px solid var(--line);
+    padding: 0.5rem 0.5rem max(0.5rem, env(safe-area-inset-bottom)) max(0.5rem, env(safe-area-inset-left));
+    box-shadow: var(--shadow);
+    transform: translateX(-100%);
+    visibility: hidden;
+    transition: transform 0.18s ease, visibility 0s linear 0.18s;
+  }
+  body.show-drawer .rail { transform: none; visibility: visible; transition: transform 0.18s ease; }
+  body.show-drawer .scrim { opacity: 1; pointer-events: auto; }
+  .rail-head { display: block; }
+  .rail-item { width: 100%; flex: none; }
+
+  /* What the title bar had no room for. The buttons keep the look they
+     have in the bar, a row each and full width, so each is a target a
+     thumb can find without looking. */
+  .rail-foot {
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+    margin-top: auto;
+    padding-top: 0.6rem;
+    border-top: 1px solid var(--line);
+  }
+  .rail-foot .topbar-extras { display: flex; flex-direction: column; gap: 0.35rem; }
+  .rail-foot button.ghost {
+    padding: 0.45rem 0.6rem;
+    border-radius: 7px;
+    border: 1px solid var(--line);
+    color: var(--muted);
+    font-size: 0.9rem;
+    text-align: left;
+  }
+  .rail-foot button.ghost:hover { background: var(--surface-2); color: var(--text); }
+  .rail-foot .identity .nick { display: inline; }
 
   /* Where the placeholder already says whose conversation this is, the
      hint beside the box is a quarter of a phone's width saying it
@@ -1476,7 +1522,8 @@ button.ghost.danger:hover { color: var(--admin); border-color: var(--admin); }
   .line-actions button, .person-more, dialog.ask button, .mod-head button, .mod-actions button {
     min-height: 44px;
   }
-  .pill, .roster-close, .topbar-more, .news-bar button.ghost, .person-more {
+  .rail-foot button, dialog.settings button, .setting-choice, .setting-toggle { min-height: 44px; }
+  .pill, .roster-close, .menu-toggle, .news-bar button.ghost, .person-more {
     min-width: 44px;
     justify-content: center;
   }
@@ -1541,3 +1588,40 @@ button.ghost.danger { color: var(--admin); }
 .mod-evidence { font-size: 0.9rem; white-space: pre-wrap; overflow-wrap: anywhere; }
 .mod-image img { max-width: min(100%, 420px); max-height: 320px; border-radius: 6px; }
 .mod-actions { display: flex; flex-wrap: wrap; gap: 0.35rem; }
+
+/* --- settings --------------------------------------------------------- */
+
+dialog.picker.settings { width: min(32rem, 100vw - 1.5rem); }
+.settings-body { padding: 0.5rem 1rem 1rem; display: flex; flex-direction: column; gap: 0.25rem; overflow-y: auto; }
+.settings-body fieldset { border: 0; margin: 0; padding: 0.5rem 0 0; min-width: 0; }
+.settings-body legend {
+  padding: 0.5rem 0 0.4rem;
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+}
+/* The three themes as one segmented control: a radio group, so the
+   arrow keys move between them the way the platform's own do. */
+.setting-choices { display: flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+.setting-choice { flex: 1; display: flex; align-items: center; justify-content: center; cursor: pointer; text-align: center; }
+.setting-choice + .setting-choice { border-left: 1px solid var(--line); }
+.setting-choice input { position: absolute; opacity: 0; pointer-events: none; }
+.setting-choice span { padding: 0.45rem 0.5rem; font-size: 0.88rem; color: var(--muted); }
+.setting-choice:has(input:checked) { background: var(--accent-soft); }
+.setting-choice:has(input:checked) span { color: var(--text); font-weight: 560; }
+.setting-choice:has(input:focus-visible) { outline: 2px solid var(--accent); outline-offset: -2px; }
+.setting-toggle { display: flex; align-items: center; gap: 1rem; cursor: pointer; padding: 0.2rem 0; }
+.setting-toggle > span { flex: 1; display: flex; flex-direction: column; gap: 0.15rem; }
+.setting-toggle input { width: 1.15rem; height: 1.15rem; accent-color: var(--accent); flex: none; }
+.setting-label { font-weight: 560; }
+.setting-detail { font-size: 0.8rem; color: var(--muted); }
+.setting-row { display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap; }
+dialog.settings button.ghost {
+  padding: 0.3rem 0.6rem;
+  border-radius: 7px;
+  border: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+dialog.settings button.ghost:hover { background: var(--surface-2); color: var(--text); }

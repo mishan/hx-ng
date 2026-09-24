@@ -20,6 +20,7 @@ import { LOBBY, type Store } from '../state';
 import { ask } from './ask';
 import { fill, h, linkify } from './dom';
 import { INERT } from './media';
+import { Sight } from './sight';
 
 type Tab = 'open' | 'closed' | 'log';
 
@@ -41,7 +42,7 @@ export class ModerationView {
   readonly el = h('section', { class: 'mod-view', hidden: true });
   readonly queue = new ReportQueue();
   private tab: Tab = 'open';
-  private onScreen = false;
+  private sight = new Sight();
   private openMore = false;
   private closed: Report[] = [];
   private closedMore = false;
@@ -70,8 +71,12 @@ export class ModerationView {
 
   /** On screen or not, without touching `hidden`. */
   shown(on: boolean): void {
-    this.onScreen = on;
-    if (on) void this.load(true);
+    // Fetched once for each time it is brought forward (`./sight`). Back
+    // from a browser tab put away, what arrived meanwhile is already in
+    // the queue and only has to be drawn: a first page fetched again
+    // would drop the pages a moderator had loaded below it.
+    if (this.sight.set(on)) void this.load(true);
+    else if (on) this.render();
   }
 
   /** A new session, or none: nothing held is this one's. */
@@ -105,7 +110,7 @@ export class ModerationView {
       this.queue.page(page.reports, true, page.has_more);
       this.openMore = page.has_more;
       this.counted();
-      if (this.onScreen) this.render();
+      if (this.sight.on) this.render();
     } catch {
       /* the badge keeps the count it had; the view says why when opened */
     }
@@ -115,7 +120,7 @@ export class ModerationView {
     this.events++;
     if (!this.queue.filed(r)) return;
     this.counted();
-    if (this.onScreen && this.tab === 'open') this.render();
+    if (this.sight.on && this.tab === 'open') this.render();
   }
 
   onClosed(id: number): void {
@@ -124,7 +129,7 @@ export class ModerationView {
     this.counted();
     // What was open may be on the closed tab now; that tab refetches
     // when it is next picked.
-    if (this.onScreen) this.render();
+    if (this.sight.on) this.render();
   }
 
   private async load(first: boolean): Promise<void> {

@@ -9,6 +9,7 @@ import {
 } from '@hotline-ng/client';
 
 import { fill, h } from './dom';
+import { Sight } from './sight';
 
 interface SaveWriter {
   write(data: Uint8Array): Promise<void>;
@@ -36,6 +37,8 @@ export class FilesView {
   /** The download under way, which is also what makes one at a time. */
   private abort: AbortController | null = null;
 
+  private sight = new Sight();
+
   constructor(private connection: () => Connection | null) {
     this.el.append(this.page, this.transfer);
   }
@@ -45,9 +48,10 @@ export class FilesView {
     this.shown(open);
   }
 
-  /** On screen or not, without touching `hidden`. See `NewsView.shown`. */
+  /** On screen or not, without touching `hidden`. See `NewsView.shown`.
+   *  Fetched once for each time it is brought forward (`./sight`). */
   shown(on: boolean): void {
-    if (on) void this.load(this.path);
+    if (this.sight.set(on)) void this.load(this.path);
   }
 
   reset(): void {
@@ -56,6 +60,8 @@ export class FilesView {
     this.abort = null;
     this.path = '';
     this.el.hidden = true;
+    // Put away with the session, so opening it again is a bring-forward.
+    this.sight = new Sight();
     this.page.replaceChildren();
     this.transfer.replaceChildren();
     this.transfer.hidden = true;

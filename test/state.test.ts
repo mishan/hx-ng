@@ -52,6 +52,19 @@ describe('addressing a conversation', () => {
   });
 });
 
+describe('the roster', () => {
+  it('takes a changed user whole, so a cleared avatar is gone', () => {
+    // `user_changed` clears a picture by leaving the key out; a merge
+    // would keep the old one on screen.
+    const s = new Store();
+    const avatar = { id: 'ab'.repeat(32), type: 'image/png', width: 128, height: 128 };
+    s.put(person(5, 'Alice', { avatar }));
+    expect(s.user(5)?.avatar).toEqual(avatar);
+    s.put(person(5, 'Alice'));
+    expect(s.user(5)?.avatar).toBeUndefined();
+  });
+});
+
 describe('one conversation per person', () => {
   it('does not file every offline sender under one imaginary uid', () => {
     // A message whose sender no longer holds a session arrives with

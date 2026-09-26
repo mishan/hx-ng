@@ -18,6 +18,7 @@ import { lineReport } from '../moderation';
 import { continuesRun, type Conversation, type Line } from '../state';
 import type { Store } from '../state';
 import { clock, fill, h, linkify } from './dom';
+import { face } from './avatar';
 import { icon } from './icons';
 import { chatNodes } from './markdown';
 import { mediaEl, type MediaCache } from './media';
@@ -181,7 +182,11 @@ function chatLine(
     h(
       'span',
       { class: 'gutter' },
-      sameSpeaker || iconId === undefined ? null : icon(iconId, CHAT_SCALE),
+      sameSpeaker || iconId === undefined
+        ? null
+        : user
+          ? face(user, CHAT_SCALE)
+          : icon(iconId, CHAT_SCALE),
     ),
     h(
       'span',

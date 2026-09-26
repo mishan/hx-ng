@@ -85,6 +85,8 @@ import {
   type SyncOk,
   type BannerInfo,
   bannerIsHeld,
+  type Avatar,
+  type AvatarLimits,
   type User,
   type VideoConfig,
   type WireError,
@@ -182,6 +184,7 @@ interface Saved {
   moderator?: boolean;
   moderation?: ModerationCounts | null;
   banner?: BannerInfo | null;
+  avatars?: AvatarLimits | null;
 }
 
 const SAVED_KEY = 'hxd-ng.session';
@@ -298,6 +301,9 @@ export class Connection {
   /** The server's banner, from the login reply or the saved session.
    *  `null` means it shows none. */
   banner: BannerInfo | null = null;
+  /** What this server takes as an avatar, from the login reply or the
+   *  saved session. `null` means it has no avatars: draw icons only. */
+  avatars: AvatarLimits | null = null;
   /** Round-trip time of the last explicit `ping`, in milliseconds. */
   rtt: number | null = null;
 
@@ -333,6 +339,7 @@ export class Connection {
       this.moderator = saved.moderator ?? false;
       this.moderation = saved.moderation ?? null;
       this.banner = saved.banner ?? null;
+      this.avatars = saved.avatars ?? null;
     } else if (opts.resumeOnly) {
       throw new Error('no session to resume');
     }
@@ -459,6 +466,7 @@ export class Connection {
     this.moderator = ok.self.moderator === true;
     this.moderation = ok.moderation ?? null;
     this.banner = ok.banner ?? null;
+    this.avatars = ok.avatars ?? null;
     // Only a session that may detach is worth remembering: without the
     // permission a resume can only ever answer session_expired, and
     // storing a token we know is useless just invites a confusing
@@ -780,6 +788,44 @@ export class Connection {
   async fetchBanner(): Promise<Blob> {
     if (!this.banner || !bannerIsHeld(this.banner)) throw new Error('no banner on this server');
     const res = await fetch(`${this.httpBase()}${this.banner.url}`, {
+      headers: { Authorization: this.bearer() },
+    });
+    if (!res.ok) throw await mediaFailure(res);
+    return res.blob();
+  }
+
+  // --- avatars (hxd-ng's docs/avatars.md §4) ----------------------------
+
+  /**
+   * Set this session's avatar — its owner's, for an account or a proven
+   * identity, so every session of theirs shows it. The server re-encodes
+   * and fits it, and announces it as a `user_changed`, this session's own
+   * included; the returned reference is the same one that event carries.
+   *
+   * One attempt per the server's interval, refused or not: a second
+   * inside it is `rate_limited`.
+   */
+  async uploadAvatar(image: Blob): Promise<Avatar> {
+    const res = await fetch(`${this.httpBase()}/avatar`, {
+      method: 'PUT',
+      headers: { Authorization: this.bearer(), 'Content-Type': image.type },
+      body: image,
+    });
+    if (!res.ok) throw await mediaFailure(res);
+    const body = (await res.json()) as { avatar: Avatar };
+    return body.avatar;
+  }
+
+  /** Clear this session's avatar. Clearing none succeeds and announces
+   *  nothing; it shares `uploadAvatar`'s allowance. */
+  clearAvatar(): Promise<Record<string, never>> {
+    return this.request('avatar_clear', {});
+  }
+
+  /** Fetch an avatar's canonical bytes. Any session may fetch anyone's;
+   *  the id is the content, so a caller may keep the result for good. */
+  async fetchAvatar(id: string): Promise<Blob> {
+    const res = await fetch(`${this.httpBase()}/avatars/${encodeURIComponent(id)}`, {
       headers: { Authorization: this.bearer() },
     });
     if (!res.ok) throw await mediaFailure(res);
@@ -1167,6 +1213,7 @@ export class Connection {
       historyId: this.lastHistoryId,
       media: this.media,
       banner: this.banner,
+      avatars: this.avatars,
       news: this.news,
       push: this.push,
       moderator: this.moderator,

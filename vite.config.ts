@@ -45,18 +45,21 @@ export default defineConfig({
     // A phone on the LAN is the whole point of the ng wire, and it
     // cannot reach a dev server bound to loopback.
     host: true,
-    // The HTTP endpoints — identity's (`docs/identity-keys.md` §9) and
-    // inline media's (`inline-media.md` §8.2), the banner's — live on the ng
-    // listener, :5700, not this dev server's :5701. Proxying them
-    // makes every request same-origin in development with no server
-    // change at all, for the ordinary case of hxd-ng running on the same
-    // machine. A custom server elsewhere still needs its own CORS; this
-    // proxy only covers the default.
+    // The HTTP endpoints — identity's (`docs/identity-keys.md` §9),
+    // inline media's (`inline-media.md` §8.2), the banner's and avatars'
+    // — live on the ng listener, :5700, not this dev server's :5701.
+    // Proxying them makes every request same-origin in development with
+    // no server change at all, for the ordinary case of hxd-ng running
+    // on the same machine. A custom server elsewhere still needs its own
+    // CORS; this proxy only covers the default.
     proxy: {
       '/identity': 'http://127.0.0.1:5700',
       '/media': 'http://127.0.0.1:5700',
       // Exactly `/banner`, not everything that starts with it.
       '^/banner(\\?|$)': 'http://127.0.0.1:5700',
+      // `PUT /avatar` and `GET /avatars/{id}`, and nothing else that
+      // happens to start with the word.
+      '^/avatars?(/|$)': 'http://127.0.0.1:5700',
       '/files': 'http://127.0.0.1:5700',
       '/news': 'http://127.0.0.1:5700',
       '/.well-known': 'http://127.0.0.1:5700',

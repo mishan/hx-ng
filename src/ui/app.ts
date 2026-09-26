@@ -66,6 +66,7 @@ import { takeScanFragment, type Scanned } from '../identity/scan';
 import { renderRoster } from './roster';
 import { openSettings, type Theme } from './settings';
 import { Tiles } from './tiles';
+import { BannerStrip } from './banner';
 import { MediaCache } from './media';
 import { closedForReporter, ModerationView, problem as moderationProblem } from './moderation';
 import { NewsView } from './news';
@@ -169,6 +170,7 @@ export class App {
    *  which on this page has meant the voice session since before there
    *  were any. */
   private images = new MediaCache();
+  private banner = new BannerStrip();
   /** An image uploaded and waiting for the line that will carry it, and
    *  the file name the chip shows it under. Attaching uploads
    *  immediately — the server has to see the bytes to say whether it
@@ -455,11 +457,20 @@ export class App {
     if (!this.tiling) this.chatPane.hidden = false;
     this.account = d.login.trim() || null;
     const creds: Credentials = { ...d };
+    // Whether `start` logged in rather than resumed: a login draws the
+    // banner itself, and a resume after a reload has to draw it from the
+    // session it saved.
+    let loggedIn = false;
     const conn = new Connection(creds, {
       onTrace: (e) => this.debug.push(e),
       onState: (s, detail) => this.onState(s, detail),
       onLogin: (ok) => {
         this.store.server = ok.server;
+        // Every login, not just the first: a resume that fails after a
+        // server restart logs in again on this connection, and the
+        // operator may have changed the banner, or taken it down.
+        loggedIn = true;
+        this.banner.show(conn);
         // Present whenever the *server* keeps mail — which is not the
         // same as this account having a mailbox. A guest on a server with
         // an inbox is told `{0, 0}` here and then refused `no_inbox` when
@@ -516,6 +527,7 @@ export class App {
       onEnded: (reason) => {
         this.say(reason);
         this.media?.teardown();
+        this.banner.clear();
         // The handles die with the session, so the blob URLs may as
         // well: keeping them would leak every picture this page has
         // seen, and nothing could refetch them anyway.
@@ -582,6 +594,7 @@ export class App {
     // after a reload, when the count is the one saved with the session
     // and the events since have been replayed on top of it.
     this.moderation.reset(conn.moderation?.open ?? 0);
+    if (!loggedIn) this.banner.show(conn);
     // A moderator on a server that keeps no reports can still redact,
     // but has no queue to open.
     const reports = conn.moderator && conn.moderation !== null;
@@ -2152,6 +2165,7 @@ export class App {
         this.peopleBtn,
         this.extras,
       ),
+      this.banner.el,
       h(
         'div',
         { class: 'panes' },

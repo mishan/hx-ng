@@ -12,7 +12,8 @@ import type { User, VoiceSession } from '@hotline-ng/client';
 
 import { statusLabel, type Store } from '../state';
 import { fill, h } from './dom';
-import { icon, MAX_ICON_WIDTH } from './icons';
+import { face } from './avatar';
+import { MAX_ICON_WIDTH } from './icons';
 
 /** Icons render at 2×: the art is 16 px and unapologetically pixelated,
  *  and doubling it is both crisper and closer to what these lists look
@@ -94,7 +95,7 @@ function row(u: User, store: Store, media: VoiceSession, hooks: RosterHooks): HT
   const art = h(
     'span',
     { class: 'icon-cell-fixed', style: { width: `${MAX_ICON_WIDTH * ROSTER_SCALE}px` } },
-    icon(u.icon, ROSTER_SCALE),
+    face(u, ROSTER_SCALE),
   );
 
   const el = h(
@@ -102,7 +103,7 @@ function row(u: User, store: Store, media: VoiceSession, hooks: RosterHooks): HT
     {
       class: `person${u.admin ? ' admin' : ''}${u.status !== 'active' ? ' away' : ''}${me ? ' me' : ''}`,
       title:
-        `uid ${u.uid} · icon ${u.icon}${u.admin ? ' · administrator' : ''}${status ? ` · ${status}` : ''}` +
+        `uid ${u.uid} · icon ${u.icon}${u.avatar ? ' · picture' : ''}${u.admin ? ' · administrator' : ''}${status ? ` · ${status}` : ''}` +
         (u.transport === 'cleartext' ? ' · unencrypted' : '') +
         // The handle is the part of an identity a person can read back;
         // the fingerprint is shortened because 52 characters in a

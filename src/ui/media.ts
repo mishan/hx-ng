@@ -20,7 +20,7 @@
  *  come from is the one thing a cache is told when it is made.
  */
 
-import type { Connection, HistoryMedia } from '@hotline-ng/client';
+import { WireFailure, type Connection, type HistoryMedia } from '@hotline-ng/client';
 import { h } from './dom';
 
 /** Widest an inline image is drawn. Beyond this it is scaled down by
@@ -51,7 +51,8 @@ export class MediaCache {
    *  answer for expired, revoked and never-yours, and none of them will
    *  become a different answer on this session — so remembering the
    *  refusal is what keeps a transcript full of expired images from
-   *  issuing an authenticated GET apiece on every redraw. */
+   *  issuing an authenticated GET apiece on every redraw. Only that
+   *  answer: see `gone`. */
   private missing = new Set<string>();
   private conn: Connection | null = null;
   /** Bumped by anything that invalidates the maps. A fetch that started
@@ -139,8 +140,8 @@ export class MediaCache {
         this.urls.set(id, url);
         return url;
       })
-      .catch(() => {
-        if (started === this.generation) this.missing.add(id);
+      .catch((e: unknown) => {
+        if (started === this.generation && gone(e)) this.missing.add(id);
         return null;
       })
       .finally(() => {
@@ -149,6 +150,16 @@ export class MediaCache {
     this.inflight.set(id, p);
     return p;
   }
+}
+
+/** Did the server say this handle is gone, rather than fail to answer?
+ *  Only that is worth remembering: a network blip, a 5xx or a detached
+ *  socket's 401 is a fetch the next redraw should try again, and
+ *  remembering it would leave a picture blank for the rest of the
+ *  session. Every route's "not here" is a `no_such_…` code, and so is the
+ *  fallback for a 404 whose body was not ours. */
+function gone(e: unknown): boolean {
+  return e instanceof WireFailure && e.wire.code.startsWith('no_such_');
 }
 
 /** How big to draw it: the image's own size, scaled down to fit the

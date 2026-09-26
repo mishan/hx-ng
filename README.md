@@ -1,7 +1,8 @@
 # hx-ng
 
 A browser client for the **Hotline-ng** wire: public chat, the user list
-with the classic icons, private messages, threaded news, notifications
+with the classic icons or a picture of your own, private messages,
+threaded news, notifications
 while you are away, reports and moderation, and the voice and video the SFU already serves. It never sees the legacy wire, and the server cannot
 tell it apart from any other ng client. The protocol it speaks is
 [`hotline-ng.md`](https://github.com/mishan/hxd-ng/blob/main/docs/hotline-ng.md).

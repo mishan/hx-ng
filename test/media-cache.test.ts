@@ -2,7 +2,7 @@
 //! that are released rather than leaked.
 import { describe, expect, it, vi } from 'vitest';
 
-import type { Connection } from '@hotline-ng/client';
+import { WireFailure, type Connection } from '@hotline-ng/client';
 
 import { MediaCache } from '../src/ui/media';
 
@@ -26,6 +26,11 @@ function pending() {
   return { promise, settle, fail };
 }
 
+/** The route's own answer for a handle that is not there. */
+function notFound(): WireFailure {
+  return new WireFailure({ code: 'no_such_media', text: 'Media not found' });
+}
+
 function png(): Blob {
   return new Blob([new Uint8Array([0x89, 0x50, 0x4e, 0x47])], { type: PNG });
 }
@@ -47,13 +52,25 @@ describe('the media cache', () => {
     // none of them becomes a different one on this session. A room full
     // of expired images would otherwise cost an authenticated GET
     // apiece on every redraw.
-    const fetchMedia = vi.fn().mockRejectedValue(new Error('404'));
+    const fetchMedia = vi.fn().mockRejectedValue(notFound());
     const cache = new MediaCache();
     cache.attach(fakeConn(fetchMedia));
 
     expect(await cache.url('gone', PNG)).toBeNull();
     expect(await cache.url('gone', PNG)).toBeNull();
     expect(fetchMedia).toHaveBeenCalledTimes(1);
+  });
+
+  it('asks again after a failure that was not the server saying no', async () => {
+    // A phone that lost the network for a moment, or a 5xx: the next
+    // redraw should get the picture, not a blank for the whole session.
+    const fetchMedia = vi.fn().mockRejectedValueOnce(new TypeError('Failed to fetch')).mockResolvedValue(png());
+    const cache = new MediaCache();
+    cache.attach(fakeConn(fetchMedia));
+
+    expect(await cache.url('abc', PNG)).toBeNull();
+    expect(await cache.url('abc', PNG)).toMatch(/^blob:/);
+    expect(fetchMedia).toHaveBeenCalledTimes(2);
   });
 
   it('drops a fetch that lands after the session it belonged to', async () => {
@@ -137,7 +154,7 @@ describe('a cache with its own route', () => {
   });
 
   it('remembers a refusal from that route', async () => {
-    const route = vi.fn().mockRejectedValue(new Error('404'));
+    const route = vi.fn().mockRejectedValue(notFound());
     const cache = new MediaCache(route);
     cache.attach(fakeConn(vi.fn()));
 

@@ -59,7 +59,7 @@ import { DebugPanel } from './debug';
 import { clock, fill, h } from './dom';
 import { FilesView } from './files';
 import { icon } from './icons';
-import { pickIcon } from './iconpicker';
+import { type AvatarChoice, pickIcon } from './iconpicker';
 import { IdentityPanel } from './identity';
 import { installButton } from './install';
 import { takeScanFragment, type Scanned } from '../identity/scan';
@@ -68,6 +68,7 @@ import { openSettings, type Theme } from './settings';
 import { Tiles } from './tiles';
 import { BannerStrip } from './banner';
 import { MediaCache } from './media';
+import { avatars, face } from './avatar';
 import { closedForReporter, ModerationView, problem as moderationProblem } from './moderation';
 import { NewsView } from './news';
 import { appendLine, isAtBottom, keepingPlace, lineOf, renderTranscript, scrollToEnd } from './transcript';
@@ -532,6 +533,7 @@ export class App {
         // well: keeping them would leak every picture this page has
         // seen, and nothing could refetch them anyway.
         this.images.clear();
+        avatars.clear();
         this.clearAttachment();
         // The news reader goes with the session it read through, and the
         // chat pane comes back so the reason just said is on screen.
@@ -555,6 +557,7 @@ export class App {
     });
     this.conn = conn;
     this.images.attach(conn);
+    avatars.attach(conn);
     this.media = new VoiceSession(conn, {
       onLog: (text, bad) => this.say(bad ? `Media error: ${text}` : text),
       onRoom: () => {
@@ -574,6 +577,7 @@ export class App {
       this.conn = null;
       this.media = null;
       this.images.attach(null);
+      avatars.attach(null);
       throw new Error(
         e instanceof WireFailure ? errorText(e.wire) : e instanceof Error ? e.message : String(e),
       );
@@ -726,6 +730,11 @@ export class App {
       this.renderRail();
       this.renderMe();
       this.refreshTileLabels();
+      // A face in the chat gutter is looked up live, so the lines already
+      // drawn are the one place a new or cleared picture would go stale.
+      if (before?.avatar?.id !== d.user.avatar?.id) {
+        keepingPlace(this.transcript, () => this.renderTranscript());
+      }
     });
 
     conn.on('user_parted', (d) => {
@@ -1753,7 +1762,7 @@ export class App {
   private renderMe(): void {
     const me = this.store.self;
     if (!me) return;
-    fill(this.meButton, icon(me.icon, 2), h('span', { class: 'nick' }, me.nick));
+    fill(this.meButton, face(me, 2), h('span', { class: 'nick' }, me.nick));
   }
 
   private renderRail(): void {
@@ -1768,7 +1777,9 @@ export class App {
         { class: `rail-item${active ? ' on' : ''}${c.unread ? ' unread' : ''}` },
         c.kind === 'lobby'
           ? h('span', { class: 'rail-glyph' }, '#')
-          : icon(peer?.icon ?? 128, 1),
+          : peer
+            ? face(peer, 1)
+            : icon(128, 1),
         h('span', { class: 'rail-title' }, c.title),
         c.unread ? h('span', { class: 'badge' }, String(c.unread)) : null,
       );
@@ -2267,7 +2278,27 @@ export class App {
     const me = this.store.self;
     const conn = this.conn;
     if (!me || !conn) return;
-    const id = await pickIcon(me.icon);
+    // A refusal is thrown as text for the picker to show: it stays open,
+    // so another file can be chosen without starting over.
+    const failed = (e: unknown): Error =>
+      new Error(e instanceof WireFailure ? errorText(e.wire) : String(e));
+    const avatar: AvatarChoice | undefined = conn.avatars
+      ? {
+          limits: conn.avatars,
+          has: me.avatar !== undefined,
+          upload: async (file) => {
+            await conn.uploadAvatar(file).catch((e: unknown) => {
+              throw failed(e);
+            });
+          },
+          remove: async () => {
+            await conn.clearAvatar().catch((e: unknown) => {
+              throw failed(e);
+            });
+          },
+        }
+      : undefined;
+    const id = await pickIcon(me.icon, avatar);
     if (id === null || id === me.icon) return;
     try {
       await conn.request('nick', { icon: id });

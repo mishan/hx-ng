@@ -81,6 +81,31 @@ export interface User {
   transport: Transport;
   /** Absent unless the socket holding this session proved an identity. */
   identity?: RosterIdentity;
+  /** The user's picture, on a server with the `avatars` capability, and
+   *  absent when they have none. Shown in place of `icon` by a client
+   *  that can; `icon` is still the fallback (hxd-ng's `docs/avatars.md`
+   *  §4.2). A change that clears it is a `user_changed` without the key,
+   *  so a roster keeps the whole object rather than merging into it. */
+  avatar?: Avatar;
+}
+
+/** A reference to an avatar's canonical bytes. The id is the SHA-256 of
+ *  those bytes, so a given id always names the same picture and a fetch
+ *  of it may be kept for good. */
+export interface Avatar {
+  id: string;
+  type: string;
+  width: number;
+  height: number;
+}
+
+/** The login reply's `avatars` block: what `PUT /avatar` will take.
+ *  `mediaBlockedReason` reads it as it reads `MediaLimits`. */
+export interface AvatarLimits {
+  max_bytes: number;
+  /** What the server fits an avatar to, on its longer side. */
+  max_dimension: number;
+  types: string[];
 }
 
 /** The extra identity facts the login reply's `self` carries, which are
@@ -168,7 +193,10 @@ export interface MediaLimits {
  *  `null` when it can. Checked here so the answer is instant and local;
  *  the server checks everything again, and its answer is the one that
  *  counts. */
-export function mediaBlockedReason(file: { type: string; size: number }, limits: MediaLimits): string | null {
+export function mediaBlockedReason(
+  file: { type: string; size: number },
+  limits: Pick<MediaLimits, 'types' | 'max_bytes'>,
+): string | null {
   if (!limits.types.includes(file.type)) {
     const names = limits.types.map((t) => t.replace('image/', '').toUpperCase()).join(', ');
     return `This server takes ${names} images only.`;
@@ -270,6 +298,9 @@ export interface LoginOk {
   moderation?: ModerationCounts;
   /** Present exactly when `caps` lists `banner`. */
   banner?: BannerInfo;
+  /** Present exactly when `caps` lists `avatars`. Absent means no
+   *  pictures: offer no upload, and draw every user's icon. */
+  avatars?: AvatarLimits;
 }
 
 export interface ResumeParams {

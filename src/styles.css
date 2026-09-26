@@ -157,6 +157,16 @@ input:focus-visible, textarea:focus-visible, button:focus-visible {
   flex: none;
 }
 
+/* A user's own picture, in their icon's place and footprint. Photographs
+   are not pixel art, so these keep the browser's smoothing; `contain`
+   keeps a wide one from being squashed into the box. */
+img.avatar {
+  display: inline-block;
+  flex: none;
+  object-fit: contain;
+  vertical-align: middle;
+}
+
 /* --- shell ----------------------------------------------------------- */
 
 /* `--app-height` is the visual viewport, set by `ui/viewport.ts` where

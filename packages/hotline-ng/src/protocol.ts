@@ -179,6 +179,29 @@ export function mediaBlockedReason(file: { type: string; size: number }, limits:
   return null;
 }
 
+/** The login reply's `banner` block (hxd-ng's `docs/banner.md` §3): the
+ *  image a server shows above its client's windows. */
+export interface BannerInfo {
+  /** Where the image is. A path is on the server's own ng port and is
+   *  fetched with the session's bearer (`Connection.fetchBanner`); any
+   *  other value is an absolute URL, fetched as it is and never with
+   *  the bearer. */
+  url: string;
+  /** For a banner the server holds, its type at login. The response's
+   *  own type is the one to believe: the operator may swap the file. */
+  type?: string;
+  /** Where a click on the banner goes. Absent means nowhere. */
+  link?: string;
+}
+
+/** Is this banner the server's own, fetched with the bearer, rather than
+ *  one somewhere else? Only the one path the server serves it on counts:
+ *  anything else would be the session's credential sent where the
+ *  server's operator — or whoever wrote the config — pointed it. */
+export function bannerIsHeld(banner: BannerInfo): boolean {
+  return banner.url === '/banner';
+}
+
 export interface ServerInfo {
   name: string;
   subject: string;
@@ -245,6 +268,8 @@ export interface LoginOk {
   /** Present for a moderator, so a badge can be drawn before any
    *  `report` event arrives — the way `inbox` is for mail. */
   moderation?: ModerationCounts;
+  /** Present exactly when `caps` lists `banner`. */
+  banner?: BannerInfo;
 }
 
 export interface ResumeParams {

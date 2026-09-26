@@ -197,6 +197,31 @@ input:focus-visible, textarea:focus-visible, button:focus-visible {
 }
 .topbar > * { flex: none; }
 
+/* The server banner, under the title bar: a classic one is 468×60, and
+   none is drawn taller than that. The strip is the operator's, so it is
+   centered and otherwise left alone; `contain` scales one too wide for a
+   phone rather than cropping it. */
+.server-banner {
+  position: relative;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  flex: none;
+  padding: 0.25rem max(2rem, env(safe-area-inset-right)) 0.25rem max(2rem, env(safe-area-inset-left));
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
+}
+.server-banner[hidden] { display: none; }
+.server-banner a { display: flex; justify-content: center; max-width: 100%; }
+.server-banner img { max-height: 60px; max-width: 100%; object-fit: contain; }
+.server-banner .banner-hide {
+  position: absolute;
+  top: 0.25rem;
+  right: max(0.5rem, env(safe-area-inset-right));
+  padding: 0 0.4rem;
+  line-height: 1.4;
+}
+
 /* The less-used buttons: part of the row where there is room for them,
    at the foot of the drawer where there is not (below). */
 .topbar-extras { display: contents; }

@@ -83,6 +83,8 @@ import {
   type SelfUser,
   type ServerFrame,
   type SyncOk,
+  type BannerInfo,
+  bannerIsHeld,
   type User,
   type VideoConfig,
   type WireError,
@@ -179,6 +181,7 @@ interface Saved {
   push?: PushConfig | null;
   moderator?: boolean;
   moderation?: ModerationCounts | null;
+  banner?: BannerInfo | null;
 }
 
 const SAVED_KEY = 'hxd-ng.session';
@@ -292,6 +295,9 @@ export class Connection {
    *  does — a caller that keeps it current has it saved with the session
    *  on the next event, so a reload starts from the count it left. */
   moderation: ModerationCounts | null = null;
+  /** The server's banner, from the login reply or the saved session.
+   *  `null` means it shows none. */
+  banner: BannerInfo | null = null;
   /** Round-trip time of the last explicit `ping`, in milliseconds. */
   rtt: number | null = null;
 
@@ -326,6 +332,7 @@ export class Connection {
       this.push = saved.push ?? null;
       this.moderator = saved.moderator ?? false;
       this.moderation = saved.moderation ?? null;
+      this.banner = saved.banner ?? null;
     } else if (opts.resumeOnly) {
       throw new Error('no session to resume');
     }
@@ -451,6 +458,7 @@ export class Connection {
     this.push = ok.push ?? null;
     this.moderator = ok.self.moderator === true;
     this.moderation = ok.moderation ?? null;
+    this.banner = ok.banner ?? null;
     // Only a session that may detach is worth remembering: without the
     // permission a resume can only ever answer session_expired, and
     // storing a token we know is useless just invites a confusing
@@ -753,6 +761,25 @@ export class Connection {
    */
   async fetchMedia(id: string): Promise<Blob> {
     const res = await fetch(`${this.httpBase()}/media/${encodeURIComponent(id)}`, {
+      headers: { Authorization: this.bearer() },
+    });
+    if (!res.ok) throw await mediaFailure(res);
+    return res.blob();
+  }
+
+  // --- the server banner (hxd-ng's docs/banner.md §3) -------------------
+
+  /**
+   * Fetch the banner the server holds. Only for one it holds
+   * (`bannerIsHeld`): a banner somewhere else is the page's to load, and
+   * this session's bearer is not to go with it.
+   *
+   * As often as it is asked: the server answers `no-cache` with an ETag,
+   * so the browser's cache turns a repeat into a revalidation.
+   */
+  async fetchBanner(): Promise<Blob> {
+    if (!this.banner || !bannerIsHeld(this.banner)) throw new Error('no banner on this server');
+    const res = await fetch(`${this.httpBase()}${this.banner.url}`, {
       headers: { Authorization: this.bearer() },
     });
     if (!res.ok) throw await mediaFailure(res);
@@ -1139,6 +1166,7 @@ export class Connection {
       video: this.video,
       historyId: this.lastHistoryId,
       media: this.media,
+      banner: this.banner,
       news: this.news,
       push: this.push,
       moderator: this.moderator,

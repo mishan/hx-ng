@@ -1342,7 +1342,9 @@ export interface Events {
   /** An article became a tombstone. */
   news_deleted: { id: number; category: number };
   /** A moderator's purge deleted many articles at once: each entry
-   *  exactly as `news_deleted` would have, batched. */
+   *  exactly as `news_deleted` would have, batched. A small purge is
+   *  still told one `news_deleted` per article, and how many entries one
+   *  event carries is the server's choice. */
   news_purged: { articles: { id: number; category: number }[] };
   /** A bundle or category was created or renamed. */
   news_node: { node: NewsNode };

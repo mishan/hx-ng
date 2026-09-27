@@ -205,7 +205,8 @@ db = "server.sqlite"
     expect(await heard(alice, 'chat_purged')).toBeGreaterThan(0);
     expect(await heard(alice, 'chat_redacted')).toBe(0);
 
-    // Leave the roster as the next test expects it: no Bob.
+    // No second Bob online, or the touch-screen test's roster lookup
+    // finds two of him.
     for (const page of [mod, alice, bob]) await page.context().close();
   });
 

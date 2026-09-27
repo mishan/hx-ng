@@ -506,7 +506,7 @@ export class Store {
   /**
    * A moderator's purge blanked many public lines at once: each exactly
    * as `redact` would, in one pass over the lobby and one revision, since
-   * a purge can name a thousand lines. Ids not held, or already blank,
+   * a purge can name many lines. Ids not held, or already blank,
    * are skipped. Returns how many were blanked and the handles of the
    * images they carried.
    */

@@ -346,6 +346,41 @@ describe('a redacted line', () => {
   });
 });
 
+describe('a purge', () => {
+  const image = (id: string) => ({ id, type: 'image/png', width: 1, height: 1, bytes: 9 });
+
+  it('blanks every line it names in one revision, and hands back their images', () => {
+    const s = new Store();
+    for (let id = 1; id <= 100; id++) {
+      s.add(LOBBY, chat(id, `line ${id}`, { id, from: { uid: 5, nick: 'Bob' }, media: id % 10 ? undefined : image(`H${id}`) }));
+    }
+    const rev = s.revision;
+
+    const purged = Array.from({ length: 70 }, (_, i) => i + 11);
+    const done = s.redactAll(purged);
+    expect(done).toEqual({ blanked: 70, handles: ['H20', 'H30', 'H40', 'H50', 'H60', 'H70', 'H80'] });
+    expect(s.revision).toBe(rev + 1);
+    const lines = s.conversation(LOBBY)!.lines;
+    expect(lines.map((l) => l.id)).toEqual(Array.from({ length: 100 }, (_, i) => i + 1));
+    expect(lines.filter((l) => l.deleted).map((l) => l.id)).toEqual(purged);
+    expect(lines[19]).toMatchObject({ kind: 'deleted', from: undefined, media: { removed: true } });
+    expect(lines[19]!.media?.id).toBeUndefined();
+    expect(lines[9]).toMatchObject({ text: 'line 10', media: { id: 'H10' } });
+  });
+
+  it('skips ids it does not hold, or holds already blank, and is no revision when that is all of them', () => {
+    const s = new Store();
+    s.add(LOBBY, chat(1, 'x', { id: 1 }));
+    s.add(LOBBY, chat(2, 'y', { id: 2 }));
+    s.redact(1);
+    expect(s.redactAll([1, 2, 99])).toEqual({ blanked: 1, handles: [] });
+    const rev = s.revision;
+    expect(s.redactAll([1, 2, 99])).toEqual({ blanked: 0, handles: [] });
+    expect(s.redactAll([])).toEqual({ blanked: 0, handles: [] });
+    expect(s.revision).toBe(rev);
+  });
+});
+
 describe('small translations', () => {
   it('maps a chat style to a line kind', () => {
     expect(styleToKind('action')).toBe('action');

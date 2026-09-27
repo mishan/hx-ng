@@ -52,6 +52,29 @@ function countRequests(): void {
   };
 }
 
+/** Count the events the page hears, by name. Runs in the page. */
+function countEvents(): void {
+  const w = globalThis as any;
+  w.__heard = {};
+  const Real = w.WebSocket;
+  w.WebSocket = class extends Real {
+    constructor(...args: unknown[]) {
+      super(...args);
+      this.addEventListener('message', (m: MessageEvent) => {
+        try {
+          const ev = JSON.parse(m.data).ev;
+          if (ev) w.__heard[ev] = (w.__heard[ev] ?? 0) + 1;
+        } catch {
+          /* not text */
+        }
+      });
+    }
+  };
+}
+
+const heard = (page: Page, ev: string): Promise<number> =>
+  page.evaluate((e) => (globalThis as any).__heard[e] ?? 0, ev);
+
 const sent = (page: Page, req: string): Promise<number> =>
   page.evaluate((r) => (globalThis as any).__sent[r] ?? 0, req);
 
@@ -160,6 +183,30 @@ db = "server.sqlite"
     await mod.locator('dialog.ask').getByRole('button', { name: 'Disconnect', exact: true }).click();
     await expect(bob.locator('.line', { hasText: 'disconnected by an administrator' }).first()).toBeVisible();
     await expect(alice.locator('.person', { hasText: 'Bob' })).toHaveCount(0);
+  });
+
+  test('a purge of a flood blanks every line from one batched event', async ({ browser }) => {
+    const mod = await logIn(browser, server, 'mod');
+    const alice = await logIn(browser, server, 'alice', countEvents);
+    const bob = await logIn(browser, server, 'bob');
+
+    // More than the server tells line by line, so it is told as
+    // `chat_purged` instead.
+    const flood = 70;
+    for (let i = 1; i <= flood; i++) await say(bob, `flood ${i}`);
+    await expect(alice.locator('.transcript .line.chat', { hasText: `flood ${flood}` })).toBeVisible();
+    const before = await alice.locator('.transcript .line.deleted').count();
+
+    await say(mod, '/purge Bob 10m flooding');
+    await expect(mod.locator('.line.system', { hasText: 'Purged Bob' })).toBeVisible();
+
+    await expect(alice.locator('.transcript .line.chat', { hasText: /flood \d+/ })).toHaveCount(0);
+    await expect(alice.locator('.transcript .line.deleted')).toHaveCount(before + flood);
+    expect(await heard(alice, 'chat_purged')).toBeGreaterThan(0);
+    expect(await heard(alice, 'chat_redacted')).toBe(0);
+
+    // Leave the roster as the next test expects it: no Bob.
+    for (const page of [mod, alice, bob]) await page.context().close();
   });
 
   test('the queue is fetched once when opened, and not again when the browser tab comes back', async ({ browser }) => {

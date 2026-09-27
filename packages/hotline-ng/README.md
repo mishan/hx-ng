@@ -190,7 +190,14 @@ if (conn.moderator) {
   await conn.kick({ uid: 7, ban: 86_400, purge: 3600, reason: 'flooding' });
 }
 conn.on('chat_redacted', ({ id }) => blankLine(id));
+conn.on('chat_purged', ({ ids }) => blankLines(ids));
 ```
+
+A purge of a flood is told as `chat_purged`, many ids to an event,
+rather than one `chat_redacted` per line; a small purge still arrives
+line by line, so a client handles both. Its articles go the same way:
+`news_purged` carries many `news_deleted`s at once. Draw once per
+event, not once per id.
 
 `no_such_user` from these means nobody by that name, not nobody who can
 be messaged, so `moderationErrorText` is the wording to show for them.

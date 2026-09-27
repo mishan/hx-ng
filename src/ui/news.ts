@@ -533,14 +533,24 @@ export class NewsView {
 
   onDeleted(d: Events['news_deleted']): void {
     this.refreshFollowingIn(d.category);
+    if (this.shows(d)) this.invalidate();
+  }
+
+  /** A purge's deletions, batched: each entry as `onDeleted` takes it,
+   *  but the following list and the screen refresh once for the lot. */
+  onPurged(d: Events['news_purged']): void {
+    if (d.articles.some((a) => this.following.touches(a.category))) void this.refreshFollowing();
+    if (d.articles.some((a) => this.shows(a))) this.invalidate();
+  }
+
+  /** Whether what is on screen shows this article, or counts it. */
+  private shows(d: Events['news_deleted']): boolean {
     const s = this.screen;
-    if (
+    return (
       (s.at === 'category' && s.category.id === d.category) ||
       (s.at === 'thread' && this.articles.some((a) => a.id === d.id)) ||
       (s.at === 'tree' && this.nodes.some((n) => n.id === d.category))
-    ) {
-      this.invalidate();
-    }
+    );
   }
 
   onNode(d: Events['news_node']): void {

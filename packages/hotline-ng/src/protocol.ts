@@ -1312,6 +1312,11 @@ export interface Events {
    *  loses its words; a client blanks it where it is drawn, and
    *  `history` answers it as a tombstone from now on. */
   chat_redacted: { id: number };
+  /** A moderator's purge blanked many public lines at once: each id
+   *  exactly as `chat_redacted` would have, batched. A small purge is
+   *  still told one `chat_redacted` per line, and how many ids one event
+   *  carries is the server's choice. */
+  chat_purged: { ids: number[] };
   /** A report was filed. Moderators only. */
   report: Report;
   /** A report was closed. It reaches the reporter, with `yours` true,
@@ -1336,6 +1341,11 @@ export interface Events {
   };
   /** An article became a tombstone. */
   news_deleted: { id: number; category: number };
+  /** A moderator's purge deleted many articles at once: each entry
+   *  exactly as `news_deleted` would have, batched. A small purge is
+   *  still told one `news_deleted` per article, and how many entries one
+   *  event carries is the server's choice. */
+  news_purged: { articles: { id: number; category: number }[] };
   /** A bundle or category was created or renamed. */
   news_node: { node: NewsNode };
   news_node_deleted: { id: number };

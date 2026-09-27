@@ -128,6 +128,20 @@ describe('events', () => {
     await settle();
     expect(seen).toEqual(['one', 'two']);
   });
+
+  it('delivers a purge as its batched events', async () => {
+    const conn = await connect();
+    const lines: number[][] = [];
+    const articles: { id: number; category: number }[][] = [];
+    conn.on('chat_purged', (d) => lines.push(d.ids));
+    conn.on('news_purged', (d) => articles.push(d.articles));
+    server.event('chat_purged', { ids: [4101, 4102, 4105] });
+    server.event('news_purged', { articles: [{ id: 51, category: 3 }, { id: 52, category: 3 }] });
+    await settle();
+    expect(lines).toEqual([[4101, 4102, 4105]]);
+    expect(articles).toEqual([[{ id: 51, category: 3 }, { id: 52, category: 3 }]]);
+    expect(conn.seq).toBe(2);
+  });
 });
 
 describe('resume', () => {

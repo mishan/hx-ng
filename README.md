@@ -400,7 +400,10 @@ Typed into the composer:
   report on what an act removed. Dismissing and closing as a duplicate
   are the two closes that remove nothing, and the audit trail is the
   view's third tab. A redacted line blanks in place on every page that
-  drew it, on `chat_redacted`, and keeps its place.
+  drew it, on `chat_redacted`, and keeps its place. A purge blanks its
+  lines the same way; a large one arrives as `chat_purged`, many lines
+  to an event, and the transcript redraws once per event rather than
+  once per line.
 - **Negotiation is serialised, and inbound video is read from the
   transceivers.** Both are the difference between a picture and a black
   rectangle; `packages/hotline-ng/README.md` says why.

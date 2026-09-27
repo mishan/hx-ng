@@ -498,22 +498,50 @@ export class Store {
     const lobby = this.conversations.get(LOBBY)!;
     const line = lobby.lines.find((l) => l.id === id);
     if (!line || line.deleted) return undefined;
-    const handle = line.media?.id;
-    line.kind = 'deleted';
-    line.deleted = true;
-    line.text = 'Message deleted.';
-    line.from = undefined;
-    if (line.media) {
-      const { id: _gone, ...rest } = line.media;
-      line.media = { ...rest, removed: true };
-    }
+    const handle = blank(line);
     this.revision++;
     return { handle };
+  }
+
+  /**
+   * A moderator's purge blanked many public lines at once: each exactly
+   * as `redact` would, in one pass over the lobby and one revision, since
+   * a purge can name many lines. Ids not held, or already blank,
+   * are skipped. Returns how many were blanked and the handles of the
+   * images they carried.
+   */
+  redactAll(ids: readonly number[]): { blanked: number; handles: string[] } {
+    const wanted = new Set(ids);
+    const handles: string[] = [];
+    let blanked = 0;
+    for (const line of this.conversations.get(LOBBY)!.lines) {
+      if (line.id === undefined || line.deleted || !wanted.has(line.id)) continue;
+      const handle = blank(line);
+      if (handle) handles.push(handle);
+      blanked++;
+    }
+    if (blanked) this.revision++;
+    return { blanked, handles };
   }
 
   system(text: string, id: ConvId = this.active): Conversation | undefined {
     return this.add(id, { t: Date.now(), kind: 'system', text, local: true });
   }
+}
+
+/** Blank a line as `history` answers a redacted one, and return the
+ *  handle of the image it carried, if any. */
+function blank(line: Line): string | undefined {
+  const handle = line.media?.id;
+  line.kind = 'deleted';
+  line.deleted = true;
+  line.text = 'Message deleted.';
+  line.from = undefined;
+  if (line.media) {
+    const { id: _gone, ...rest } = line.media;
+    line.media = { ...rest, removed: true };
+  }
+  return handle;
 }
 
 /** How long a silence ends a run. Long enough that a back-and-forth

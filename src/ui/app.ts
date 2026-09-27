@@ -779,6 +779,15 @@ export class App {
       if (this.store.active === LOBBY) keepingPlace(this.transcript, () => this.renderTranscript());
     });
 
+    // A purge of a flood, told as one event for many lines rather than
+    // one per line. Blank them all, then draw once.
+    conn.on('chat_purged', (d) => {
+      const done = this.store.redactAll(d.ids);
+      if (!done.blanked) return;
+      for (const handle of done.handles) this.images.revoke(handle);
+      if (this.store.active === LOBBY) keepingPlace(this.transcript, () => this.renderTranscript());
+    });
+
     conn.on('report', (d) => this.moderation.onReport(d));
     conn.on('report_closed', (d) => {
       if (d.yours) this.say(closedForReporter(d.id, d.outcome));
@@ -817,6 +826,7 @@ export class App {
     // opened.
     conn.on('news_posted', (d) => this.news.onPosted(d));
     conn.on('news_deleted', (d) => this.news.onDeleted(d));
+    conn.on('news_purged', (d) => this.news.onPurged(d));
     conn.on('news_node', (d) => this.news.onNode(d));
     conn.on('news_node_deleted', (d) => this.news.onNodeDeleted(d));
     // This one *is* addressed to you: it goes only to the account being

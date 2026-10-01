@@ -20,7 +20,8 @@
  *  come from is the one thing a cache is told when it is made.
  */
 
-import { WireFailure, type Connection, type HistoryMedia } from '@hotline-ng/client';
+import type { Session } from '../session';
+import { WireFailure, type HistoryMedia } from '@hotline-ng/client';
 import { h } from './dom';
 
 /** Widest an inline image is drawn. Beyond this it is scaled down by
@@ -39,7 +40,7 @@ export const INERT = ['image/jpeg', 'image/png', 'image/gif'];
 
 /** Where a cache's bytes come from: a handle's canonical image, or a
  *  rejection for anything the server would not give. */
-export type MediaFetch = (conn: Connection, id: string) => Promise<Blob>;
+export type MediaFetch = (conn: Session, id: string) => Promise<Blob>;
 
 export class MediaCache {
   private urls = new Map<string, string>();
@@ -54,7 +55,7 @@ export class MediaCache {
    *  issuing an authenticated GET apiece on every redraw. Only that
    *  answer: see `gone`. */
   private missing = new Set<string>();
-  private conn: Connection | null = null;
+  private conn: Session | null = null;
   /** Bumped by anything that invalidates the maps. A fetch that started
    *  before the bump lands after it, and must not write into them: a
    *  blob URL stored after `clear()` is one nothing will ever revoke,
@@ -65,7 +66,7 @@ export class MediaCache {
   /** `fetch` defaults to the chat route, `GET /media/{id}`. */
   constructor(private fetch: MediaFetch = (conn, id) => conn.fetchMedia(id)) {}
 
-  attach(conn: Connection | null): void {
+  attach(conn: Session | null): void {
     if (conn !== this.conn) this.clear();
     this.conn = conn;
   }

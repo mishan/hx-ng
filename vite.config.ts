@@ -64,6 +64,10 @@ export default defineConfig({
       '/news': 'http://127.0.0.1:5700',
       '/.well-known': 'http://127.0.0.1:5700',
       '/ng': { target: 'ws://127.0.0.1:5700', ws: true },
+      // The classic wire through hxd-ng's own tunnel. A classic server
+      // behind a relay is reached at the relay's address, which the
+      // discovery document names, not through here.
+      '/trtp': { target: 'ws://127.0.0.1:5700', ws: true },
     },
   },
 });

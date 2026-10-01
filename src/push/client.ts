@@ -13,9 +13,9 @@
  * rather than a flag kept beside it that could disagree with it.
  */
 
+import type { Session } from '../session';
 import {
   pushSubscriptionParams,
-  type Connection,
   type PushConfig,
 } from '@hotline-ng/client';
 
@@ -92,7 +92,7 @@ export async function pushEnabled(server: string, account: string): Promise<bool
  * Ask, subscribe and register. Throws if the user says no, or if the
  * server refuses the registration.
  */
-export async function enablePush(conn: Connection, server: string, account: string): Promise<void> {
+export async function enablePush(conn: Session, server: string, account: string): Promise<void> {
   const push = conn.push;
   if (!push || !pushSupported()) throw new Error('This server does not send notifications to this browser.');
   // Asked from the click that called this: a browser that wants a user
@@ -114,7 +114,7 @@ export async function enablePush(conn: Connection, server: string, account: stri
  * that has changed its key since, gets put right. Quiet: nothing here is
  * worth interrupting a login over.
  */
-export async function refreshPush(conn: Connection, server: string, account: string): Promise<void> {
+export async function refreshPush(conn: Session, server: string, account: string): Promise<void> {
   const push = conn.push;
   if (!push || !pushSupported()) return;
   const reg = await existing(server, account);
@@ -133,7 +133,7 @@ export async function refreshPush(conn: Connection, server: string, account: str
 /** Stop notifying this device, and forget the subscription. The server
  *  is told first; if it cannot be, the subscription goes anyway, and
  *  the server drops the registration the first time its push is refused. */
-export async function disablePush(conn: Connection | null, server: string, account: string): Promise<void> {
+export async function disablePush(conn: Session | null, server: string, account: string): Promise<void> {
   if (!pushSupported()) return;
   const reg = await existing(server, account);
   let failure: unknown = null;
@@ -152,7 +152,7 @@ export async function disablePush(conn: Connection | null, server: string, accou
   if (failure) throw failure;
 }
 
-async function subscribeAndRegister(conn: Connection, push: PushConfig, reg: ServiceWorkerRegistration): Promise<void> {
+async function subscribeAndRegister(conn: Session, push: PushConfig, reg: ServiceWorkerRegistration): Promise<void> {
   const key = base64url(push.vapid);
   let sub = await reg.pushManager.getSubscription();
   // A subscription made under a key the server no longer holds (`hxd

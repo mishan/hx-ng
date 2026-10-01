@@ -26,6 +26,7 @@
  * server's plain text, and stay that.
  */
 
+import type { Session } from '../session';
 import {
   blocksText,
   errorText,
@@ -35,7 +36,6 @@ import {
   parseArticle,
   referenceSpans,
   WireFailure,
-  type Connection,
   type Events,
   type NewsArticle,
   type NewsAttachment,
@@ -123,7 +123,7 @@ const inCategory = (s: Screen): s is InCategory => s.at === 'category' || s.at =
 const SEARCH_PAGE = 20;
 
 export interface NewsHooks {
-  conn: () => Connection | null;
+  conn: () => Session | null;
   /** The account this session is, for "is this article mine". */
   me: () => string | null;
   /** Something the rail's badge is drawn from has changed. */
@@ -145,6 +145,9 @@ function describe(e: unknown): string {
 /** A time for a listing: the clock for today, the date otherwise. The
  *  full stamp is the element's title. */
 function stamp(at: number): HTMLElement {
+  // 0 is no time at all — a classic server's flat news has none, and its
+  // threaded news may not — not a moment on 1 January 1970.
+  if (!at) return h('time', { class: 'muted' });
   const d = new Date(at * 1000);
   const now = new Date();
   const label =
@@ -423,7 +426,7 @@ export class NewsView {
 
   /** Follow, unfollow, mute or unmute, then take the server's list as it
    *  now stands rather than guessing what the change did to it. */
-  private async changeFollowing(act: (conn: Connection) => Promise<unknown>): Promise<void> {
+  private async changeFollowing(act: (conn: Session) => Promise<unknown>): Promise<void> {
     const conn = this.hooks.conn();
     if (!conn || this.busy) return;
     this.busy = true;
@@ -1252,7 +1255,8 @@ export class NewsView {
             : 'Never be told about new threads here',
       });
     }
-    action('Manage', () => {
+    // A classic server's news is read here, not kept.
+    if (!this.hooks.conn()?.classic) action('Manage', () => {
       this.managing = !this.managing;
       this.naming = null;
       this.render();
@@ -1315,7 +1319,12 @@ export class NewsView {
         h(
           'span',
           { class: 'count' },
-          node.kind === 'bundle' ? plural(node.count, 'item', 'items') : plural(node.count, 'article', 'articles'),
+          // A classic server's listing does not say how much is inside.
+          this.hooks.conn()?.classic
+            ? ''
+            : node.kind === 'bundle'
+              ? plural(node.count, 'item', 'items')
+              : plural(node.count, 'article', 'articles'),
         ),
         unread ? h('span', { class: 'badge', title: 'Unread in what you follow here' }, String(unread)) : null,
       );
@@ -1502,7 +1511,8 @@ export class NewsView {
       del.onclick = () => void this.deleteArticle(a);
       actions.push(del);
     }
-    if (!a.deleted && !isOwn(a.from, this.hooks.me())) {
+    // A classic server has no reports to send one to.
+    if (!a.deleted && !isOwn(a.from, this.hooks.me()) && !this.hooks.conn()?.classic) {
       const report = h('button', {}, 'Report');
       report.onclick = () => void this.reportArticle(a);
       actions.push(report);

@@ -11,7 +11,8 @@
  *  It is decoration, so every failure is the same quiet answer: no strip.
  */
 
-import { bannerIsHeld, schemeAllowed, type Connection } from '@hotline-ng/client';
+import type { Session } from '../session';
+import { bannerIsHeld, schemeAllowed } from '@hotline-ng/client';
 
 import { h } from './dom';
 import { INERT } from './media';
@@ -24,7 +25,7 @@ export class BannerStrip {
   private generation = 0;
 
   /** Draw the banner `conn`'s server has, or nothing. */
-  show(conn: Connection): void {
+  show(conn: Session): void {
     this.clear();
     const banner = conn.banner;
     if (!banner) return;

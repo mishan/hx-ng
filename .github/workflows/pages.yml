@@ -37,8 +37,20 @@ jobs:
         with:
           node-version: 22
           cache: npm
+      # The classic wire's module is built from source, as in CI: the
+      # wasm-bindgen CLI must be the version packages/classic/Cargo.toml
+      # pins.
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: packages/classic
+      - run: cargo install wasm-bindgen-cli --version 0.2.129 --locked
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends binaryen
       - run: npm ci
       # CI has already gated what reaches main; this only builds it.
+      - run: npm run build:wasm
       - run: npx vite build
       # Where this deployment connects to, in place of the generic
       # config.json that derives a server from the page's own host,

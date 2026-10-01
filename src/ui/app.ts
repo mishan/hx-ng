@@ -11,6 +11,7 @@
  * own half of a PM is added locally and marked as such.
  */
 
+import type { Session } from '../session';
 import {
   captureBlockedReason,
   Connection,
@@ -40,6 +41,8 @@ import {
   type VideoKind,
 } from '@hotline-ng/client';
 
+import { ClassicConnection, type ClassicHooks } from '../classic/connection';
+import { route } from '../classic/route';
 import { serverFromUrl, type AppConfig } from '../config';
 import { durationWords, DURATIONS, lineReport, parseDuration, personRef } from '../moderation';
 import { notifyText } from '../news';
@@ -149,7 +152,7 @@ const PHONE = '(max-width: 44rem)';
 
 export class App {
   private store = new Store();
-  private conn: Connection | null = null;
+  private conn: Session | null = null;
   private media: VoiceSession | null = null;
   private debug: DebugPanel;
   private identityPanel: IdentityPanel;
@@ -462,7 +465,12 @@ export class App {
     // banner itself, and a resume after a reload has to draw it from the
     // session it saved.
     let loggedIn = false;
-    const conn = new Connection(creds, {
+    // A classic server, behind a relay, or the ng listener the address
+    // has always meant. The discovery document says which.
+    const way = await route(d.url);
+    const hooks: ClassicHooks = {
+      onAgreement: async (text, signal) =>
+        (await ask({ title: 'Agreement', body: text, fields: [], ok: 'Agree', signal })) !== null,
       onTrace: (e) => this.debug.push(e),
       onState: (s, detail) => this.onState(s, detail),
       onLogin: (ok) => {
@@ -554,11 +562,16 @@ export class App {
           this.pingTimer = null;
         }
       },
-    });
+    };
+    const conn: Session =
+      way.wire === 'classic'
+        ? new ClassicConnection({ ...d, url: way.url, name: way.name }, hooks)
+        : new Connection({ ...creds, url: way.url }, hooks);
     this.conn = conn;
     this.images.attach(conn);
     avatars.attach(conn);
-    this.media = new VoiceSession(conn, {
+    // Voice and video ride the ng wire; a classic server has neither here.
+    this.media = !(conn instanceof Connection) ? null : new VoiceSession(conn, {
       onLog: (text, bad) => this.say(bad ? `Media error: ${text}` : text),
       onRoom: () => {
         this.renderRoster();
@@ -587,7 +600,7 @@ export class App {
     this.connectForm = null;
     this.shell.hidden = false;
     this.url = d.url;
-    this.media.limits = conn.video;
+    if (this.media) this.media.limits = conn.video;
     // The paperclip appears only where it works: the server offers the
     // capability, or it does not and inert chrome would be a promise
     // this client cannot keep.
@@ -637,7 +650,7 @@ export class App {
   /** Offer the switch where it can work, and bring a device that already
    *  had notifications on up to date: a changed endpoint, or a server
    *  that has changed its key since. */
-  private async initPush(conn: Connection): Promise<void> {
+  private async initPush(conn: Session): Promise<void> {
     const offered = conn.push !== null && pushSupported();
     this.notifyBtn.hidden = !offered;
     if (!offered) return;
@@ -706,7 +719,7 @@ export class App {
     return e instanceof WireFailure ? errorText(e.wire) : e instanceof Error ? e.message : String(e);
   }
 
-  private bindEvents(conn: Connection): void {
+  private bindEvents(conn: Session): void {
     conn.on('user_joined', (d) => {
       this.store.put(d.user);
       this.push(LOBBY, { t: Date.now(), kind: 'notice', text: `${d.user.nick} joined.` });
@@ -1127,7 +1140,7 @@ export class App {
       case 'drop':
         // The manual version of losing your network, so resume can be
         // exercised without unplugging anything.
-        this.say('Dropping the socket; the session should resume.');
+        this.say(conn.classic ? 'Dropping the socket; a classic session ends with it.' : 'Dropping the socket; the session should resume.');
         conn.drop();
         return;
       case 'clear': {
@@ -1148,9 +1161,11 @@ export class App {
         return;
       case 'help':
         return this.say(
-          '/me · /msg <nick or account> <text> · /history · /mail · /news · /files · /block <who> · /unblock <who> · /blocks · ' +
-            '/report <who> [reason] · ' +
-            (conn.moderator || this.store.self?.admin ? '/kick <nick> [reason] · /ban <nick> <length> [reason] · ' : '') +
+          (conn.classic
+            ? '/me · /msg <nick> <text> · /news · /files · '
+            : '/me · /msg <nick or account> <text> · /history · /mail · /news · /files · /block <who> · /unblock <who> · /blocks · ' +
+              '/report <who> [reason] · ') +
+            (!conn.classic && (conn.moderator || this.store.self?.admin) ? '/kick <nick> [reason] · /ban <nick> <length> [reason] · ' : '') +
             (conn.moderator ? '/purge <who> [length] [reason] · /reports · ' : '') +
             '/nick <name> · /icon <n> · /clear · /close · /drop · /debug · /logout',
         );
@@ -1411,10 +1426,12 @@ export class App {
     // The kick is the kick bit's, which the roster does not show this
     // client about itself; an administrator or a moderator is offered
     // it, and the server has the last word.
-    const mayKick = conn.moderator || this.store.self?.admin === true;
+    // Not on a classic server, which has no reports and whose kick this
+    // client does not send yet.
+    const mayKick = !conn.classic && (conn.moderator || this.store.self?.admin === true);
     const choice = await choose(u.nick, [
       ['message', 'Send a private message'],
-      ['report', 'Report to the moderators…'],
+      ...(conn.classic ? [] : [['report', 'Report to the moderators…'] as ['report', string]]),
       ...(mayKick ? [['kick', 'Disconnect…', true] as ['kick', string, boolean]] : []),
       ...(conn.moderator ? [['purge', 'Purge recent output…', true] as ['purge', string, boolean]] : []),
     ]);
@@ -1881,7 +1898,6 @@ export class App {
   }
 
   private renderRoster(): void {
-    if (!this.media) return;
     renderRoster(this.rosterEl, this.store, this.media, {
       onMessage: (u) => {
         this.select(this.store.openPm({ uid: u.uid, nick: u.nick }).id);

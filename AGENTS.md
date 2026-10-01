@@ -10,15 +10,25 @@
 
 A browser client for the **Hotline-ng** wire: chat, the user list, private
 messages, threaded news, voice and video. Static files, no server-side anything, no
-runtime dependencies. It never speaks the legacy wire, and a server cannot
-tell it apart from any other ng client.
+runtime dependencies. An ng server cannot tell it apart from any other ng
+client.
 
-Two halves, and the split is load-bearing:
+It reaches classic servers too, through a relay (`hlrelay`) whose
+WebSocket carries the classic wire byte for byte. That protocol is not
+written here: it is hx-libs' `hxsession`, GtkHx's own logic, compiled to
+wasm — first-party code, built from source, not an npm dependency. What
+ships in the module does include its Rust crates' dependencies (serde,
+wasm-bindgen), the one exception to "no runtime dependencies", and an
+argued one: the alternative is a second implementation of the classic
+wire.
+
+Three parts, and the splits are load-bearing:
 
 | | |
 |---|---|
 | `packages/hotline-ng` | `@hotline-ng/client` — the reusable library: the wire protocol, the CBOR codec, the identity objects, voice. Knows nothing about the DOM. Published, so its exported surface is an API. |
 | `src/` | This client's UI: the app shell, the roster, the transcript, the identity panel. Imports the library by name; the Vite alias points that at the workspace source so a change there needs no build step. |
+| `packages/classic` | The classic wire: a small Rust crate over hx-libs' `hxsession`, pinned to a revision like every hx-libs consumer, built to wasm in `pkg/` (not committed) by `npm run build:wasm`. `src/classic/` drives it and presents a classic server to the views as a `Session` (`src/session.ts`), the part of `Connection` they use — which keeps the library's surface the library's. |
 
 The reference server is [hxd-ng](https://github.com/mishan/hxd-ng), a
 sibling checkout at `../hxd-ng`. Neither repo depends on the other, but
@@ -37,6 +47,7 @@ anything in `Connection`'s exported surface.
 
 ```sh
 npm install
+npm run build:wasm   # also run first by dev, test and typecheck; needs Rust (README, "Running it")
 npm run dev          # :5701, bound to every interface so a phone on the LAN can reach it
 npm run typecheck
 npm test             # vitest

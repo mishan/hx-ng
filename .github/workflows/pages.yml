@@ -47,7 +47,16 @@ jobs:
         with:
           workspaces: packages/classic
       - run: cargo install wasm-bindgen-cli --version 0.2.129 --locked
-      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends binaryen
+      # wasm-opt, from a pinned binaryen release: Ubuntu's apt one is too
+      # old to read what a current Rust emits.
+      - name: binaryen
+        run: |
+          v=version_131
+          url=https://github.com/WebAssembly/binaryen/releases/download/$v/binaryen-$v-x86_64-linux.tar.gz
+          curl -fsSL -o "$RUNNER_TEMP/binaryen.tar.gz" "$url"
+          curl -fsSL "$url.sha256" | awk -v f="$RUNNER_TEMP/binaryen.tar.gz" '{print $1"  "f}' | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/binaryen.tar.gz" -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/binaryen-$v/bin" >> "$GITHUB_PATH"
       - run: npm ci
       # CI has already gated what reaches main; this only builds it.
       - run: npm run build:wasm

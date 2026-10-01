@@ -32,7 +32,9 @@ cargo install wasm-bindgen-cli --version 0.2.129 --locked   # the version packag
 ```
 
 `wasm-opt` (binaryen) is used when it is installed, and makes the module
-smaller; nothing else changes without it.
+smaller; nothing else changes without it. It has to be recent enough to
+read what a current Rust emits — version 131 does, and Ubuntu's packaged
+one does not.
 
 That wants a server to talk to. Against
 [hxd-ng](https://github.com/mishan/hxd-ng) on the same machine, with an

@@ -51,7 +51,13 @@ run('cargo', ['build', '--release', '--target', 'wasm32-unknown-unknown', '--loc
 run('wasm-bindgen', ['--target', 'web', '--out-dir', pkg, '--out-name', 'hxclassic', wasm]);
 const out = join(pkg, 'hxclassic_bg.wasm');
 if (have('wasm-opt')) {
-  run('wasm-opt', ['-Os', '--enable-bulk-memory', '--enable-nontrapping-float-to-int', out, '-o', out]);
+  try {
+    run('wasm-opt', ['-Os', '--enable-bulk-memory', '--enable-nontrapping-float-to-int', out, '-o', out]);
+  } catch {
+    // An old binaryen cannot read what a current Rust emits.
+    console.error('wasm-opt failed; binaryen may be too old for this Rust (version 131 or later works).');
+    process.exit(1);
+  }
 } else {
   console.warn('wasm-opt (binaryen) is not installed; the module is larger than it need be.');
 }

@@ -24,8 +24,11 @@ jobs:
       # typecheck, test and the build all need. The wasm-bindgen CLI must
       # be the version packages/classic/Cargo.toml pins; rust-cache keeps
       # the installed binary between runs.
-      - uses: dtolnay/rust-toolchain@stable
+      # Pinned with wasm-bindgen and binaryen: a newer Rust can emit wasm
+      # features the pinned wasm-opt does not read yet.
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: 1.96.1
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
         with:
@@ -38,7 +41,9 @@ jobs:
           v=version_131
           url=https://github.com/WebAssembly/binaryen/releases/download/$v/binaryen-$v-x86_64-linux.tar.gz
           curl -fsSL -o "$RUNNER_TEMP/binaryen.tar.gz" "$url"
-          curl -fsSL "$url.sha256" | awk -v f="$RUNNER_TEMP/binaryen.tar.gz" '{print $1"  "f}' | sha256sum -c -
+          # The hash is pinned here rather than fetched beside the tarball,
+          # so it guards against a changed release, not just a bad download.
+          echo "b5bf1f0eaf17c63ee588ff7a5954dc8f6ce2c26989051c66f24dfe9ece3e46db  $RUNNER_TEMP/binaryen.tar.gz" | sha256sum -c -
           tar -xzf "$RUNNER_TEMP/binaryen.tar.gz" -C "$RUNNER_TEMP"
           echo "$RUNNER_TEMP/binaryen-$v/bin" >> "$GITHUB_PATH"
       - run: npm ci

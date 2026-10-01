@@ -14,25 +14,37 @@
  * behind a relay, reached through its `/trtp`.
  */
 
-export type Route = { wire: 'ng'; url: string } | { wire: 'classic'; url: string; name: string };
+export type Route =
+  | { wire: 'ng'; url: string }
+  | {
+      wire: 'classic';
+      url: string;
+      name: string;
+      /** Found on the host's web port rather than beside the classic one,
+       *  so it may front a different Hotline server on that host from the
+       *  one the address names: the document does not say which. */
+      shared: boolean;
+    };
 
 /** How long one probe may take. A firewall that drops rather than refuses
  *  would otherwise hold the form for as long as the browser lets it. */
 const PROBE_MS = 3000;
 
+/** The same, for an ng address, which is the ng listener unless its host
+ *  says otherwise: every ng connect and resume waits on it, and a host
+ *  with something to say says it quickly. */
+const NG_PROBE_MS = 1000;
+
 /** The classic port when an address names none. */
 const CLASSIC_PORT = 5500;
 
-interface Doc {
-  name?: string;
-  ng?: { ws?: string; trtp?: string };
-}
-
-async function discover(base: string): Promise<{ doc: Doc; at: string }> {
+async function discover(base: string, ms = PROBE_MS): Promise<{ doc: unknown; at: string }> {
   const at = new URL('/.well-known/hotline', base).href;
-  const res = await fetch(at, { cache: 'no-cache', signal: AbortSignal.timeout(PROBE_MS) });
+  // Not followed: a redirect could lead anywhere, the classic port among
+  // the places, and a relay has no reason to send one.
+  const res = await fetch(at, { cache: 'no-cache', redirect: 'error', signal: AbortSignal.timeout(ms) });
   if (!res.ok) throw new Error(`discovery: HTTP ${res.status}`);
-  return { doc: (await res.json()) as Doc, at };
+  return { doc: await res.json(), at };
 }
 
 /** A path in a discovery document, as the WebSocket URL it names. */
@@ -43,10 +55,25 @@ function socketUrl(ref: string, at: string): string {
   return u.href;
 }
 
-function fromDoc(doc: Doc, at: string): Route | null {
-  if (doc.ng?.ws) return { wire: 'ng', url: socketUrl(doc.ng.ws, at) };
-  if (doc.ng?.trtp) return { wire: 'classic', url: socketUrl(doc.ng.trtp, at), name: doc.name ?? '' };
-  return null;
+function str(v: unknown): string | undefined {
+  return typeof v === 'string' && v ? v : undefined;
+}
+
+/** What a discovery document says, or `null` for one that says nothing
+ *  this client can use — whatever shape it came in. */
+function fromDoc(doc: unknown, at: string, shared: boolean): Route | null {
+  if (typeof doc !== 'object' || doc === null) return null;
+  const d = doc as Record<string, unknown>;
+  const ng = typeof d.ng === 'object' && d.ng !== null ? (d.ng as Record<string, unknown>) : {};
+  const ws = str(ng.ws);
+  if (ws) return { wire: 'ng', url: socketUrl(ws, at) };
+  const trtp = str(ng.trtp);
+  if (!trtp) return null;
+  const url = socketUrl(trtp, at);
+  // A relay's socket is beside its document. One elsewhere — another
+  // port of the host, the classic port among them — is not followed.
+  if (new URL(url).host !== new URL(at).host) return null;
+  return { wire: 'classic', url, name: str(d.name) ?? '', shared };
 }
 
 /** `hotline://host:port` or `host:port`, as a host — an IPv6 one in
@@ -60,14 +87,51 @@ export function classicAddress(address: string): { host: string; port: number } 
   else return null;
   // Whatever follows the authority — a path to a file, in a hotline://
   // link — says nothing about where the server is.
-  const authority = rest.split(/[/?#]/, 1)[0] ?? '';
+  let authority = rest.split(/[/?#]/, 1)[0] ?? '';
+  // A login and password before the host are the link's, not the host's.
+  authority = authority.slice(authority.lastIndexOf('@') + 1);
+  // The port is read here rather than by URL, which drops one that is a
+  // scheme's default: `host:80` names port 80, not the classic default.
+  const m = /^(\[[^\]]*\]|[^:@[\]]+)(?::(\d{1,5}))?$/.exec(authority);
+  if (!m) return null;
+  const port = m[2] === undefined ? CLASSIC_PORT : Number(m[2]);
+  if (port < 1 || port > 65535) return null;
   try {
-    const u = new URL(`http://${authority}`);
+    const u = new URL(`http://${m[1]}`);
     if (!u.hostname) return null;
-    return { host: u.hostname, port: u.port ? Number(u.port) : CLASSIC_PORT };
+    return { host: u.hostname, port };
   } catch {
     return null;
   }
+}
+
+/** Where a relay for `classic` may be, best first: the classic port plus
+ *  200, then the host's default port (443, or 80 for the plain-http tries
+ *  a page not on https may make).
+ *
+ *  Never the classic port itself, nor its transfer port beside it: an
+ *  HTTP request there is a client that does not speak Hotline, and Janus
+ *  bans the address that sent it for a day. A server on 443 or 80 has no
+ *  default-port candidate for that reason. */
+export function candidates(classic: { host: string; port: number }): { base: string; shared: boolean }[] {
+  // An IPv6 host keeps the brackets a URL's host has.
+  const host = classic.host;
+  const schemes: [string, number][] =
+    typeof location !== 'undefined' && location.protocol === 'http:'
+      ? [
+          ['https', 443],
+          ['http', 80],
+        ]
+      : [['https', 443]];
+  const out: { base: string; shared: boolean; port: number }[] = [];
+  const beside = classic.port + 200;
+  if (beside <= 65535) {
+    for (const [s] of schemes) out.push({ base: `${s}://${host}:${beside}`, shared: false, port: beside });
+  }
+  for (const [s, port] of schemes) out.push({ base: `${s}://${host}`, shared: true, port });
+  return out
+    .filter((c) => c.port !== classic.port && c.port !== classic.port + 1)
+    .map(({ base, shared }) => ({ base, shared }));
 }
 
 /**
@@ -81,8 +145,8 @@ export async function route(address: string): Promise<Route> {
     const ws = new URL(address);
     const base = `${ws.protocol === 'wss:' ? 'https:' : 'http:'}//${ws.host}`;
     try {
-      const { doc, at } = await discover(base);
-      const r = fromDoc(doc, at);
+      const { doc, at } = await discover(base, NG_PROBE_MS);
+      const r = fromDoc(doc, at, false);
       // An ng document names its own socket, but the address the form
       // was given is the one the user meant; only a classic one changes
       // where this goes.
@@ -93,24 +157,11 @@ export async function route(address: string): Promise<Route> {
     return { wire: 'ng', url: address };
   }
 
-  // An IPv6 host keeps the brackets a URL's host has.
-  const host = classic.host;
-  const schemes = typeof location !== 'undefined' && location.protocol === 'http:' ? ['https', 'http'] : ['https'];
-  // In order of preference, port before scheme: the classic port plus
-  // 200, then the host's default port (443, or 80 for the plain-http
-  // tries a page not on https may make), which may front a different
-  // Hotline server from the one at that port.
-  //
-  // Never the classic port itself: an HTTP request there is a client
-  // that does not speak Hotline, and Janus bans the address that sent it
-  // for a day.
-  const ports = [`:${classic.port + 200}`, ''];
-  const candidates = ports.flatMap((p) => schemes.map((s) => `${s}://${host}${p}`));
-  // Every candidate at once, and the best answer taken as soon as it
-  // is known: a candidate that hangs holds up only the ones it outranks.
-  const answers = candidates.map((c) =>
-    discover(c).then(
-      (a) => fromDoc(a.doc, a.at),
+  // Every candidate at once, and the best answer taken as soon as it is
+  // known: a candidate that hangs holds up only the ones it outranks.
+  const answers = candidates(classic).map((c) =>
+    discover(c.base).then(
+      (a) => fromDoc(a.doc, a.at, c.shared),
       () => null,
     ),
   );

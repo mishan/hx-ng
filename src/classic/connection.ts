@@ -46,6 +46,7 @@ import type { Session } from '../session';
 import {
   ClassicConfig,
   ClassicSession,
+  classicFailed,
   isRefusal,
   loadClassic,
   macDate,
@@ -84,6 +85,9 @@ function unavailable(what: string): WireFailure {
 /** How long a request may go unanswered. A classic server ignores an
  *  opcode it does not know rather than refusing it. */
 const REQUEST_MS = 20_000;
+
+/** How many of a thread's articles are asked for at once. */
+const THREAD_FETCHES = 4;
 
 /** How long after the login a server has to send its user list, which
  *  is what the login waits on. */
@@ -240,6 +244,11 @@ export class ClassicConnection implements Session {
     }
     ws.binaryType = 'arraybuffer';
     this.ws = ws;
+    // The login's deadline runs from now, not from the socket opening: a
+    // relay that never answers would otherwise hold "Connecting…" for as
+    // long as the browser gives a connect. Only the timer — a pump now
+    // would take the magic before there is an open socket to send it on.
+    this.arm(s);
     const started = new Promise<void>((resolve, reject) => (this.starting = { resolve, reject }));
     ws.onopen = () => this.pump();
     ws.onmessage = (m) => {
@@ -280,6 +289,7 @@ export class ClassicConnection implements Session {
       return f();
     } catch (e) {
       if (isRefusal(e)) throw e;
+      classicFailed();
       this.closed(`The classic session failed: ${e instanceof Error ? e.message : String(e)}`, false);
       return undefined;
     }
@@ -303,6 +313,11 @@ export class ClassicConnection implements Session {
       this.onEvent(e);
       if (this.s !== s) return;
     }
+    this.arm(s);
+  }
+
+  /** Set the timer for when the session next needs the clock. */
+  private arm(s: ClassicSession): void {
     if (this.timer !== null) clearTimeout(this.timer);
     this.timer = null;
     const due = this.guard(() => s.nextDeadline());
@@ -402,10 +417,10 @@ export class ClassicConnection implements Session {
           // Something else sent while logging in — the agree, the name —
           // refused before there is a session to say so in.
           if (e.reason) this.early.push(e.reason);
-        } else if (e.reason) {
+        } else {
           // Chat and messages are not answered when they work, so a
-          // refusal of one is the only word about it.
-          this.emit('notice', { text: e.reason });
+          // refusal of one is the only word about it, reason or none.
+          this.emit('notice', { text: e.reason ?? 'The server refused something this client sent.' });
         }
         return;
       }
@@ -431,6 +446,9 @@ export class ClassicConnection implements Session {
     let agreed: boolean;
     try {
       agreed = this.hooks.onAgreement ? await this.hooks.onAgreement(text, this.asking.signal) : true;
+    } catch {
+      // A view that could not ask has not been agreed with.
+      agreed = false;
     } finally {
       this.agreementOpen = false;
     }
@@ -455,10 +473,7 @@ export class ClassicConnection implements Session {
     if (this.rosterTimer !== null) clearTimeout(this.rosterTimer);
     this.rosterTimer = null;
     const users = [...this.roster.values()];
-    const me =
-      (this.selfUid !== null && this.roster.get(this.selfUid)) ||
-      users.find((u) => u.nick === this.creds.nick) ||
-      null;
+    const me = (this.selfUid !== null && this.roster.get(this.selfUid)) || this.byNick(users) || null;
     this.selfUid = me?.uid ?? this.selfUid;
     const self = me ? selfOf(me) : this.placeholderSelf();
     this.self = self;
@@ -491,11 +506,22 @@ export class ClassicConnection implements Session {
   private snapshot(): void {
     const users = [...this.roster.values()];
     if (!this.selfUid || !this.roster.has(this.selfUid)) {
-      this.selfUid = users.find((u) => u.nick === this.creds.nick)?.uid ?? this.selfUid;
+      this.selfUid = this.byNick(users)?.uid ?? this.selfUid;
     }
     const me = this.selfUid !== null ? this.roster.get(this.selfUid) : undefined;
     if (me) this.self = selfOf(me);
     this.hooks.onSnapshot?.({ self: this.self ?? this.placeholderSelf(), users, server: { name: this.serverName, subject: '' } });
+  }
+
+  /** Who we are, when the server has not said our uid: one of the users
+   *  with our name, and our icon if any of them has it. Of several — two
+   *  guests are common on a classic server — the newest, since servers
+   *  number users as they arrive and we have only just. */
+  private byNick(users: User[]): User | undefined {
+    const named = users.filter((u) => u.nick === this.creds.nick);
+    const iconed = named.filter((u) => u.icon === this.creds.icon);
+    const pool = iconed.length ? iconed : named;
+    return pool.reduce<User | undefined>((a, u) => (!a || u.uid > a.uid ? u : a), undefined);
   }
 
   private placeholderSelf(): SelfUser {
@@ -576,12 +602,35 @@ export class ClassicConnection implements Session {
    * came, as a notice. One notice does come with a uid: mhxd's and
    * hxd-ng's ` *** alice was kicked for chat spamming` names the spammer,
    * and is drawn as alice's emote — which reads the same.
+   *
+   * Only the first line decides who is speaking, or that the server is.
+   * A server that passes a user's own line breaks through unprefixed
+   * would otherwise let them write ` *** Server: …` or `bob:  …` on a
+   * line of their own and be shown as the server or as bob; later lines
+   * that look like either carry on as the first speaker's words, and only
+   * the first speaker's name is taken off them.
    */
   private chatLines(uid: number, text: string): void {
     const at = Math.floor(Date.now() / 1000);
     let last: Sender | null = null;
+    let first = true;
     for (const line of text.split('\n')) {
       if (!line.trim()) continue;
+      if (!first) {
+        const speaker: Sender = last ?? this.sender(uid, '');
+        const said = /^\s*(?:\[\d{1,2}:\d{2}\]\s+)?(.+?):\s\s([\s\S]*)$/.exec(line);
+        const shown = said?.[1]!.trim() ?? '';
+        // mhxd cuts a name to thirteen characters in the line it formats.
+        const own = said && (shown === speaker.nick || (shown.length >= 13 && speaker.nick.startsWith(shown)));
+        if (last || uid) {
+          last = speaker;
+          this.emit('chat', { from: speaker, text: own ? said[2]! : line.trim(), style: 'normal', at });
+        } else {
+          this.emit('notice', { text: line.trim() });
+        }
+        continue;
+      }
+      first = false;
       const emote = /^\s?\*\*\*\s([\s\S]*)$/.exec(line);
       if (emote) {
         const rest = emote[1]!;
@@ -688,7 +737,11 @@ export class ClassicConnection implements Session {
     }
     if (req === 'nick') {
       const me = this.self;
-      this.tell((s) => s.setNick(p.nick ?? me?.nick ?? this.creds.nick, p.icon ?? me?.icon ?? this.creds.icon));
+      const nick = p.nick ?? me?.nick ?? this.creds.nick;
+      const icon = p.icon ?? me?.icon ?? this.creds.icon;
+      // What we are called now, for telling ourselves from others later.
+      this.creds = { ...this.creds, nick, icon };
+      this.tell((s) => s.setNick(nick, icon));
       return {} as T;
     }
     throw unavailable(`the “${req}” request`);
@@ -820,21 +873,23 @@ export class ClassicConnection implements Session {
       () => {},
     );
     const [flatDone] = await Promise.allSettled([flat]);
+    let grace: ReturnType<typeof setTimeout> | undefined;
     const graced =
       root && flatDone.status === 'fulfilled' && this.threaded === null
         ? Promise.race([
             listing,
-            new Promise<never>((_, reject) =>
-              setTimeout(() => {
+            new Promise<never>((_, reject) => {
+              grace = setTimeout(() => {
                 // Not asked again unless it answers after all, which
-                // marks it answered.
-                this.threaded = false;
+                // marks it answered; an answer already in stands.
+                if (this.threaded === null) this.threaded = false;
                 reject(new Error('threaded news is slow'));
-              }, LISTING_GRACE_MS),
-            ),
+              }, LISTING_GRACE_MS);
+            }),
           ])
         : listing;
     const [listingDone] = await Promise.allSettled([graced]);
+    clearTimeout(grace);
     const nodes: NewsNode[] = [];
     if (listingDone.status === 'fulfilled') {
       for (const item of listingDone.value.items) {
@@ -977,7 +1032,17 @@ export class ClassicConnection implements Session {
       for (const c of children.get(id) ?? []) walk(c);
     };
     walk(params.root);
-    const bodies = await Promise.all(order.map((id) => this.body(id)));
+    // A few at a time: a long thread asked for all at once is a burst a
+    // server with a flood limit takes for an attack.
+    const bodies: string[] = new Array<string>(order.length);
+    let next = 0;
+    const worker = async (): Promise<void> => {
+      while (next < order.length) {
+        const i = next++;
+        bodies[i] = await this.body(order[i]!);
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(THREAD_FETCHES, order.length) }, worker));
     return { articles: order.map((id, i) => this.article(id, bodies[i]!)), has_more: false, snapshot: 0 };
   }
 

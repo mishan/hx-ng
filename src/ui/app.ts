@@ -468,6 +468,22 @@ export class App {
     // A classic server, behind a relay, or the ng listener the address
     // has always meant. The discovery document says which.
     const way = await route(d.url);
+    // A relay found on the host's web port may front another server on
+    // that host than the one the address names, and the document does not
+    // say which: an account's password goes there only once the user has
+    // seen whose it is.
+    if (way.wire === 'classic' && way.shared && d.login.trim()) {
+      const named = way.name ? `“${way.name}”` : 'a Hotline server it does not name';
+      const yes = await ask({
+        title: 'Log in here?',
+        body:
+          `No relay answered beside ${d.url}. The one on the host's web port leads to ${named}, ` +
+          `which may be another server on that host. Send the login for ${d.login.trim()} there?`,
+        fields: [],
+        ok: 'Log in',
+      });
+      if (yes === null) throw new Error('Not connected: the relay found may front a different server.');
+    }
     const hooks: ClassicHooks = {
       onAgreement: async (text, signal) =>
         (await ask({ title: 'Agreement', body: text, fields: [], ok: 'Agree', signal })) !== null,

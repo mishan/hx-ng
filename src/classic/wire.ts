@@ -14,10 +14,22 @@ import init, { ClassicConfig, ClassicSession } from '../../packages/classic/pkg/
 export { ClassicConfig, ClassicSession };
 
 let ready: Promise<unknown> | null = null;
+let failed = false;
+
+/** The module trapped. Its memory — the allocator, the stack pointer, a
+ *  borrow left held — may be part way through a change it will never
+ *  finish, so no session runs in it again; and wasm-bindgen keeps the one
+ *  instance it made, so only a reload makes another. */
+export function classicFailed(): void {
+  failed = true;
+}
 
 /** Load the module once. `source` is for a caller with no fetch to an
  *  asset URL — a test in Node hands over the bytes. */
 export function loadClassic(source?: BufferSource): Promise<unknown> {
+  if (failed) {
+    return Promise.reject(new Error('The classic wire failed earlier; reload the page to reach classic servers again.'));
+  }
   ready ??= (source ? init({ module_or_path: source }) : init()).catch((e: unknown) => {
     // A fetch that failed is tried again on the next connect, not
     // remembered as failing until a reload.

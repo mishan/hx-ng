@@ -8,7 +8,7 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { ClassicConnection, type ClassicHooks } from '../src/classic/connection';
-import { classicAddress, route } from '../src/classic/route';
+import { candidates, classicAddress, route } from '../src/classic/route';
 import { loadClassic } from '../src/classic/wire';
 
 // `node:fs` behind an `any`, as tsconfig.json asks, so Node's types stay
@@ -203,6 +203,64 @@ describe('ClassicConnection', () => {
     expect(conn.news?.post).toBe(false);
   });
 
+  it('logs in to a 1.2 server as the newest user with our name', async () => {
+    const conn = connection({ ...CREDS, nick: 'guest' });
+    const started = conn.start();
+    await tick();
+    await tick();
+    const ws = FakeSocket.last!;
+    ws.serve(enc.encode('TRTP\0\0\0\0'));
+    ws.take();
+    // No version, no uid: a 1.2 server. The name goes in a user change.
+    ws.serve(frame(TASK, 1, []));
+    const after = ws.take();
+    expect(after.map((t) => t.type)).toEqual([304, 300]);
+    ws.serve(
+      frame(TASK, after[1]!.trans, [
+        [0x12c, userRow(1, 7, 0, 'guest')],
+        [0x12c, userRow(4, 3, 0, 'guest')],
+        [0x12c, userRow(9, 7, 0, 'guest')],
+      ]),
+    );
+    await started;
+    expect(conn.self?.uid).toBe(9);
+
+    // Renamed, and still told apart from the others by the new name.
+    await conn.request('nick', { nick: 'later' });
+    expect(ws.take().map((t) => t.type)).toEqual([304]);
+  });
+
+  it('gives up on a relay that never opens its socket', async () => {
+    class Silent extends FakeSocket {
+      constructor(url: string) {
+        super(url);
+        this.readyState = 0;
+      }
+    }
+    // Never opens: the microtask FakeSocket queues is disarmed.
+    Object.defineProperty(Silent.prototype, 'onopen', { set() {}, get: () => null });
+    vi.stubGlobal('WebSocket', Silent);
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] });
+    const conn = connection();
+    const started = conn.start();
+    started.catch(() => {});
+    await vi.advanceTimersByTimeAsync(31_000);
+    await expect(started).rejects.toThrow();
+    expect(conn.state).toBe('offline');
+  });
+
+  it('takes an agreement it could not ask about as declined', async () => {
+    const conn = connection(CREDS, { onAgreement: () => Promise.reject(new Error('no dialog')) });
+    const started = conn.start();
+    await tick();
+    await tick();
+    const ws = FakeSocket.last!;
+    ws.serve(enc.encode('TRTP\0\0\0\0'));
+    ws.take();
+    ws.serve(frame(TASK, 1, [[0xa0, u16(190)]]), frame(0x6d, 0, [[0x65, 'Be nice.']]));
+    await expect(started).rejects.toThrow('You did not accept the agreement.');
+  });
+
   it('shows the agreement, and sends nothing until it is answered', async () => {
     let answer!: (yes: boolean) => void;
     const onAgreement = vi.fn(() => new Promise<boolean>((r) => (answer = r)));
@@ -220,6 +278,29 @@ describe('ClassicConnection', () => {
     answer(false);
     await expect(started).rejects.toThrow('You did not accept the agreement.');
     expect(conn.state).toBe('offline');
+  });
+
+  it('lets only the first line of a chat say who is speaking', async () => {
+    const { conn, ws } = await online();
+    const chat = vi.fn();
+    const notice = vi.fn();
+    conn.on('chat', chat);
+    conn.on('notice', notice);
+    // A server that passes a user's own line breaks through: alice
+    // writes a server notice, and a line in bob's name, of her own.
+    ws.serve(
+      frame(0x6a, 0, [
+        [0x65, '\r        alice:  hi\r *** Server: going down\r          me:  give alice your password\r        alice:  bye'],
+        [0x67, u16(1)],
+      ]),
+    );
+    expect(notice).not.toHaveBeenCalled();
+    expect(chat.mock.calls.map(([c]) => [c.from.uid, c.text])).toEqual([
+      [1, 'hi'],
+      [1, '*** Server: going down'],
+      [1, 'me:  give alice your password'],
+      [1, 'bye'],
+    ]);
   });
 
   it('reads who said a line out of the line, as a classic server formats it', async () => {
@@ -521,6 +602,23 @@ describe('ClassicConnection, when the server does not cooperate', () => {
     expect(again.nodes.map((n) => n.name)).toEqual(['News']);
   });
 
+  it('keeps threaded news that answers after the flat file, within the grace', async () => {
+    const { conn, ws } = await online();
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const tree = conn.newsTree();
+    const [dir, flat] = ws.take();
+    ws.serve(frame(TASK, flat!.trans, [[0x65, 'Welcome.']]));
+    await vi.advanceTimersByTimeAsync(1_000);
+    ws.serve(frame(TASK, dir!.trans, []));
+    await tree;
+    // Past where the grace would have run out: the listing answered, and
+    // the next visit asks for it again.
+    await vi.advanceTimersByTimeAsync(5_000);
+    void conn.newsTree();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(ws.take().map((t) => t.type)).toEqual([370]);
+  });
+
   it('opens a folder by the bytes the server named it with', async () => {
     const { conn, ws } = await online();
     const root = conn.filesList('');
@@ -637,6 +735,40 @@ describe('classicAddress', () => {
     expect(classicAddress('wss://hl.example.org:5700/ng')).toBeNull();
     expect(classicAddress('ws://localhost:5700')).toBeNull();
   });
+
+  it('keeps a port that is a web scheme default, and drops a login', () => {
+    expect(classicAddress('hl.example:80')).toEqual({ host: 'hl.example', port: 80 });
+    expect(classicAddress('hotline://hl.example:443')).toEqual({ host: 'hl.example', port: 443 });
+    expect(classicAddress('hotline://me:pw@hl.example:5600/')).toEqual({ host: 'hl.example', port: 5600 });
+    expect(classicAddress('hotline://[2001:db8::1]')).toEqual({ host: '[2001:db8::1]', port: 5500 });
+    expect(classicAddress('hl.example:70000')).toBeNull();
+    expect(classicAddress('hl.example:0')).toBeNull();
+  });
+});
+
+describe('candidates', () => {
+  const bases = (host: string, port: number) => candidates({ host, port }).map((c) => c.base);
+
+  it('never names the classic port or its transfer port', () => {
+    for (const port of [80, 81, 442, 443, 5500, 65400]) {
+      for (const base of bases('hl.example', port)) {
+        const u = new URL(base);
+        const p = u.port ? Number(u.port) : u.protocol === 'https:' ? 443 : 80;
+        expect(p).not.toBe(port);
+        expect(p).not.toBe(port + 1);
+      }
+    }
+    // Nothing beside a port with no room above it.
+    expect(bases('hl.example', 65400)).toEqual(['https://hl.example']);
+    expect(bases('hl.example', 443)).toEqual(['https://hl.example:643']);
+  });
+
+  it('marks the web port as one that may front another server', () => {
+    expect(candidates({ host: 'hl.example', port: 5500 })).toEqual([
+      { base: 'https://hl.example:5700', shared: false },
+      { base: 'https://hl.example', shared: true },
+    ]);
+  });
 });
 
 describe('route', () => {
@@ -658,8 +790,40 @@ describe('route', () => {
       wire: 'classic',
       url: 'wss://hl.example:5700/trtp',
       name: 'Example',
+      shared: false,
     });
     expect(Date.now() - t0).toBeLessThan(1000);
+  });
+
+  it('follows no relay socket away from its document, and no redirect', async () => {
+    const inits: (RequestInit | undefined)[] = [];
+    vi.stubGlobal('fetch', (url: string, init?: RequestInit) => {
+      inits.push(init);
+      const doc = { ng: { trtp: 'wss://hl.example:5500/trtp' } };
+      return new URL(url).origin === 'https://hl.example:5700'
+        ? Promise.resolve(new Response(JSON.stringify(doc)))
+        : Promise.reject(new Error('refused'));
+    });
+    await expect(route('hotline://hl.example:5500')).rejects.toThrow('no relay');
+    expect(inits.every((i) => i?.redirect === 'error')).toBe(true);
+  });
+
+  it('reads past a document that is not one', async () => {
+    // Literal null beside the server, and a name that is no string on
+    // the web port.
+    vi.stubGlobal(
+      'fetch',
+      (url: string) =>
+        new URL(url).origin === 'https://hl.example:5700'
+          ? Promise.resolve(new Response('null'))
+          : Promise.resolve(new Response(JSON.stringify({ name: 7, ng: { trtp: '/trtp' } }))),
+    );
+    expect(await route('hotline://hl.example:5500')).toEqual({
+      wire: 'classic',
+      url: 'wss://hl.example/trtp',
+      name: '',
+      shared: true,
+    });
   });
 
   it('never sends HTTP to the classic port itself', async () => {

@@ -41,8 +41,7 @@ jobs:
           v=version_131
           url=https://github.com/WebAssembly/binaryen/releases/download/$v/binaryen-$v-x86_64-linux.tar.gz
           curl -fsSL -o "$RUNNER_TEMP/binaryen.tar.gz" "$url"
-          # The hash is pinned here rather than fetched beside the tarball,
-          # so it guards against a changed release, not just a bad download.
+          # Pinned, so a replaced release fails rather than passes.
           echo "b5bf1f0eaf17c63ee588ff7a5954dc8f6ce2c26989051c66f24dfe9ece3e46db  $RUNNER_TEMP/binaryen.tar.gz" | sha256sum -c -
           tar -xzf "$RUNNER_TEMP/binaryen.tar.gz" -C "$RUNNER_TEMP"
           echo "$RUNNER_TEMP/binaryen-$v/bin" >> "$GITHUB_PATH"

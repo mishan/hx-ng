@@ -40,8 +40,7 @@ const CLASSIC_PORT = 5500;
 
 async function discover(base: string, ms = PROBE_MS): Promise<{ doc: unknown; at: string }> {
   const at = new URL('/.well-known/hotline', base).href;
-  // Not followed: a redirect could lead anywhere, the classic port among
-  // the places, and a relay has no reason to send one.
+  // A redirect could lead to the classic port, and a relay sends none.
   const res = await fetch(at, { cache: 'no-cache', redirect: 'error', signal: AbortSignal.timeout(ms) });
   if (!res.ok) throw new Error(`discovery: HTTP ${res.status}`);
   return { doc: await res.json(), at };
@@ -70,8 +69,7 @@ function fromDoc(doc: unknown, at: string, shared: boolean): Route | null {
   const trtp = str(ng.trtp);
   if (!trtp) return null;
   const url = socketUrl(trtp, at);
-  // A relay's socket is beside its document. One elsewhere — another
-  // port of the host, the classic port among them — is not followed.
+  // A socket elsewhere than its document could be the classic port.
   if (new URL(url).host !== new URL(at).host) return null;
   return { wire: 'classic', url, name: str(d.name) ?? '', shared };
 }
@@ -88,7 +86,6 @@ export function classicAddress(address: string): { host: string; port: number } 
   // Whatever follows the authority — a path to a file, in a hotline://
   // link — says nothing about where the server is.
   let authority = rest.split(/[/?#]/, 1)[0] ?? '';
-  // A login and password before the host are the link's, not the host's.
   authority = authority.slice(authority.lastIndexOf('@') + 1);
   // The port is read here rather than by URL, which drops one that is a
   // scheme's default: `host:80` names port 80, not the classic default.

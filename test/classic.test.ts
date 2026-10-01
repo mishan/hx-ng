@@ -225,7 +225,6 @@ describe('ClassicConnection', () => {
     await started;
     expect(conn.self?.uid).toBe(9);
 
-    // Renamed, and still told apart from the others by the new name.
     await conn.request('nick', { nick: 'later' });
     expect(ws.take().map((t) => t.type)).toEqual([304]);
   });
@@ -611,8 +610,7 @@ describe('ClassicConnection, when the server does not cooperate', () => {
     await vi.advanceTimersByTimeAsync(1_000);
     ws.serve(frame(TASK, dir!.trans, []));
     await tree;
-    // Past where the grace would have run out: the listing answered, and
-    // the next visit asks for it again.
+    // Past the grace: the next visit still asks for the listing.
     await vi.advanceTimersByTimeAsync(5_000);
     void conn.newsTree();
     await vi.advanceTimersByTimeAsync(0);

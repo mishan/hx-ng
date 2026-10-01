@@ -468,10 +468,8 @@ export class App {
     // A classic server, behind a relay, or the ng listener the address
     // has always meant. The discovery document says which.
     const way = await route(d.url);
-    // A relay found on the host's web port may front another server on
-    // that host than the one the address names, and the document does not
-    // say which: an account's password goes there only once the user has
-    // seen whose it is.
+    // A relay on the host's web port may front another server there; a
+    // password goes to it only once the user has seen whose it is.
     if (way.wire === 'classic' && way.shared && d.login.trim()) {
       const named = way.name ? `“${way.name}”` : 'a Hotline server it does not name';
       const yes = await ask({

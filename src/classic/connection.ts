@@ -86,7 +86,6 @@ function unavailable(what: string): WireFailure {
  *  opcode it does not know rather than refusing it. */
 const REQUEST_MS = 20_000;
 
-/** How many of a thread's articles are asked for at once. */
 const THREAD_FETCHES = 4;
 
 /** How long after the login a server has to send its user list, which
@@ -244,10 +243,8 @@ export class ClassicConnection implements Session {
     }
     ws.binaryType = 'arraybuffer';
     this.ws = ws;
-    // The login's deadline runs from now, not from the socket opening: a
-    // relay that never answers would otherwise hold "Connecting…" for as
-    // long as the browser gives a connect. Only the timer — a pump now
-    // would take the magic before there is an open socket to send it on.
+    // The login deadline runs from now, not from the socket opening. Only
+    // the timer: a pump now would take the magic before it can be sent.
     this.arm(s);
     const started = new Promise<void>((resolve, reject) => (this.starting = { resolve, reject }));
     ws.onopen = () => this.pump();
@@ -316,7 +313,6 @@ export class ClassicConnection implements Session {
     this.arm(s);
   }
 
-  /** Set the timer for when the session next needs the clock. */
   private arm(s: ClassicSession): void {
     if (this.timer !== null) clearTimeout(this.timer);
     this.timer = null;
@@ -739,7 +735,7 @@ export class ClassicConnection implements Session {
       const me = this.self;
       const nick = p.nick ?? me?.nick ?? this.creds.nick;
       const icon = p.icon ?? me?.icon ?? this.creds.icon;
-      // What we are called now, for telling ourselves from others later.
+      // byNick finds us by it.
       this.creds = { ...this.creds, nick, icon };
       this.tell((s) => s.setNick(nick, icon));
       return {} as T;
@@ -1032,8 +1028,8 @@ export class ClassicConnection implements Session {
       for (const c of children.get(id) ?? []) walk(c);
     };
     walk(params.root);
-    // A few at a time: a long thread asked for all at once is a burst a
-    // server with a flood limit takes for an attack.
+    // A few at a time: a server with a flood limit takes a burst for an
+    // attack.
     const bodies: string[] = new Array<string>(order.length);
     let next = 0;
     const worker = async (): Promise<void> => {

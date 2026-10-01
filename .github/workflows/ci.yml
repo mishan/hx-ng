@@ -109,3 +109,61 @@ jobs:
             exit 0
           fi
           cd hxd-ng/e2e && npm install && npm test
+
+  # This repo's Playwright suite against hxd-ng's main. HXD_NG_REQUIRED
+  # turns a spec's skip for a missing hxd-ng into a failure, so the job
+  # cannot go green by running nothing.
+  browser-e2e:
+    runs-on: ubuntu-latest
+    env:
+      HXD_NG_REQUIRED: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: hx-ng
+      # Beside this checkout, where e2e/hxd-ng.ts looks for it.
+      - uses: actions/checkout@v4
+        with:
+          repository: mishan/hxd-ng
+          path: hxd-ng
+          ref: main
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: hx-ng/package-lock.json
+      # The dev server the suite drives builds the classic wasm first.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.96.1
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            hx-ng/packages/classic
+            hxd-ng
+      - run: cargo install wasm-bindgen-cli --version 0.2.129 --locked
+      - name: binaryen
+        run: |
+          v=version_131
+          url=https://github.com/WebAssembly/binaryen/releases/download/$v/binaryen-$v-x86_64-linux.tar.gz
+          curl -fsSL -o "$RUNNER_TEMP/binaryen.tar.gz" "$url"
+          echo "b5bf1f0eaf17c63ee588ff7a5954dc8f6ce2c26989051c66f24dfe9ece3e46db  $RUNNER_TEMP/binaryen.tar.gz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/binaryen.tar.gz" -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/binaryen-$v/bin" >> "$GITHUB_PATH"
+      # Built first, so a cold build isn't charged to a spec's timeout.
+      - name: Build hxd-ng
+        run: cargo build --release -p hxd -p hlid -p hlrelay
+        working-directory: hxd-ng
+      - run: npm ci
+        working-directory: hx-ng
+      - run: npx playwright install --with-deps chromium
+        working-directory: hx-ng
+      - run: npm run test:e2e
+        working-directory: hx-ng
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-traces
+          path: hx-ng/test-results/
+          retention-days: 7

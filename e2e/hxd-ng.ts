@@ -11,7 +11,7 @@
  * Absence is not a failure: a checkout without `../hxd-ng`, or without
  * `cargo`, skips this test rather than failing it — see
  * `hxdNgAvailable()`, checked once at collection time in
- * `identity.spec.ts`.
+ * `identity.spec.ts` — except under `HXD_NG_REQUIRED`, which CI sets.
  */
 
 import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from 'node:child_process';
@@ -23,9 +23,17 @@ import { dirname, join } from 'node:path';
 // another worktree, say, on the branch under test.
 const HXD_NG_DIR = process.env.HXD_NG_DIR ?? join(import.meta.dirname, '..', '..', 'hxd-ng');
 
+/** Under `HXD_NG_REQUIRED` (CI), a missing hxd-ng fails rather than skips. */
+function required(available: boolean, what: string): boolean {
+  if (!available && process.env.HXD_NG_REQUIRED) {
+    throw new Error(`HXD_NG_REQUIRED is set, but ${what} is not at ${HXD_NG_DIR}`);
+  }
+  return available;
+}
+
 export function hxdNgAvailable(): boolean {
-  if (!existsSync(HXD_NG_DIR)) return false;
-  return spawnSync('cargo', ['--version']).status === 0;
+  const there = existsSync(HXD_NG_DIR) && spawnSync('cargo', ['--version']).status === 0;
+  return required(there, 'an hxd-ng checkout with cargo');
 }
 
 function bin(name: string): string {
@@ -47,7 +55,7 @@ export function buildHxdNg(): void {
 /** hxd-ng's relay, for a spec that puts a classic server behind one. A
  *  checkout from before the relay existed has no such crate. */
 export function relayAvailable(): boolean {
-  return hxdNgAvailable() && existsSync(join(HXD_NG_DIR, 'crates', 'hlrelay'));
+  return hxdNgAvailable() && required(existsSync(join(HXD_NG_DIR, 'crates', 'hlrelay')), 'hlrelay');
 }
 
 export function buildRelay(): void {

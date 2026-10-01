@@ -77,6 +77,12 @@ max_depth = 4
 [news.attach]
 
 [news.notify]
+
+# The markdown test chats a screenful of lines, faster than anyone may.
+[limits]
+chat_lines = 0
+spam_points = 0
+ng_requests = 0
 `,
       accounts: {
         editor: account('Editor', EDITOR),

@@ -105,6 +105,12 @@ test.describe('moderation against a real hxd-ng server', () => {
       sections: `
 [history]
 db = "server.sqlite"
+
+# The purge test floods on purpose, faster than anyone may chat.
+[limits]
+chat_lines = 0
+spam_points = 0
+ng_requests = 0
 `,
       accounts: {
         // The kick bit is what makes a moderator, with nothing else said.

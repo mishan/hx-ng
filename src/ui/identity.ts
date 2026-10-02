@@ -128,6 +128,10 @@ export class IdentityPanel {
     if (!this.open) {
       this.waiting?.abort();
       this.waiting = null;
+      // Said once: gone when the panel that said them closes. Not as they
+      // render, since an open panel renders again as its mailbox loads.
+      this.becameLabel = null;
+      this.renewedQuietly = false;
       return;
     }
     if (this.device || this.unsupported) this.render();
@@ -476,11 +480,7 @@ export class IdentityPanel {
     this.becameLabel = news === 'enrolled' ? result.card.name : null;
     this.renewedQuietly = news === 'renewed-quietly';
     this.device = await getActiveDevice();
-    // Only when there is something to paint on. Both notices clear
-    // themselves as they render — that is what keeps them from becoming
-    // furniture — so painting a closed panel would spend the news on a
-    // body nobody is looking at. An automatic renewal at startup is
-    // exactly that case, and `toggle` renders when the panel is opened.
+    // A closed panel renders when it is opened.
     if (this.open) this.render();
   }
 
@@ -602,18 +602,12 @@ export class IdentityPanel {
     }
   }
 
-  /** Shown once. Both this and `becameLabel` announce something that
-   *  just happened; leaving them set would have the panel go on
-   *  reporting it every time it is opened, which turns news into
-   *  furniture. */
   private renewedNotice(): HTMLElement {
-    this.renewedQuietly = false;
     return h('p', { class: 'became' }, 'This certificate was renewed automatically.');
   }
 
   private becameNotice(device: StoredDevice): HTMLElement {
     const label = this.becameLabel ?? '';
-    this.becameLabel = null;
     return h(
       'p',
       { class: 'became' },

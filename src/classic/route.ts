@@ -171,10 +171,11 @@ export async function route(address: string): Promise<Route> {
   // Every candidate at once, and the best answer taken as soon as it is
   // known: a candidate that hangs holds up only the ones it outranks.
   const answers = candidates(classic).map((c) =>
-    discover(c.base).then(
-      (a) => fromDoc(a.doc, a.at, c.shared, classic),
-      () => null,
-    ),
+    // A document that names a socket no URL can be is no answer either,
+    // and must not keep the rest from being heard.
+    discover(c.base)
+      .then((a) => fromDoc(a.doc, a.at, c.shared, classic))
+      .catch(() => null),
   );
   for (const answer of answers) {
     const r = await answer;

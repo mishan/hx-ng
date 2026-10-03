@@ -89,8 +89,12 @@ yet. A folder whose name holds a `/` cannot be opened, since the views
 address folders by a slash-separated path.
 
 Every connect now reads the server's discovery document first, to learn
-which wire it speaks; where that request goes unanswered, the client
-waits up to three seconds before carrying on as it always did.
+which wire it speaks. For a WebSocket address the client waits up to a
+second for it, and with no answer connects to that address as it always
+did. For a classic address it asks where a relay may be — the classic
+port plus 200, then the host's web port — waiting up to three seconds on
+each at once, and with no relay found says the server can only be
+reached from a desktop client.
 
 ## Where the server address comes from
 

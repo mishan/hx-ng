@@ -620,6 +620,21 @@ describe('ClassicConnection, when the server does not cooperate', () => {
     expect(again.nodes.map((n) => n.name)).toEqual(['News']);
   });
 
+  it('shows the root news without a flat file the server ignores', async () => {
+    const { conn, ws } = await online();
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    let done = false;
+    const tree = conn.newsTree().then((t) => ((done = true), t));
+    const [dir] = ws.take();
+    ws.serve(frame(TASK, dir!.trans, []));
+    // A threaded-only server that ignores the flat request: a moment, not
+    // the whole request timeout.
+    await vi.advanceTimersByTimeAsync(2_999);
+    expect(done).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect((await tree).nodes).toEqual([]);
+  });
+
   it('keeps threaded news that answers after the flat file, within the grace', async () => {
     const { conn, ws } = await online();
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
@@ -863,6 +878,16 @@ describe('route', () => {
     // A socket beside the classic port is an HTTP request Janus bans for.
     only({ 'https://hl.example:5700': { ng: { ws: 'wss://hl.example:5501/ng' } } });
     await expect(route('hotline://hl.example:5500')).rejects.toThrow('no relay');
+  });
+
+  it('hears the next candidate past a document naming a socket no URL can be', async () => {
+    vi.stubGlobal('fetch', (url: string) => {
+      const origin = new URL(url).origin;
+      const doc =
+        origin === 'https://hl.example:5700' ? { ng: { trtp: 'http://[' } } : { ng: { trtp: '/trtp' } };
+      return Promise.resolve(new Response(JSON.stringify(doc)));
+    });
+    expect(await route('hotline://hl.example:5500')).toMatchObject({ url: 'wss://hl.example/trtp', shared: true });
   });
 
   it('reads past a document that is not one', async () => {

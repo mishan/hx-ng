@@ -158,7 +158,7 @@ function pathKey(path: Uint8Array[]): string {
   return path.map((p) => Array.from(p, (b) => b.toString(16).padStart(2, '0')).join('')).join('/');
 }
 
-/** How long the root's threaded listing may lag the flat file before the
+/** How long either kind of news at the root may lag the other before the
  *  root is shown without it. */
 const LISTING_GRACE_MS = 3000;
 
@@ -962,24 +962,28 @@ export class ClassicConnection implements Session {
       },
       () => {},
     );
-    const [flatDone] = await Promise.allSettled([flat]);
+    // Whichever kind answers first, the other gets a grace to follow: a
+    // server keeping only one kind may ignore the other's request rather
+    // than refuse it, and would otherwise hold the root for as long as a
+    // request may go unanswered. Threaded news is held to it only until
+    // it is known to answer.
     let grace: ReturnType<typeof setTimeout> | undefined;
-    const graced =
-      root && flatDone.status === 'fulfilled' && this.threaded === null
-        ? Promise.race([
-            listing,
-            new Promise<never>((_, reject) => {
-              grace = setTimeout(() => {
-                // Not asked again unless it answers after all, which
-                // marks it answered; an answer already in stands.
-                if (this.threaded === null) this.threaded = false;
-                reject(new Error('threaded news is slow'));
-              }, LISTING_GRACE_MS);
-            }),
-          ])
-        : listing;
-    const [listingDone] = await Promise.allSettled([graced]);
+    const late = root
+      ? Promise.any([listing, flat]).then(
+          () => new Promise<void>((r) => (grace = setTimeout(r, LISTING_GRACE_MS))),
+          () => undefined,
+        )
+      : null;
+    const bounded = <T>(p: Promise<T>): Promise<T> =>
+      late ? Promise.race([p, late.then(() => Promise.reject(new Error('it is slow')))]) : p;
+    const [listingDone, flatDone] = await Promise.allSettled([
+      this.threaded === null ? bounded(listing) : listing,
+      bounded(flat),
+    ]);
     clearTimeout(grace);
+    // Not asked again unless it answers after all, which marks it
+    // answered; an answer already in stands.
+    if (root && listingDone.status === 'rejected' && this.threaded === null) this.threaded = false;
     const nodes: NewsNode[] = [];
     if (listingDone.status === 'fulfilled') {
       for (const item of listingDone.value.items) {

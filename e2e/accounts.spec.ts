@@ -96,6 +96,8 @@ test.describe('account administration against a real hxd-ng server', () => {
     await editor.getByLabel('Send chat').uncheck();
     await editor.getByRole('button', { name: 'Save' }).click();
     await expect(view.locator('.mod-notice')).toHaveText('Saved carol.');
+    // The button pressed keeps the focus through the redraw.
+    await expect(editor.getByRole('button', { name: 'Save' })).toBeFocused();
     await say(carol, 'still here?');
     await expect(carol.locator('.line', { hasText: 'You do not have permission to do that.' }).first()).toBeVisible();
 

@@ -138,13 +138,14 @@ export function draftOf(account: AccountInfo | null): Draft {
  * chat goes on going with it: the server keeps an account's history
  * following its chat until something separates the two, so unticking
  * "Read chat" alone would otherwise leave history on, and ticking it
- * alone would write history off for good.
+ * alone would write history off for good. Not where this session may not
+ * grant history: giving it along would only have the save refused.
  */
-export function toggle(draft: Draft, name: string, on: boolean): void {
+export function toggle(draft: Draft, name: string, on: boolean, mine: AccessSet | null): void {
   const follows = draft.access.has('read_chat_history') === draft.access.has('read_chat');
   const set = (n: string) => (on ? draft.access.add(n) : draft.access.delete(n));
   set(name);
-  if (name === 'read_chat' && follows) set('read_chat_history');
+  if (name === 'read_chat' && follows && grantable(mine, 'read_chat_history')) set('read_chat_history');
 }
 
 const sameSet = (a: Set<string>, b: string[]) => a.size === b.length && b.every((n) => a.has(n));
@@ -168,7 +169,8 @@ export function editParams(original: AccountInfo | null, draft: Draft): AccountE
     return out;
   }
   let changed = false;
-  if (name && name !== original.name) {
+  // Compared as typed: a name is normalized only once someone edits it.
+  if (name && draft.name !== original.name) {
     out.name = name;
     changed = true;
   }

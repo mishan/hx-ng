@@ -241,7 +241,8 @@ export class AccountsView {
       (account.access.some((n) => !grantable(mine, n)) || account.raw_bits.some((b) => !mine?.raw_bits.includes(b)));
     const settings = !!account && this.above.has(account.login);
     const outranked = bits || settings;
-    const writable = (account ? may.modify && !outranked : may.create) && !this.busy;
+    const editable = account ? may.modify && !outranked : may.create;
+    const writable = editable && !this.busy;
     const text = (key: string, value: string, set: (v: string) => void, props: Record<string, unknown> = {}) => {
       const input = h('input', { type: 'text', value, disabled: !writable, dataset: { key }, ...props });
       input.oninput = () => set(input.value);
@@ -289,7 +290,7 @@ export class AccountsView {
             dataset: { key: `bit:${name}` },
           });
           box.onchange = () => {
-            toggle(draft, name, box.checked);
+            toggle(draft, name, box.checked, mine);
             this.render();
           };
           return h(
@@ -301,11 +302,19 @@ export class AccountsView {
         }),
       );
     const other = account ? unknownNames(account) : [];
-    const save = h('button', { type: 'submit', disabled: !writable }, account ? 'Save' : 'Make account');
+    // Busy, the buttons stay focusable — the one pressed keeps the focus
+    // through the redraw — and say they are unavailable; `save` and
+    // `remove` ignore them meanwhile.
+    const save = h(
+      'button',
+      { type: 'submit', disabled: !editable, dataset: { key: 'save' } },
+      account ? 'Save' : 'Make account',
+    );
     const del =
       account && may.delete && !outranked
-        ? h('button', { type: 'button', class: 'ghost danger', disabled: this.busy }, 'Delete')
+        ? h('button', { type: 'button', class: 'ghost danger', dataset: { key: 'delete' } }, 'Delete')
         : null;
+    for (const b of [save, del]) if (b && this.busy) b.setAttribute('aria-disabled', 'true');
     if (del) del.onclick = () => void this.remove();
     return h(
       'form',

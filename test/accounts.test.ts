@@ -12,11 +12,10 @@ const eve: AccountInfo = {
   raw_bits: [41],
 };
 
-const edited = (change: Partial<Draft>): Draft => ({ ...draftOf(eve), ...change });
-
 describe('editParams', () => {
   it.each<[string, AccountInfo | null, Partial<Draft>, unknown]>([
     ['sends nothing when nothing changed', eve, {}, null],
+    ['leaves a name it was not asked to touch as it is', { ...eve, name: ' Eve ' }, { password: 'pw' }, { login: 'eve', password: 'pw' }],
     ['sends only the name when only it changed', eve, { name: 'Evelyn' }, { login: 'eve', name: 'Evelyn' }],
     ['keeps the name a blank box leaves', eve, { name: '  ' }, null],
     ['sends a typed password', eve, { password: 'pw' }, { login: 'eve', password: 'pw' }],
@@ -34,21 +33,23 @@ describe('editParams', () => {
       { login: 'bob', name: 'Bob', password: 'pw', access: ['read_chat'] },
     ],
   ])('%s', (_, original, change, want) => {
-    const draft = original ? edited(change) : { ...draftOf(null), ...change };
+    const draft = { ...draftOf(original), ...change };
     expect(editParams(original, draft)).toEqual(want);
   });
 });
 
 describe('toggle', () => {
-  it.each<[string, string[], string, boolean, string[]]>([
-    ['moves history with chat when it follows, off', ['read_chat', 'read_chat_history'], 'read_chat', false, []],
-    ['moves history with chat when it follows, on', [], 'read_chat', true, ['read_chat', 'read_chat_history']],
-    ['leaves history set apart from chat alone', ['read_chat'], 'read_chat', false, []],
-    ['moves nothing else', ['read_chat', 'read_chat_history'], 'send_chat', true, ['read_chat', 'read_chat_history', 'send_chat']],
-    ['separates history when it is the one toggled', ['read_chat', 'read_chat_history'], 'read_chat_history', false, ['read_chat']],
-  ])('%s', (_, had, name, on, want) => {
+  const all = ['read_chat', 'read_chat_history', 'send_chat'];
+  it.each<[string, string[], string, boolean, string[], string[]]>([
+    ['moves history with chat when it follows, off', ['read_chat', 'read_chat_history'], 'read_chat', false, all, []],
+    ['moves history with chat when it follows, on', [], 'read_chat', true, all, ['read_chat', 'read_chat_history']],
+    ['leaves history set apart from chat alone', ['read_chat'], 'read_chat', false, all, []],
+    ['moves nothing else', ['read_chat', 'read_chat_history'], 'send_chat', true, all, ['read_chat', 'read_chat_history', 'send_chat']],
+    ['separates history when it is the one toggled', ['read_chat', 'read_chat_history'], 'read_chat_history', false, all, ['read_chat']],
+    ['moves no history this session may not grant', [], 'read_chat', true, ['read_chat'], ['read_chat']],
+  ])('%s', (_, had, name, on, mine, want) => {
     const draft = { ...draftOf(null), access: new Set(had) };
-    toggle(draft, name, on);
+    toggle(draft, name, on, { access: mine, raw_bits: [] });
     expect([...draft.access].sort()).toEqual([...want].sort());
   });
 });

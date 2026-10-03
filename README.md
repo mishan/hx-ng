@@ -3,9 +3,13 @@
 A browser client for the **Hotline-ng** wire: public chat, the user list
 with the classic icons or a picture of your own, private messages,
 threaded news, notifications
-while you are away, reports and moderation, and the voice and video the SFU already serves. It never sees the legacy wire, and the server cannot
-tell it apart from any other ng client. The protocol it speaks is
-[`hotline-ng.md`](https://github.com/mishan/hxd-ng/blob/main/docs/hotline-ng.md).
+while you are away, reports and moderation, and the voice and video the SFU already serves. The protocol it speaks is
+[`hotline-ng.md`](https://github.com/mishan/hxd-ng/blob/main/docs/hotline-ng.md),
+and an ng server cannot tell it apart from any other ng client.
+
+It also reaches **classic** Hotline servers — mhxd, Janus, the 1.9
+server, anything that speaks the 1.2/1.5 wire — where one stands behind a
+relay ([Classic servers](#classic-servers), below).
 
 The reference server is [hxd-ng](https://github.com/mishan/hxd-ng). Any
 server that speaks the protocol will do; this client has no dependency on
@@ -17,6 +21,20 @@ that one beyond the wire.
 npm install
 npm run dev
 ```
+
+Building it needs Rust as well as Node: the classic wire is hx-libs'
+`hxsession`, compiled to wasm by `npm run build:wasm`, which `dev`,
+`test` and `typecheck` run first. Once, beforehand:
+
+```sh
+rustup target add wasm32-unknown-unknown       # or Debian's libstd-rust-dev-wasm32
+cargo install wasm-bindgen-cli --version 0.2.129 --locked   # the version packages/classic/Cargo.toml pins
+```
+
+`wasm-opt` (binaryen) is used when it is installed, and makes the module
+smaller; nothing else changes without it. It has to be recent enough to
+read what a current Rust emits — version 131 does, and Ubuntu's packaged
+one does not.
 
 That wants a server to talk to. Against
 [hxd-ng](https://github.com/mishan/hxd-ng) on the same machine, with an
@@ -41,6 +59,42 @@ cd dist && python3 -m http.server 8080
 every change. `public/icons.png` and `public/icons.json` are, because
 they change only when `icons.rsrc` does, and committing them means
 running the client needs no Python.
+
+## Classic servers
+
+A browser cannot open TCP, and a classic server speaks nothing else. So
+a classic server is reached through a relay beside it — hxd-ng's
+[`hlrelay`](https://github.com/mishan/hxd-ng/blob/main/docs/relay.md),
+which its operator runs — whose `/trtp` WebSocket carries the classic
+protocol byte for byte. hxd-ng serves the same path itself.
+
+The server field takes a relay's address, `ws://host:5700`, or the
+classic address a tracker lists, `hotline://host:5500` or just
+`host:5500`. For a classic address the client looks for the relay where
+hxd-ng's `docs/hotline-ng-auth.md` §5.1 says it stands: the classic port
+plus 200, then the host's default port (443, and 80 from a page served
+over plain http). Either way the server's discovery document decides
+which wire to speak — `ng.trtp` without `ng.ws` is a classic server.
+
+The protocol on that socket is GtkHx's, not a rewrite of it: hx-libs'
+`hxsession`, compiled to wasm in [`packages/classic`](packages/classic/),
+and [`src/classic/connection.ts`](src/classic/connection.ts) presents
+what it says to the views in the ng shapes they already draw. On a
+classic server this client does chat, the user list, private messages,
+the agreement, browsing files, and reading news — threaded, and the 1.2
+flat file as one more category. Reports, moderation and news management
+are left out of the views; downloads, file details, voice and everything
+else the ng wire added say they are not available on a classic server
+yet. A folder whose name holds a `/` cannot be opened, since the views
+address folders by a slash-separated path.
+
+Every connect now reads the server's discovery document first, to learn
+which wire it speaks. For a WebSocket address the client waits up to a
+second for it, and with no answer connects to that address as it always
+did. For a classic address it asks where a relay may be — the classic
+port plus 200, then the host's web port — waiting up to three seconds on
+each at once, and with no relay found says the server can only be
+reached from a desktop client.
 
 ## Where the server address comes from
 
@@ -177,6 +231,11 @@ registers handlers per request name and pushes events, and replies come
 back asynchronously and in order, on a socket the test can close out from
 under the client.
 
+[`test/classic.test.ts`](test/classic.test.ts) does the same for the
+classic wire one level down: the real wasm session, a fake socket, and
+classic frames written by hand, checking both the module's event shapes
+and their translation into the ng ones the views take.
+
 What is *not* covered here: `src/ui/` in general, which would want a
 DOM, and the voice and video session, which would want a WebRTC stack.
 Identity's slice of `src/ui/` is the exception — see below.
@@ -206,6 +265,14 @@ convention as `gtkhx` for the icons below. Neither is a dependency of
 `npm test` or `npm run build`; without them,
 [`e2e/hxd-ng.ts`](e2e/hxd-ng.ts) skips this test rather than failing
 the run.
+
+### End-to-end: a classic server through a relay
+
+[`e2e/classic.spec.ts`](e2e/classic.spec.ts) starts a real `hxd`, puts
+a real `hlrelay` in front of its classic port, and connects two browsers
+— one by the relay's address, one by the classic address — that see each
+other, chat, write to each other and list the server's files. The same
+sibling checkout; `HXD_NG_DIR` points the suite at one somewhere else.
 
 ## The icons
 
@@ -426,6 +493,9 @@ published name like anybody else would.
 | `packages/hotline-ng/src/protocol.ts` | the wire's shapes — the twin of [`proto.rs`](https://github.com/mishan/hxd-ng/blob/main/crates/hxd-ng-session/src/proto.rs) |
 | `packages/hotline-ng/src/connection.ts` | one session across however many sockets: handshake, resume, backoff, the trace hook |
 | `packages/hotline-ng/src/voice.ts` | the SFU: join, publish, subscribe, and the mid grammar that tells streams apart |
+| `packages/classic/` | the classic wire: hx-libs' `hxsession` wrapped for JavaScript, built to wasm |
+| `src/classic/` | a classic server as a `Session`: the socket, the timer, and the ng shapes; finding the relay |
+| `src/session.ts` | what the views ask of a connection, on either wire |
 | `src/config.ts` | `config.json`, and where the server address comes from |
 | `src/state.ts` | roster and transcripts; no DOM |
 | `src/ui/` | the shell, roster, transcript, composer, icon picker, video tiles, debug drawer |

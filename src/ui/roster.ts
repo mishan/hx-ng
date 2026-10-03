@@ -30,7 +30,9 @@ export interface RosterHooks {
   onClose: () => void;
 }
 
-export function renderRoster(el: HTMLElement, store: Store, media: VoiceSession, hooks: RosterHooks): void {
+/** `media` is `null` on a connection with no voice — a classic server's —
+ *  where nobody is in voice or publishing anything. */
+export function renderRoster(el: HTMLElement, store: Store, media: VoiceSession | null, hooks: RosterHooks): void {
   const users = store.roster();
   const rows = users.map((u) => row(u, store, media, hooks));
   const close = h(
@@ -52,11 +54,11 @@ export function renderRoster(el: HTMLElement, store: Store, media: VoiceSession,
   );
 }
 
-function row(u: User, store: Store, media: VoiceSession, hooks: RosterHooks): HTMLElement {
+function row(u: User, store: Store, media: VoiceSession | null, hooks: RosterHooks): HTMLElement {
   const me = u.uid === store.self?.uid;
   const status = statusLabel(u.status);
-  const voice = media.inVoice(u.uid);
-  const pubs = media.publicationsOf(u.uid);
+  const voice = media?.inVoice(u.uid) ?? null;
+  const pubs = media?.publicationsOf(u.uid) ?? [];
 
   const marks: HTMLElement[] = [];
   if (voice) {

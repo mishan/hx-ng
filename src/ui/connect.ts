@@ -12,6 +12,8 @@
 
 import { fetchDiscovery, wsToHttp, type Credentials } from '@hotline-ng/client';
 
+import { classicAddress } from '../classic/route';
+
 import type { AppConfig } from '../config';
 import { serverFromUrl } from '../config';
 import { getActiveDevice } from '../identity/storage';
@@ -221,6 +223,9 @@ export function connectScreen(
       identityBtn.disabled = true;
       identityBtn.textContent = 'Connecting…';
       try {
+        if (classicAddress(targetUrl)) {
+          throw new Error('A classic server has no identity login. Connect with an account, or as a guest.');
+        }
         const device = await getActiveDevice();
         if (!device?.cert || !device.card) throw new Error('This browser has no enrolled device yet.');
 

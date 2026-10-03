@@ -3,8 +3,9 @@ import { defineConfig } from '@playwright/test';
 // `npm run test:e2e` only — this is not part of `npm test`, since it
 // needs a sibling hxd-ng checkout, `cargo`, and a downloaded browser
 // (`npx playwright install chromium`), none of which the rest of this
-// repo asks for. `e2e/hxd-ng.ts` skips the one spec that needs them
-// when a sibling checkout isn't there, rather than failing the run.
+// repo asks for. `e2e/hxd-ng.ts` skips the specs that need them when a
+// sibling checkout isn't there, rather than failing the run — except in
+// CI's browser-e2e job, which sets HXD_NG_REQUIRED.
 export default defineConfig({
   testDir: './e2e',
   timeout: 60_000,

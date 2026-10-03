@@ -5,3 +5,7 @@ vite.config.ts.timestamp-*.mjs
 /playwright-report/
 /blob-report/
 /playwright/.cache/
+
+# The classic-wire module: built by `npm run build:wasm`, never committed.
+/packages/classic/pkg/
+/packages/classic/target/

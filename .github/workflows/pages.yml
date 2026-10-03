@@ -37,8 +37,33 @@ jobs:
         with:
           node-version: 22
           cache: npm
+      # The classic wire's module is built from source, as in CI: the
+      # wasm-bindgen CLI must be the version packages/classic/Cargo.toml
+      # pins.
+      # Pinned with wasm-bindgen and binaryen: a newer Rust can emit wasm
+      # features the pinned wasm-opt does not read yet.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.96.1
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: packages/classic
+      - run: cargo install wasm-bindgen-cli --version 0.2.129 --locked
+      # wasm-opt, from a pinned binaryen release: Ubuntu's apt one is too
+      # old to read what a current Rust emits.
+      - name: binaryen
+        run: |
+          v=version_131
+          url=https://github.com/WebAssembly/binaryen/releases/download/$v/binaryen-$v-x86_64-linux.tar.gz
+          curl -fsSL -o "$RUNNER_TEMP/binaryen.tar.gz" "$url"
+          # Pinned, so a replaced release fails rather than passes.
+          echo "b5bf1f0eaf17c63ee588ff7a5954dc8f6ce2c26989051c66f24dfe9ece3e46db  $RUNNER_TEMP/binaryen.tar.gz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/binaryen.tar.gz" -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/binaryen-$v/bin" >> "$GITHUB_PATH"
       - run: npm ci
       # CI has already gated what reaches main; this only builds it.
+      - run: npm run build:wasm
       - run: npx vite build
       # Where this deployment connects to, in place of the generic
       # config.json that derives a server from the page's own host,

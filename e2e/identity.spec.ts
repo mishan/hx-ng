@@ -533,9 +533,15 @@ test.describe('identity: enrollment and login against a real hxd-ng server', () 
     // answer lands. On loopback it usually wins the race on its own,
     // which is exactly why this bug survived: the ordering that breaks
     // it is the one a real network produces and a local test does not.
+    // Each answer later than the last, as a slow network delivers them:
+    // opening the panel asks more than once, and an answer that lands
+    // after the click repaints the panel under the renewal it started.
+    let asked = 0;
+    let answered = 0;
     await page.route('**/.well-known/hotline', async (route) => {
-      await new Promise((r) => setTimeout(r, 1500));
+      await new Promise((r) => setTimeout(r, 1500 * ++asked));
       await route.continue();
+      answered++;
     });
 
     // A fresh page: the first open of the panel is the one under test.
@@ -552,5 +558,8 @@ test.describe('identity: enrollment and login against a real hxd-ng server', () 
     await expect(page.locator('.identity-body')).toContainText('Nothing is listening', {
       timeout: 20_000,
     });
+    // And still said once every answer is in.
+    await expect.poll(() => answered === asked, { timeout: 20_000 }).toBe(true);
+    await expect(page.locator('.identity-body')).toContainText('Nothing is listening');
   });
 });

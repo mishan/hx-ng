@@ -583,7 +583,11 @@ export interface Discovery {
   v: number;
   name: string;
   serverKey: string | null;
-  ng: { ws: string; trtp?: string };
+  /** The WebSocket paths, as URL references against the discovery URL
+   *  (hxd-ng's `docs/hotline-ng-auth.md` §5). `trtp` without `ws` is a
+   *  classic server behind a relay: the classic protocol, in binary
+   *  frames, with `htxf` for its transfers. */
+  ng: { ws?: string; trtp?: string; htxf?: string };
   identity: DiscoveryIdentity;
 }
 

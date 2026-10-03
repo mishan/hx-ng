@@ -23,6 +23,10 @@ export interface Ask {
   /** The button that does it. */
   ok: string;
   danger?: boolean;
+  /** Withdraws the question: the dialog closes as if cancelled. For a
+   *  question whose reason can go away while it is open — an agreement
+   *  from a server that has since hung up. */
+  signal?: AbortSignal;
 }
 
 export type Answer = Record<string, string | boolean>;
@@ -96,6 +100,8 @@ export function ask(q: Ask): Promise<Answer | null> {
       resolve(value);
     }
 
+    if (q.signal?.aborted) return resolve(null);
+    q.signal?.addEventListener('abort', () => done(null), { once: true });
     document.body.append(dialog);
     dialog.showModal();
     [...inputs.values()][0]?.focus();

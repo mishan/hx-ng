@@ -11,19 +11,29 @@
  * Absence is not a failure: a checkout without `../hxd-ng`, or without
  * `cargo`, skips this test rather than failing it — see
  * `hxdNgAvailable()`, checked once at collection time in
- * `identity.spec.ts`.
+ * `identity.spec.ts` — except under `HXD_NG_REQUIRED`, which CI sets.
  */
 
 import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from 'node:child_process';
-import { existsSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 
-const HXD_NG_DIR = join(import.meta.dirname, '..', '..', 'hxd-ng');
+// `HXD_NG_DIR` for a checkout somewhere other than beside this one —
+// another worktree, say, on the branch under test.
+const HXD_NG_DIR = process.env.HXD_NG_DIR ?? join(import.meta.dirname, '..', '..', 'hxd-ng');
+
+/** Under `HXD_NG_REQUIRED` (CI), a missing hxd-ng fails rather than skips. */
+function required(available: boolean, what: string): boolean {
+  if (!available && process.env.HXD_NG_REQUIRED) {
+    throw new Error(`HXD_NG_REQUIRED is set, but ${what} is not at ${HXD_NG_DIR}`);
+  }
+  return available;
+}
 
 export function hxdNgAvailable(): boolean {
-  if (!existsSync(HXD_NG_DIR)) return false;
-  return spawnSync('cargo', ['--version']).status === 0;
+  const there = existsSync(HXD_NG_DIR) && spawnSync('cargo', ['--version']).status === 0;
+  return required(there, 'an hxd-ng checkout with cargo');
 }
 
 function bin(name: string): string {
@@ -40,6 +50,47 @@ export function buildHxdNg(): void {
     stdio: 'inherit',
   });
   if (result.status !== 0) throw new Error('cargo build --release -p hxd -p hlid failed');
+}
+
+/** hxd-ng's relay, for a spec that puts a classic server behind one. A
+ *  checkout from before the relay existed has no such crate. */
+export function relayAvailable(): boolean {
+  return hxdNgAvailable() && required(existsSync(join(HXD_NG_DIR, 'crates', 'hlrelay')), 'hlrelay');
+}
+
+export function buildRelay(): void {
+  const result = spawnSync('cargo', ['build', '--release', '-p', 'hlrelay'], { cwd: HXD_NG_DIR, stdio: 'inherit' });
+  if (result.status !== 0) throw new Error('cargo build --release -p hlrelay failed');
+}
+
+/** `hlrelay` in front of a classic port, answering on `listen`. */
+export async function startRelay(upstream: string, listen: string): Promise<{ stop(): void }> {
+  const proc = spawn(bin('hlrelay'), ['--upstream', upstream, '--listen', listen, '--name', 'hx-ng e2e (classic)'], {
+    stdio: 'pipe',
+  });
+  // Listening is this relay saying so, not something answering on the
+  // port: a relay a killed run left behind would answer just the same.
+  await new Promise<void>((resolve, reject) => {
+    let log = '';
+    const timer = setTimeout(() => {
+      proc.kill();
+      reject(new Error(`hlrelay did not start:\n${log}`));
+    }, 10_000);
+    const read = (d: Buffer) => {
+      log += d.toString();
+      if (log.includes(`relaying ${listen}`)) {
+        clearTimeout(timer);
+        resolve();
+      }
+    };
+    proc.stdout.on('data', read);
+    proc.stderr.on('data', read);
+    proc.on('exit', (code) => {
+      clearTimeout(timer);
+      reject(new Error(`hlrelay exited ${code}:\n${log}`));
+    });
+  });
+  return { stop: () => proc.kill() };
 }
 
 export interface RunningServer {
@@ -75,6 +126,9 @@ export interface ServerOptions {
    *  its own directory — it reads that directory on every login, so
    *  they are live for the first one. */
   accounts?: Record<string, string>;
+  /** Files written into the server's directory before it starts, by
+   *  path: a `[files] root` has to exist when the server reads it. */
+  files?: Record<string, string>;
 }
 
 /** Starts a freshly built `hxd` in a throwaway directory. By default a
@@ -82,6 +136,10 @@ export interface ServerOptions {
  *  and login without also needing a registrar or an existing account. */
 export async function startServer(ngPort: number, opts: ServerOptions = {}): Promise<RunningServer> {
   const dir = mkdtempSync(join(tmpdir(), 'hxd-ng-e2e-'));
+  for (const [path, body] of Object.entries(opts.files ?? {})) {
+    mkdirSync(dirname(join(dir, path)), { recursive: true });
+    writeFileSync(join(dir, path), body);
+  }
   writeFileSync(
     join(dir, 'hxd-ng.toml'),
     `

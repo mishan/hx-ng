@@ -1,9 +1,9 @@
+import type { Session } from '../session';
 import {
   formatEntrySize,
   formatFileSize,
   parseDecimalU64,
   WireFailure,
-  type Connection,
   type FileEntry,
   type FileInfo,
 } from '@hotline-ng/client';
@@ -39,7 +39,7 @@ export class FilesView {
 
   private sight = new Sight();
 
-  constructor(private connection: () => Connection | null) {
+  constructor(private connection: () => Session | null) {
     this.el.append(this.page, this.transfer);
   }
 

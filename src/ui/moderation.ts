@@ -13,7 +13,8 @@
  * `report_closed`, and the view redraws from those.
  */
 
-import { WireFailure, moderationErrorText, type Connection, type ModerationAct, type Report, type ReportOutcome } from '@hotline-ng/client';
+import type { Session } from '../session';
+import { WireFailure, moderationErrorText, type ModerationAct, type Report, type ReportOutcome } from '@hotline-ng/client';
 
 import { actSummary, DURATIONS, outcomeWords, reportHeading, ReportQueue, subjectName } from '../moderation';
 import { LOBBY, type Store } from '../state';
@@ -25,7 +26,7 @@ import { Sight } from './sight';
 type Tab = 'open' | 'closed' | 'log';
 
 export interface ModerationHooks {
-  conn: () => Connection | null;
+  conn: () => Session | null;
   store: Store;
   /** The open count moved: the rail's badge is drawn from it. */
   onCount: () => void;

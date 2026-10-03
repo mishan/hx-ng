@@ -156,6 +156,8 @@ test.describe('account administration against a real hxd-ng server', () => {
     await expect(deputyView.locator('.mod-error')).toContainText('something you may not');
     await expect(deputyView.locator('.accounts-editor')).toContainText('only the operator can see or change');
     await expect(deputyView.getByRole('button', { name: 'Save' })).toBeDisabled();
+    // As it is, not as the refused edit asked it to be.
+    await expect(deputyView.getByRole('textbox', { name: 'Name' })).toHaveValue('Bot');
 
     // Losing the right to read accounts takes the pane away at once.
     const clerk = await logIn(browser, server, 'clerk');

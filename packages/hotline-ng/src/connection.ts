@@ -512,7 +512,10 @@ export class Connection {
       // reload case — has a `self` and a replay but no user list. `sync`
       // is the spec's answer for exactly that, and asking for it costs
       // one round trip against re-typing a password.
-      if (!this.gotSnapshot) await this.snapshot();
+      if (!this.gotSnapshot) {
+        await this.snapshot();
+        this.persist();
+      }
       return true;
     } catch (e) {
       if (!(e instanceof WireFailure)) throw e;
@@ -537,6 +540,8 @@ export class Connection {
       // that assignment only ever moves the number forward.
       const ok = await this.snapshot();
       this.seq = ok.seq;
+      // What the snapshot restated, kept with the seq it is good for.
+      this.persist();
       this.retry = 0;
       this.setState('online');
       await this.pullMissedMail();

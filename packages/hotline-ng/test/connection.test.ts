@@ -547,6 +547,10 @@ describe('accounts', () => {
     await resumed.start();
     await settle();
     expect(resumed.accounts).toEqual(demoted);
+    // And saved with the seq it is good for, so a reload does not bring
+    // back what the gap swallowed.
+    const saved = JSON.parse(sessionStorage.getItem('hxd-ng.session')!) as { accounts: unknown; seq: number };
+    expect(saved).toMatchObject({ accounts: demoted, seq: 977 });
   });
 
   it('has none where the server administers none', async () => {

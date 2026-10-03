@@ -40,8 +40,11 @@ export class AccountsView {
   private notice: string | null = null;
   /** Logins the server refused as `outranked` though no bit said so. */
   private above = new Set<string>();
-  /** A write under way: one at a time. */
+  /** A write under way: one at a time. Its own count rather than
+   *  `generation`, which moving to another account bumps: the write
+   *  still under way is the one to clear it. */
   private busy = false;
+  private writes = 0;
   /** Bumped by every load, pick, write and reset: an answer that lands
    *  after another began is for a view that has moved on. */
   private generation = 0;
@@ -68,6 +71,7 @@ export class AccountsView {
     this.draft = null;
     this.error = this.notice = null;
     this.above.clear();
+    this.writes++;
     this.busy = false;
     this.el.replaceChildren();
   }
@@ -127,6 +131,7 @@ export class AccountsView {
       return this.render();
     }
     const generation = ++this.generation;
+    const write = ++this.writes;
     const existing = this.open;
     this.error = this.notice = null;
     this.busy = true;
@@ -135,16 +140,20 @@ export class AccountsView {
       // The reply is the account as it now reads, so a session that may
       // make accounts and not read them needs no read to show it.
       const { account } = existing ? await conn.accountUpdate(params) : await conn.accountCreate(params);
-      if (generation !== this.generation) return;
-      this.busy = false;
+      if (write === this.writes) this.busy = false;
+      if (generation !== this.generation) return this.render();
       this.notice = existing ? `Saved ${account.login}.` : `Made ${account.login}.`;
       this.list = this.list.map((a) => (a.login === account.login ? { login: a.login, name: account.name } : a));
       this.edit(account);
       if (!existing) void this.load();
     } catch (e) {
-      if (generation !== this.generation) return;
-      this.busy = false;
-      if (existing && isOutranked(e)) this.above.add(existing.login);
+      if (write === this.writes) this.busy = false;
+      if (generation !== this.generation) return this.render();
+      if (existing && isOutranked(e)) {
+        this.above.add(existing.login);
+        // Shown as it is, not as it was asked to be.
+        this.draft = draftOf(existing);
+      }
       this.error = problem(e);
       this.render();
     }
@@ -163,19 +172,20 @@ export class AccountsView {
     });
     if (!sure || this.busy || this.open?.login !== login) return;
     const generation = ++this.generation;
+    const write = ++this.writes;
     this.error = null;
     this.busy = true;
     this.render();
     try {
       await conn.accountDelete(login);
-      if (generation !== this.generation) return;
-      this.busy = false;
+      if (write === this.writes) this.busy = false;
+      if (generation !== this.generation) return this.render();
       this.open = this.draft = null;
       this.notice = `Deleted ${login}.`;
       await this.load();
     } catch (e) {
-      if (generation !== this.generation) return;
-      this.busy = false;
+      if (write === this.writes) this.busy = false;
+      if (generation !== this.generation) return this.render();
       if (isOutranked(e)) this.above.add(login);
       this.error = problem(e);
       this.render();

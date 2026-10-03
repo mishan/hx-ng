@@ -27,11 +27,18 @@ they are present, and skips rather than fails when they are not.
 
 It runs in the other direction too. hxd-ng's own end-to-end suite
 (`hxd-ng/e2e/`) drives a real server with **this library**, as an
-independent second implementation of its wire, and CI here runs that
-suite against this working tree. So a change in `packages/hotline-ng`
-that breaks the server's tests fails *this* repo's build, without
-waiting for anyone to advance a pin. Worth knowing before changing
-anything in `Connection`'s exported surface.
+independent second implementation of its wire. hxd-ng's CI runs it
+against the hx-ng commit its `e2e/hx-ng.rev` pins; CI here runs the
+same suite, from hxd-ng's `main`, against this working tree. So a
+change in `packages/hotline-ng` that breaks the server's tests fails
+*this* repo's build, without waiting for anyone to advance a pin. Worth
+knowing before changing anything in `Connection`'s exported surface.
+
+The pin sets the order for a wire change: the server lands it first,
+covered by its own Rust suites; the library and UI follow here, tested
+against a server that has it; then hxd-ng advances its pin in the
+commit that adds the e2e cases using it. So each side only ever waits
+on something already merged.
 
 ## Build and test
 

@@ -73,6 +73,8 @@ import { BannerStrip } from './banner';
 import { MediaCache } from './media';
 import { avatars, face } from './avatar';
 import { closedForReporter, ModerationView, problem as moderationProblem } from './moderation';
+import { AccountsView } from './accounts';
+import { mayAdminister } from '../accounts';
 import { NewsView } from './news';
 import { appendLine, isAtBottom, keepingPlace, lineOf, renderTranscript, scrollToEnd } from './transcript';
 import { wrapSelection } from './markdown';
@@ -106,7 +108,7 @@ function offPane(el: HTMLElement): HTMLElement {
 }
 
 /** Every panel this client tiles, in the order the shell builds them. */
-const PANES = ['rail', 'chat', 'news', 'files', 'reports', 'roster'];
+const PANES = ['rail', 'chat', 'news', 'files', 'reports', 'accounts', 'roster'];
 
 /** Where they go the first time somebody opens this in a window with
  *  room. Chat, news and files are tabs of one leaf, which is the whole
@@ -116,7 +118,7 @@ const LAYOUT: PaneNode = {
   size: [0.16, 0.62, 0.22],
   kids: [
     { tabs: ['rail'] },
-    { tabs: ['chat', 'news', 'files', 'reports'] },
+    { tabs: ['chat', 'news', 'files', 'reports', 'accounts'] },
     { tabs: ['roster'] },
   ],
 };
@@ -281,6 +283,9 @@ export class App {
     openArticle: (id) => this.openNewsArticle(id),
   });
   private reportsOpen = false;
+  /** The account editor, for a session that may read or make accounts. */
+  private accountsView = new AccountsView(() => this.conn);
+  private accountsOpen = false;
   /** The account typed at the connect form, or `null` for a guest. */
   private account: string | null = null;
   /** Notifications on this device, for this server and account. Shown
@@ -406,6 +411,7 @@ export class App {
         if (id === 'news') this.news.shown(on);
         else if (id === 'files') this.files.shown(on);
         else if (id === 'reports') this.moderation.shown(on);
+        else if (id === 'accounts') this.accountsView.shown(on);
       },
     });
 
@@ -457,6 +463,8 @@ export class App {
     this.filesOpen = false;
     this.moderation.reset();
     this.reportsOpen = false;
+    this.accountsView.reset();
+    this.accountsOpen = false;
     this.store.covered = false;
     if (!this.tiling) this.chatPane.hidden = false;
     this.account = d.login.trim() || null;
@@ -522,6 +530,8 @@ export class App {
         void this.news.refreshFollowing();
         // So are the reports filed and closed in between.
         void this.moderation.recount();
+        // And a change to this account, which the sync restates.
+        this.onAccountChanged();
       },
       onResumed: (replay) => {
         this.say(
@@ -566,6 +576,9 @@ export class App {
         this.moderation.reset();
         this.showReports(false);
         this.panes?.available('reports', false);
+        this.accountsView.reset();
+        this.showAccounts(false);
+        this.panes?.available('accounts', false);
         // The paperclip goes with the session it belonged to. Left up,
         // it opens a picker whose upload can only fail with "not logged
         // in" — inert chrome saying something this client cannot do.
@@ -631,6 +644,7 @@ export class App {
     const reports = conn.moderator && conn.moderation !== null;
     this.panes?.available('reports', reports);
     if (reports) void this.moderation.recount();
+    this.panes?.available('accounts', mayAdminister(conn.accounts));
     this.renderAll();
     this.composer.focus();
     // Conversations live in memory and die with the page; the mailbox
@@ -816,6 +830,8 @@ export class App {
     });
 
     conn.on('report', (d) => this.moderation.onReport(d));
+    // `conn.accounts` is already what the account may do now.
+    conn.on('account_changed', () => this.onAccountChanged());
     conn.on('report_closed', (d) => {
       if (d.yours) this.say(closedForReporter(d.id, d.outcome));
       // A moderator who filed it hears it once, as the reporter.
@@ -1136,6 +1152,10 @@ export class App {
       case 'ban':
       case 'purge':
         return this.moderationCommand(word!.toLowerCase(), rest).catch((e: unknown) => this.say(moderationProblem(e)));
+      case 'accounts':
+        if (!conn.accounts) return this.say('This server does not administer accounts.');
+        if (!mayAdminister(conn.accounts)) return this.say('Your account may not read or make accounts.');
+        return this.showAccounts(true);
       case 'reports':
         if (!conn.moderator) return this.say('Only a moderator reads the reports.');
         if (!conn.moderation) return this.say('This server keeps no reports.');
@@ -1181,6 +1201,7 @@ export class App {
               '/report <who> [reason] · ') +
             (!conn.classic && (conn.moderator || this.store.self?.admin) ? '/kick <nick> [reason] · /ban <nick> <length> [reason] · ' : '') +
             (conn.moderator ? '/purge <who> [length] [reason] · /reports · ' : '') +
+            (mayAdminister(conn.accounts) ? '/accounts · ' : '') +
             '/nick <name> · /icon <n> · /clear · /close · /drop · /debug · /logout',
         );
       default:
@@ -1256,6 +1277,7 @@ export class App {
     if (this.newsOpen) this.showNews(false);
     else if (this.filesOpen) this.showFiles(false);
     else if (this.reportsOpen) this.showReports(false);
+    else if (this.accountsOpen) this.showAccounts(false);
     else this.seen(conv);
     this.renderRail();
     this.renderTranscript();
@@ -1292,6 +1314,7 @@ export class App {
   private showNews(open: boolean): void {
     if (open && this.filesOpen) this.showFiles(false);
     if (open && this.reportsOpen) this.showReports(false);
+    if (open && this.accountsOpen) this.showAccounts(false);
     const was = this.newsOpen;
     this.newsOpen = open;
     // The conversation the reader covers stays the active one, and what
@@ -1326,6 +1349,7 @@ export class App {
   private showFiles(open: boolean): void {
     if (open && this.newsOpen) this.showNews(false);
     if (open && this.reportsOpen) this.showReports(false);
+    if (open && this.accountsOpen) this.showAccounts(false);
     const was = this.filesOpen;
     this.filesOpen = open;
     this.store.covered = open;
@@ -1341,12 +1365,39 @@ export class App {
   private showReports(open: boolean): void {
     if (open && this.newsOpen) this.showNews(false);
     if (open && this.filesOpen) this.showFiles(false);
+    if (open && this.accountsOpen) this.showAccounts(false);
     const was = this.reportsOpen;
     this.reportsOpen = open;
     this.store.covered = open;
     this.raise(open ? 'reports' : 'chat', open);
     if (this.tiling) this.moderation.shown(open);
     else this.moderation.show(open);
+    const conv = this.store.conversation(this.store.active);
+    if (was && !open && conv) this.seen(conv);
+    this.renderRail();
+  }
+
+  /** What this session's account may do changed: `conn.accounts` is
+   *  already what it may do now. */
+  private onAccountChanged(): void {
+    const may = mayAdminister(this.conn?.accounts ?? null);
+    this.panes?.available('accounts', may);
+    if (!may && this.accountsOpen) this.showAccounts(false);
+    this.accountsView.refresh();
+    this.renderRail();
+  }
+
+  /** The account editor, in the same space the readers take. */
+  private showAccounts(open: boolean): void {
+    if (open && this.newsOpen) this.showNews(false);
+    if (open && this.filesOpen) this.showFiles(false);
+    if (open && this.reportsOpen) this.showReports(false);
+    const was = this.accountsOpen;
+    this.accountsOpen = open;
+    this.store.covered = open;
+    this.raise(open ? 'accounts' : 'chat', open);
+    if (this.tiling) this.accountsView.shown(open);
+    else this.accountsView.show(open);
     const conv = this.store.conversation(this.store.active);
     if (was && !open && conv) this.seen(conv);
     this.renderRail();
@@ -1808,7 +1859,8 @@ export class App {
 
   private renderRail(): void {
     const items = [...this.store.conversations.values()].map((c) => {
-      const active = !this.newsOpen && !this.filesOpen && !this.reportsOpen && c.id === this.store.active;
+      const active =
+        !this.newsOpen && !this.filesOpen && !this.reportsOpen && !this.accountsOpen && c.id === this.store.active;
       // Only a conversation whose other half is on the roster has a face
       // to show. One carried by an account alone — mail from someone who
       // is not here — falls back to the default icon.
@@ -1882,6 +1934,16 @@ export class App {
       );
       reports.onclick = () => this.showReports(true);
     }
+    let accounts: HTMLElement | null = null;
+    if (conn && mayAdminister(conn.accounts) && conn.state !== 'offline') {
+      accounts = h(
+        'button',
+        { class: `rail-item${this.accountsOpen ? ' on' : ''}`, title: 'Accounts' },
+        h('span', { class: 'rail-glyph' }, '☺'),
+        h('span', { class: 'rail-title' }, 'Accounts'),
+      );
+      accounts.onclick = () => this.showAccounts(true);
+    }
     const [lobby, ...rest] = items;
     // Everything above the drawer's foot is redrawn and the foot is left
     // where it is: taken out and put back, it would drop the focus from
@@ -1889,7 +1951,7 @@ export class App {
     if (this.drawerFoot.parentNode !== this.rail) this.rail.append(this.drawerFoot);
     while (this.rail.firstChild !== this.drawerFoot) this.rail.firstChild!.remove();
     this.drawerFoot.before(
-      ...[h('div', { class: 'rail-head' }, 'Conversations'), lobby, news, files, reports, ...rest].filter(
+      ...[h('div', { class: 'rail-head' }, 'Conversations'), lobby, news, files, reports, accounts, ...rest].filter(
         (el): el is HTMLElement => !!el,
       ),
     );
@@ -2236,6 +2298,8 @@ export class App {
           pane(this.files.el, 'files', 'Files', 320),
           // Off until a moderator logs in: nobody else has any reports.
           offPane(pane(this.moderation.el, 'reports', 'Reports', 360)),
+          // Off until someone who may read or make accounts logs in.
+          offPane(pane(this.accountsView.el, 'accounts', 'Accounts', 360)),
         ),
         // Both live inside `.panes` rather than the document, so the
         // slide-in panel is bounded by the pane area and never covers

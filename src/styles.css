@@ -1050,7 +1050,7 @@ dialog.picker header input { width: 9rem; }
 
 /* The chat pane and the news reader take turns in the main column, under
    the call bar and the tiles. */
-.chat-pane, .news, .files-view, .mod-view {
+.chat-pane, .news, .files-view, .mod-view, .accounts-view {
   flex: 1;
   min-height: 0;
   min-width: 0;
@@ -1660,3 +1660,18 @@ dialog.settings button.ghost {
   font-size: 0.82rem;
 }
 dialog.settings button.ghost:hover { background: var(--surface-2); color: var(--text); }
+
+/* --- accounts --------------------------------------------------------- */
+
+.accounts-body { flex: 1; min-height: 0; display: flex; gap: 0.75rem; padding: 0.5rem 0.75rem 1rem; overflow-y: auto; }
+.accounts-list { flex: 0 0 12rem; display: flex; flex-direction: column; gap: 0.2rem; }
+.accounts-row { display: flex; gap: 0.5rem; align-items: baseline; text-align: left; }
+.accounts-row.on { border-color: var(--accent); color: var(--accent); }
+.accounts-login { font-weight: 600; }
+.accounts-editor { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 0.5rem; }
+.accounts-editor > label { display: flex; gap: 0.5rem; align-items: center; }
+.accounts-group { display: grid; grid-template-columns: repeat(auto-fill, minmax(11rem, 1fr)); gap: 0.2rem 0.75rem; border: 1px solid var(--line); border-radius: 6px; }
+@media (max-width: 40em) {
+  .accounts-body { flex-direction: column; }
+  .accounts-list { flex: none; max-height: 35vh; overflow-y: auto; }
+}

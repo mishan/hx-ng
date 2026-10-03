@@ -118,7 +118,8 @@ test.describe('identity: enrollment and login against a real hxd-ng server', () 
       .first()
       .textContent({ timeout: 10_000 });
     expect(loginFrameText).toContain(fingerprint);
-    expect(loginFrameText).toContain('"caps":["identity"]');
+    // Among whatever else the server offers.
+    expect(loginFrameText).toMatch(/"caps":\[[^\]]*"identity"/);
 
     // --- 5. Resume still works — the identity path is only for a fresh
     //        login, and a dropped socket must not need it again. -------

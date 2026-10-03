@@ -26,6 +26,10 @@ import {
   isReply,
   RATE_LIMITED,
   RESYNC_REQUIRED,
+  type AccessSet,
+  type AccountEditParams,
+  type AccountListOk,
+  type AccountOk,
   type BlocksOk,
   type BlockParams,
   type EventFrame,
@@ -185,6 +189,7 @@ interface Saved {
   moderation?: ModerationCounts | null;
   banner?: BannerInfo | null;
   avatars?: AvatarLimits | null;
+  accounts?: AccessSet | null;
 }
 
 const SAVED_KEY = 'hxd-ng.session';
@@ -304,6 +309,10 @@ export class Connection {
   /** What this server takes as an avatar, from the login reply or the
    *  saved session. `null` means it has no avatars: draw icons only. */
   avatars: AvatarLimits | null = null;
+  /** What this session's account may do, from the login reply, kept
+   *  current by `account_changed` and saved with the session. `null`
+   *  means the server administers no accounts: offer no editor. */
+  accounts: AccessSet | null = null;
   /** Round-trip time of the last explicit `ping`, in milliseconds. */
   rtt: number | null = null;
 
@@ -340,6 +349,7 @@ export class Connection {
       this.moderation = saved.moderation ?? null;
       this.banner = saved.banner ?? null;
       this.avatars = saved.avatars ?? null;
+      this.accounts = saved.accounts ?? null;
     } else if (opts.resumeOnly) {
       throw new Error('no session to resume');
     }
@@ -467,6 +477,7 @@ export class Connection {
     this.moderation = ok.moderation ?? null;
     this.banner = ok.banner ?? null;
     this.avatars = ok.avatars ?? null;
+    this.accounts = ok.accounts ?? null;
     // Only a session that may detach is worth remembering: without the
     // permission a resume can only ever answer session_expired, and
     // storing a token we know is useless just invites a confusing
@@ -605,6 +616,7 @@ export class Connection {
   private async snapshot(): Promise<SyncOk> {
     const ok = await this.request<SyncOk>('sync', {});
     this.gotSnapshot = true;
+    if (ok.accounts) this.accounts = ok.accounts;
     if (this.self) this.hooks.onSnapshot?.({ self: this.self, users: ok.users, server: ok.server });
     return ok;
   }
@@ -1145,6 +1157,33 @@ export class Connection {
     return this.request<ModerationLogOk>('moderation_log', params);
   }
 
+  // --- accounts (hxd-ng's docs/account-admin.md §5) -------------------
+  //
+  // Each asks its own bit — read, create, modify or delete users — and a
+  // write is refused `outranked` when the account holds, or would be
+  // given, a bit this session does not hold.
+
+  accountList(): Promise<AccountListOk> {
+    return this.request<AccountListOk>('account_list', {});
+  }
+
+  accountGet(login: string): Promise<AccountOk> {
+    return this.request<AccountOk>('account_get', { login });
+  }
+
+  accountCreate(params: AccountEditParams): Promise<AccountOk> {
+    return this.request<AccountOk>('account_create', params);
+  }
+
+  /** Change an account. Never makes one. */
+  accountUpdate(params: AccountEditParams): Promise<AccountOk> {
+    return this.request<AccountOk>('account_update', params);
+  }
+
+  accountDelete(login: string): Promise<Record<string, never>> {
+    return this.request('account_delete', { login });
+  }
+
   async ping(): Promise<number> {
     const t0 = performance.now();
     await this.request('ping', {});
@@ -1185,6 +1224,7 @@ export class Connection {
       const id = (frame.data as { id?: unknown } | null)?.id;
       if (typeof id === 'number') this.noteHistoryId(id);
     }
+    if (frame.ev === 'account_changed') this.accounts = frame.data as AccessSet;
     this.persist();
     const set = this.handlers.get(frame.ev);
     if (!set) return; // unknown `ev` values are ignored, per spec
@@ -1218,6 +1258,7 @@ export class Connection {
       push: this.push,
       moderator: this.moderator,
       moderation: this.moderation,
+      accounts: this.accounts,
     });
   }
 

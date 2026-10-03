@@ -60,7 +60,8 @@ body.tiled .panebody > .roster,
 body.tiled .panebody > .chat-pane,
 body.tiled .panebody > .news,
 body.tiled .panebody > .files-view,
-body.tiled .panebody > .mod-view {
+body.tiled .panebody > .mod-view,
+body.tiled .panebody > .accounts-view {
   flex: 1 1 auto;
   min-height: 0;
 }
@@ -73,6 +74,7 @@ body.tiled .panebody > .mod-view {
 body.tiled .panebody > .chat-pane[hidden],
 body.tiled .panebody > .news[hidden],
 body.tiled .panebody > .files-view[hidden],
-body.tiled .panebody > .mod-view[hidden] {
+body.tiled .panebody > .mod-view[hidden],
+body.tiled .panebody > .accounts-view[hidden] {
   display: flex !important;
 }

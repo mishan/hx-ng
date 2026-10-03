@@ -191,6 +191,8 @@ export class ClassicConnection implements Session {
   push: Session['push'] = null;
   moderator = false;
   moderation: Session['moderation'] = null;
+  /** No account administration over this wire yet: no editor offered. */
+  accounts: Session['accounts'] = null;
   banner: Session['banner'] = null;
   avatars: Session['avatars'] = null;
   news: NewsConfig | null = null;
@@ -1234,6 +1236,21 @@ export class ClassicConnection implements Session {
   }
   async moderationLog(): Promise<never> {
     throw unavailable('moderation');
+  }
+  async accountList(): Promise<never> {
+    throw unavailable('account administration');
+  }
+  async accountGet(): Promise<never> {
+    throw unavailable('account administration');
+  }
+  async accountCreate(): Promise<never> {
+    throw unavailable('account administration');
+  }
+  async accountUpdate(): Promise<never> {
+    throw unavailable('account administration');
+  }
+  async accountDelete(): Promise<never> {
+    throw unavailable('account administration');
   }
   async uploadMedia(): Promise<never> {
     throw unavailable('sending images');

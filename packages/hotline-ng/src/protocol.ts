@@ -301,6 +301,9 @@ export interface LoginOk {
   /** Present exactly when `caps` lists `avatars`. Absent means no
    *  pictures: offer no upload, and draw every user's icon. */
   avatars?: AvatarLimits;
+  /** Present exactly when `caps` lists `accounts`: what this session's
+   *  account may do, so a client knows whether to offer an editor. */
+  accounts?: AccessSet;
 }
 
 export interface ResumeParams {
@@ -318,6 +321,8 @@ export interface SyncOk {
   server: ServerInfo;
   users: User[];
   seq: number;
+  /** As the login reply's: an `account_changed` the gap swallowed. */
+  accounts?: AccessSet;
 }
 
 // --- Private messages (docs/private-messages.md §7) ---------------------
@@ -1212,6 +1217,52 @@ export interface ModerationLogOk {
   has_more: boolean;
 }
 
+// --- Accounts (hxd-ng's docs/account-admin.md §5) -----------------------
+
+/**
+ * What an account may do: the names of its access bits — the `[access]`
+ * keys of hxd-ng's `access-bits.md` — and, by number, the bits that have
+ * none. The login reply's `accounts` block, the `account_changed` event,
+ * and every account object carry one.
+ */
+export interface AccessSet {
+  access: string[];
+  raw_bits: number[];
+}
+
+/** An account as `account_get` and the writes answer it. */
+export interface AccountInfo extends AccessSet {
+  login: string;
+  name: string;
+  /** Whether one is set. The password itself never leaves the server. */
+  password: boolean;
+  /** The linked identity's fingerprint, when the account has one. */
+  identity?: string;
+}
+
+export interface AccountListOk {
+  accounts: { login: string; name: string }[];
+}
+
+export interface AccountOk {
+  account: AccountInfo;
+}
+
+/**
+ * `account_create` and `account_update`. What is left out stays as it
+ * was; a new account takes its login as its name, no password and no
+ * access. `access` replaces the whole bitmap, `raw_bits` included — empty
+ * when omitted, so an editor sends back the `raw_bits` it was shown.
+ * `password: ""` clears the password.
+ */
+export interface AccountEditParams {
+  login: string;
+  name?: string;
+  password?: string;
+  access?: string[];
+  raw_bits?: number[];
+}
+
 // --- Voice --------------------------------------------------------------
 
 export interface VoiceParticipant {
@@ -1299,6 +1350,10 @@ export interface Events {
   msg: { from: Sender; text: string; at: number; queued: boolean; id?: number; media?: Media };
   broadcast: { from: Sender; text: string };
   kicked: Record<string, never>;
+  /** An administrator changed the account this session is logged in as;
+   *  this is what it may do now. `Connection.accounts` is already
+   *  updated when a handler hears it. */
+  account_changed: AccessSet;
   voice_offer: { cid: number; sdp: string };
   voice_ice: { cid: number; candidate: RTCIceCandidateInit | null };
   voice_status: { cid: number; participants: VoiceParticipant[] };
@@ -1468,6 +1523,11 @@ export const ERROR_TEXT: Record<string, string> = {
   no_such_report: 'There is no such report.',
   own_report: 'That report is about you. Another moderator closes it.',
   protected: 'That user cannot be moderated by you.',
+  // Accounts.
+  outranked: 'That account may do, or would be allowed to do, something you may not.',
+  no_such_account: 'There is no such account.',
+  already_exists: 'That already exists.',
+  invalid_login: 'A login is up to 31 letters, digits and _ - . @, not starting with a dot.',
   server_error: 'The server had a problem with that. It has been logged.',
 };
 

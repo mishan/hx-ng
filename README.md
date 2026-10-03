@@ -342,6 +342,7 @@ Typed into the composer:
 | `/kick <nick> [reason]`, `/ban <nick> <10m\|2h\|3d\|1w…> [reason]` | needs the kick privilege |
 | `/purge <who> [length] [reason]` | a moderator's: their lines, images and articles from the window, an hour by default |
 | `/reports` | a moderator's: open the reports |
+| `/accounts` | open the account editor, for an account that may read or make accounts |
 | `/nick <name>` | needs `use_any_name` |
 | `/icon <n>` | or click your own icon in the title bar |
 | `/drop` | close the socket without logging out — exercises resume |
@@ -453,6 +454,18 @@ Typed into the composer:
   puts right a changed endpoint or a server that has changed its key
   since. Logging out leaves notifications on, since being away is what
   they are for. Only **Notify** turns them off.
+- **Accounts are edited where the server says they may be.** A server
+  with the `accounts` capability says in the login reply what this
+  session's account may do, and a session that may read or make accounts
+  gets **Accounts** on the rail. A privilege the editor does not hold is
+  shown and not offered, and an account holding one is shown read-only,
+  since the server would refuse either. The server also ranks accounts
+  by settings in their files this client cannot see; an account it
+  refuses for those is shown read-only, saying so, from then on. An edit sends only what changed,
+  so renaming an account does not rewrite what it may do, and the bits
+  this client has no name for travel back as they came. When an
+  administrator changes your own account, `account_changed` says what
+  it may do now, and the rail follows.
 - **Anyone can report, and a moderator acts where the report is.** A
   line, a private message and an article each have a **Report** button,
   and a person has one in the ⋯ menu on their user-list row. Whichever

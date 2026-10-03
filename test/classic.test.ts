@@ -326,11 +326,18 @@ describe('ClassicConnection', () => {
         [0x65, '\r *** alice was kicked for chat spamming'],
         [0x67, u16(1)],
       ]),
+      // A two-line emote, each line formatted as mhxd formats it.
+      frame(0x6a, 0, [
+        [0x65, '\r *** alice waves\r *** alice and bows'],
+        [0x67, u16(1)],
+      ]),
     );
     expect(chat.mock.calls.map((c) => [c[0].from, c[0].text, c[0].style])).toEqual([
       [{ uid: 1, nick: 'alice' }, 'hello, café', 'normal'],
       [{ uid: 1, nick: 'alice' }, 'says: look:  here', 'action'],
       [{ uid: 1, nick: 'alice' }, 'was kicked for chat spamming', 'action'],
+      [{ uid: 1, nick: 'alice' }, 'waves', 'action'],
+      [{ uid: 1, nick: 'alice' }, 'and bows', 'action'],
     ]);
     expect(notice.mock.calls.map((c) => c[0].text)).toEqual(['The server is going down at noon.', '*** alice waves']);
   });
@@ -498,6 +505,18 @@ describe('ClassicConnection', () => {
     expect(flatThreads.threads).toHaveLength(1);
     const article = await conn.newsArticle(flatThreads.threads[0]!.article.id);
     expect(article.body).toBe('Welcome.\nBe nice.');
+
+    // A post to it reaches a view showing it, and the next read asks
+    // again.
+    const posted = vi.fn();
+    conn.on('news_posted', posted);
+    ws.serve(frame(102, 0, [[0x65, 'Hello.']]));
+    expect(posted).toHaveBeenCalledWith(expect.objectContaining({ category: nodes[1]!.id, root: article.id }));
+    const reread = conn.newsArticle(article.id);
+    const ask = ws.take()[0]!;
+    expect(ask.type).toBe(101);
+    ws.serve(frame(TASK, ask.trans, [[0x65, 'Hello.\rWelcome.']]));
+    expect((await reread).body).toBe('Hello.\nWelcome.');
   });
 
   it('ends the session when the socket goes', async () => {
@@ -615,6 +634,24 @@ describe('ClassicConnection, when the server does not cooperate', () => {
     void conn.newsTree();
     await vi.advanceTimersByTimeAsync(0);
     expect(ws.take().map((t) => t.type)).toEqual([370]);
+  });
+
+  it('asks no faster than mhxd lets a client, and the user’s own lines count', async () => {
+    const { conn, ws } = await online();
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    // A file listing is three points to mhxd; the budget is sixty in five
+    // seconds, so twenty go at once and the rest wait their turn.
+    const asked = Array.from({ length: 30 }, () => conn.filesList(''));
+    for (const a of asked) a.catch(() => {});
+    expect(ws.take()).toHaveLength(20);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(ws.take()).toHaveLength(4);
+    // A chat line goes at once, and what it spends the next request waits
+    // for.
+    await conn.chat({ text: 'hi' });
+    expect(ws.take().map((t) => t.type)).toEqual([105]);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(ws.take()).toHaveLength(3);
   });
 
   it('opens a folder by the bytes the server named it with', async () => {
@@ -804,6 +841,28 @@ describe('route', () => {
     });
     await expect(route('hotline://hl.example:5500')).rejects.toThrow('no relay');
     expect(inits.every((i) => i?.redirect === 'error')).toBe(true);
+  });
+
+  it('names a socket elsewhere only off the classic port, and keeps where it was found', async () => {
+    // Every other origin refuses at once.
+    const only = (docs: Record<string, object>) =>
+      vi.stubGlobal('fetch', (url: string) => {
+        const doc = docs[new URL(url).origin];
+        return doc ? Promise.resolve(new Response(JSON.stringify(doc))) : Promise.reject(new Error('refused'));
+      });
+    only({ 'https://hl.example:5700': { v: 1, ng: { trtp: 'wss://relay.example/trtp' } } });
+    expect(await route('hotline://hl.example:5500')).toMatchObject({ wire: 'classic', url: 'wss://relay.example/trtp' });
+    // An ng server on the host's web port may be another server.
+    only({ 'https://hl.example': { ng: { ws: '/ng' } } });
+    expect(await route('hotline://hl.example:5500')).toEqual({
+      wire: 'ng',
+      url: 'wss://hl.example/ng',
+      name: '',
+      shared: true,
+    });
+    // A socket beside the classic port is an HTTP request Janus bans for.
+    only({ 'https://hl.example:5700': { ng: { ws: 'wss://hl.example:5501/ng' } } });
+    await expect(route('hotline://hl.example:5500')).rejects.toThrow('no relay');
   });
 
   it('reads past a document that is not one', async () => {

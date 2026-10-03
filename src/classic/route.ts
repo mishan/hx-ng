@@ -14,17 +14,17 @@
  * behind a relay, reached through its `/trtp`.
  */
 
-export type Route =
-  | { wire: 'ng'; url: string }
-  | {
-      wire: 'classic';
-      url: string;
-      name: string;
-      /** Found on the host's web port rather than beside the classic one,
-       *  so it may front a different Hotline server on that host from the
-       *  one the address names: the document does not say which. */
-      shared: boolean;
-    };
+export interface Route {
+  wire: 'ng' | 'classic';
+  url: string;
+  /** The server's name, as its discovery document gives it. */
+  name: string;
+  /** Found on the host's web port rather than beside the classic one, so
+   *  it may front a different Hotline server on that host from the one
+   *  the address names, whichever wire it speaks: the document does not
+   *  say which. */
+  shared: boolean;
+}
 
 /** How long one probe may take. A firewall that drops rather than refuses
  *  would otherwise hold the form for as long as the browser lets it. */
@@ -58,20 +58,34 @@ function str(v: unknown): string | undefined {
   return typeof v === 'string' && v ? v : undefined;
 }
 
+/** The port a socket URL reaches. */
+function portOf(u: URL): number {
+  return u.port ? Number(u.port) : u.protocol === 'wss:' ? 443 : 80;
+}
+
 /** What a discovery document says, or `null` for one that says nothing
- *  this client can use — whatever shape it came in. */
-function fromDoc(doc: unknown, at: string, shared: boolean): Route | null {
+ *  this client can use — whatever shape it came in. `classic` is the
+ *  address it was found for, whose own port and transfer port no socket
+ *  it names may be on: a WebSocket there is an HTTP request to a Hotline
+ *  server, which Janus bans the sender for. Anywhere else is the
+ *  document's to say, as hotline-ng-auth.md lets it. */
+function fromDoc(
+  doc: unknown,
+  at: string,
+  shared: boolean,
+  classic?: { host: string; port: number },
+): Route | null {
   if (typeof doc !== 'object' || doc === null) return null;
   const d = doc as Record<string, unknown>;
   const ng = typeof d.ng === 'object' && d.ng !== null ? (d.ng as Record<string, unknown>) : {};
   const ws = str(ng.ws);
-  if (ws) return { wire: 'ng', url: socketUrl(ws, at) };
   const trtp = str(ng.trtp);
-  if (!trtp) return null;
-  const url = socketUrl(trtp, at);
-  // A socket elsewhere than its document could be the classic port.
-  if (new URL(url).host !== new URL(at).host) return null;
-  return { wire: 'classic', url, name: str(d.name) ?? '', shared };
+  const ref = ws ?? trtp;
+  if (!ref) return null;
+  const url = socketUrl(ref, at);
+  const u = new URL(url);
+  if (classic && u.hostname === classic.host && [classic.port, classic.port + 1].includes(portOf(u))) return null;
+  return { wire: ws ? 'ng' : 'classic', url, name: str(d.name) ?? '', shared };
 }
 
 /** `hotline://host:port` or `host:port`, as a host — an IPv6 one in
@@ -151,14 +165,14 @@ export async function route(address: string): Promise<Route> {
     } catch {
       /* No discovery: the ng listener, as before there was any. */
     }
-    return { wire: 'ng', url: address };
+    return { wire: 'ng', url: address, name: '', shared: false };
   }
 
   // Every candidate at once, and the best answer taken as soon as it is
   // known: a candidate that hangs holds up only the ones it outranks.
   const answers = candidates(classic).map((c) =>
     discover(c.base).then(
-      (a) => fromDoc(a.doc, a.at, c.shared),
+      (a) => fromDoc(a.doc, a.at, c.shared, classic),
       () => null,
     ),
   );

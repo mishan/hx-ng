@@ -470,7 +470,7 @@ export class App {
     const way = await route(d.url);
     // A relay on the host's web port may front another server there; a
     // password goes to it only once the user has seen whose it is.
-    if (way.wire === 'classic' && way.shared && d.login.trim()) {
+    if (way.shared && d.login.trim()) {
       const named = way.name ? `“${way.name}”` : 'a Hotline server it does not name';
       const yes = await ask({
         title: 'Log in here?',

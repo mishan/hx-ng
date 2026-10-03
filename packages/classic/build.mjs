@@ -47,7 +47,9 @@ if (cli !== pinned) {
   process.exit(1);
 }
 
-run('cargo', ['build', '--release', '--target', 'wasm32-unknown-unknown', '--locked']);
+// Here, whatever CARGO_TARGET_DIR says: `wasm` below is read from here,
+// and one built elsewhere would leave a stale module to be packaged.
+run('cargo', ['build', '--release', '--target', 'wasm32-unknown-unknown', '--locked', '--target-dir', join(here, 'target')]);
 run('wasm-bindgen', ['--target', 'web', '--out-dir', pkg, '--out-name', 'hxclassic', wasm]);
 const out = join(pkg, 'hxclassic_bg.wasm');
 if (have('wasm-opt')) {

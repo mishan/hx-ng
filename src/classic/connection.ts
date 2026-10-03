@@ -88,6 +88,29 @@ const REQUEST_MS = 20_000;
 
 const THREAD_FETCHES = 4;
 
+/**
+ * How fast this client spends the server's patience. mhxd charges every
+ * transaction points from a table — ten for anything it does not list,
+ * which is all of threaded news — and kicks and bans a client past
+ * `spam_max` (100) inside `spam_time` (five seconds); hxd-ng does the
+ * same. A thread is a body per article, so one read in a burst is a ban.
+ * What this client asks for itself draws on a budget of most of that,
+ * waiting its turn when it runs out, and what the user sends counts
+ * against it too, so the rest stays theirs.
+ */
+const BUDGET = 60;
+const BUDGET_MS = 5000;
+
+/** mhxd's price for each request this client waits on an answer to. */
+const PRICE: Partial<Record<ClassicReply['type'], number>> = {
+  news_file: 20,
+  file_list: 3,
+};
+const DEFAULT_PRICE = 10;
+
+/** How long a category's listing is good for a thread opened from it. */
+const LISTING_REUSE_MS = 30_000;
+
 /** How long after the login a server has to send its user list, which
  *  is what the login waits on. */
 const ROSTER_MS = 15_000;
@@ -197,6 +220,15 @@ export class ClassicConnection implements Session {
   private nextId = 1;
   /** The flat news file, once read: it is all one article. */
   private flatText: string | null = null;
+  /** Each category's last listing, for the thread opened from it. */
+  private listed = new Map<number, { at: number; ids: number[] }>();
+  /** Points left of the budget, and when it was last refilled. */
+  private points = BUDGET;
+  private refilled = Date.now();
+  /** The requests waiting for points, in the order they were asked, and
+   *  how many there are. */
+  private queue: Promise<void> = Promise.resolve();
+  private queued = 0;
   /** Whether the server answers threaded news at its root; `false` once
    *  it has ignored or refused it, so the root stops waiting on it. */
   private threaded: boolean | null = null;
@@ -396,10 +428,24 @@ export class ClassicConnection implements Session {
       case 'disconnecting':
         this.emit('notice', { text: e.text });
         return;
-      case 'news_posted':
-        // The flat file is stale; the next read fetches it again.
+      case 'news_posted': {
+        // The flat file is stale; the next read fetches it again, and a
+        // view showing it is told so, as an ng post would tell it.
         this.flatText = null;
+        const category = this.nodeId({ kind: 'flat' });
+        const id = this.postId(category, 0);
+        this.emit('news_posted', {
+          id,
+          category,
+          root: id,
+          parent: null,
+          subject: 'News',
+          from: { nick: this.serverName },
+          at: Math.floor(Date.now() / 1000),
+          attachments: 0,
+        });
         return;
+      }
       case 'failed': {
         const w = this.waiting.get(e.trans);
         if (w) {
@@ -514,7 +560,9 @@ export class ClassicConnection implements Session {
    *  guests are common on a classic server — the newest, since servers
    *  number users as they arrive and we have only just. */
   private byNick(users: User[]): User | undefined {
-    const named = users.filter((u) => u.nick === this.creds.nick);
+    // As the server keeps it: cut to the wire's 31 characters.
+    const nick = [...this.creds.nick].slice(0, 31).join('');
+    const named = users.filter((u) => u.nick === nick);
     const iconed = named.filter((u) => u.icon === this.creds.icon);
     const pool = iconed.length ? iconed : named;
     return pool.reduce<User | undefined>((a, u) => (!a || u.uid > a.uid ? u : a), undefined);
@@ -610,10 +658,17 @@ export class ClassicConnection implements Session {
     const at = Math.floor(Date.now() / 1000);
     let last: Sender | null = null;
     let first = true;
+    // mhxd formats every line of a multi-line emote as one: ` *** alice …`.
+    let acting = false;
     for (const line of text.split('\n')) {
       if (!line.trim()) continue;
       if (!first) {
         const speaker: Sender = last ?? this.sender(uid, '');
+        const again = acting ? /^\s?\*\*\*\s([\s\S]*)$/.exec(line)?.[1] : undefined;
+        if (again?.startsWith(`${speaker.nick} `)) {
+          this.emit('chat', { from: speaker, text: again.slice(speaker.nick.length + 1), style: 'action', at });
+          continue;
+        }
         const said = /^\s*(?:\[\d{1,2}:\d{2}\]\s+)?(.+?):\s\s([\s\S]*)$/.exec(line);
         const shown = said?.[1]!.trim() ?? '';
         // mhxd cuts a name to thirteen characters in the line it formats.
@@ -633,6 +688,7 @@ export class ClassicConnection implements Session {
         const who = uid ? this.roster.get(uid) : undefined;
         if (who && rest.startsWith(`${who.nick} `)) {
           last = { uid, nick: who.nick };
+          acting = true;
           this.emit('chat', { from: last, text: rest.slice(who.nick.length + 1), style: 'action', at });
         } else {
           last = null;
@@ -683,11 +739,47 @@ export class ClassicConnection implements Session {
 
   // --- requests ---------------------------------------------------------
 
-  /** Send through the session and wait for the event that answers it. */
-  private ask<T extends ClassicReply['type']>(
+  private refill(): void {
+    const now = Date.now();
+    this.points = Math.min(BUDGET, this.points + ((now - this.refilled) * BUDGET) / BUDGET_MS);
+    this.refilled = now;
+  }
+
+  /** Count `price` against the budget now, whatever is left. */
+  private spend(price: number): void {
+    this.refill();
+    this.points -= price;
+  }
+
+  /** Spend `price` now if nothing is waiting and the budget has it;
+   *  otherwise a wait, behind whatever asked first, until it does. */
+  private pace(price: number): Promise<void> | null {
+    this.refill();
+    if (!this.queued && this.points >= price) {
+      this.points -= price;
+      return null;
+    }
+    this.queued++;
+    const turn = this.queue.then(async () => {
+      this.refill();
+      if (this.points < price) {
+        await new Promise((r) => setTimeout(r, ((price - this.points) * BUDGET_MS) / BUDGET));
+      }
+      this.spend(price);
+      this.queued--;
+    });
+    this.queue = turn;
+    return turn;
+  }
+
+  /** Send through the session, once the budget allows, and wait for the
+   *  event that answers it. */
+  private async ask<T extends ClassicReply['type']>(
     type: T,
     send: (s: ClassicSession) => number,
   ): Promise<Extract<ClassicReply, { type: T }>> {
+    const wait = this.pace(PRICE[type] ?? DEFAULT_PRICE);
+    if (wait) await wait;
     const s = this.s;
     if (!s || !this.online) return Promise.reject(new WireFailure({ code: 'not_logged_in', text: '' }));
     let trans: number | undefined;
@@ -712,10 +804,12 @@ export class ClassicConnection implements Session {
     });
   }
 
-  /** Send through the session when nothing will answer. */
-  private tell(send: (s: ClassicSession) => unknown): void {
+  /** Send through the session when nothing will answer, at once: what
+   *  the user sends is never held back, only counted. */
+  private tell(price: number, send: (s: ClassicSession) => unknown): void {
     const s = this.s;
     if (!s || !this.online) throw new WireFailure({ code: 'not_logged_in', text: '' });
+    this.spend(price);
     try {
       this.guard(() => send(s));
     } catch (e) {
@@ -728,7 +822,7 @@ export class ClassicConnection implements Session {
   async request<T = unknown>(req: string, params: unknown = {}): Promise<T> {
     const p = params as { text?: string; style?: string; nick?: string; icon?: number };
     if (req === 'chat' && typeof p.text === 'string') {
-      this.tell((s) => s.chat(p.text!, p.style === 'action'));
+      this.tell(2, (s) => s.chat(p.text!, p.style === 'action'));
       return {} as T;
     }
     if (req === 'nick') {
@@ -737,7 +831,7 @@ export class ClassicConnection implements Session {
       const icon = p.icon ?? me?.icon ?? this.creds.icon;
       // byNick finds us by it.
       this.creds = { ...this.creds, nick, icon };
-      this.tell((s) => s.setNick(nick, icon));
+      this.tell(20, (s) => s.setNick(nick, icon));
       return {} as T;
     }
     throw unavailable(`the “${req}” request`);
@@ -751,7 +845,7 @@ export class ClassicConnection implements Session {
 
   async chat(params: { text: string; media?: string }): Promise<Record<string, never>> {
     if (params.media) throw unavailable('sending images');
-    this.tell((s) => s.chat(params.text, false));
+    this.tell(2, (s) => s.chat(params.text, false));
     return {};
   }
 
@@ -761,7 +855,7 @@ export class ClassicConnection implements Session {
     if (params.media) throw unavailable('sending images');
     // A classic server answers a message only when it refuses one, and
     // that refusal arrives as a notice.
-    this.tell((s) => s.message(to, params.text));
+    this.tell(2, (s) => s.message(to, params.text));
     return { queued: false };
   }
 
@@ -917,8 +1011,12 @@ export class ClassicConnection implements Session {
   }
 
   /** A category's articles, as the server lists them: threads are read
-   *  back out of the parent each article names. */
-  private async category(id: number): Promise<number[]> {
+   *  back out of the parent each article names. `reuse` takes the last
+   *  listing if it is recent — a thread opened from the category just
+   *  listed — rather than spending a request on it again. */
+  private async category(id: number, reuse = false): Promise<number[]> {
+    const last = this.listed.get(id);
+    if (reuse && last && Date.now() - last.at < LISTING_REUSE_MS) return last.ids;
     const node = this.node(id);
     if (node.kind === 'flat') {
       const post = this.postId(id, 0);
@@ -952,6 +1050,7 @@ export class ClassicConnection implements Session {
       });
       ids.push(post);
     }
+    this.listed.set(id, { at: Date.now(), ids });
     return ids;
   }
 
@@ -1013,7 +1112,7 @@ export class ClassicConnection implements Session {
     if (params.after !== undefined) return { articles: [], has_more: false, snapshot: 0 };
     const root = this.posts.get(params.root);
     if (!root) throw new WireFailure({ code: 'no_such_article', text: '' });
-    const ids = await this.category(root.node);
+    const ids = await this.category(root.node, true);
     const children = new Map<number | null, number[]>();
     for (const id of ids) {
       const p = this.posts.get(id)!;

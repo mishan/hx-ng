@@ -96,6 +96,15 @@ export class IdentityPanel {
   /** Set when a certificate was renewed in the background, so the panel
    *  can say so the next time it is opened. */
   private renewedQuietly = false;
+  /** How "Renew now" is going. On the panel rather than in the elements
+   *  that show it, because the panel renders again whenever discovery
+   *  answers, and one that answers after the click would otherwise
+   *  replace the elements the outcome is written to. */
+  private renewal: { busy: boolean; status: string | null; error: string | null } = {
+    busy: false,
+    status: null,
+    error: null,
+  };
 
   constructor(
     private serverUrl: () => string,
@@ -132,6 +141,7 @@ export class IdentityPanel {
       // render, since an open panel renders again as its mailbox loads.
       this.becameLabel = null;
       this.renewedQuietly = false;
+      this.renewal = { busy: false, status: null, error: null };
       return;
     }
     if (this.device || this.unsupported) this.render();
@@ -638,10 +648,9 @@ export class IdentityPanel {
       name: device.label,
     });
 
-    const status = h('p', { class: 'muted', hidden: true });
-    const error = h('p', { class: 'error', hidden: true });
-    const renewBtn = h('button', { class: 'primary' }, 'Renew now');
-    renewBtn.onclick = () => void this.renewNow(device, status, error, renewBtn);
+    const { busy, status, error } = this.renewal;
+    const renewBtn = h('button', { class: 'primary', disabled: busy }, 'Renew now');
+    renewBtn.onclick = () => void this.renewNow(device);
 
     return h(
       'div',
@@ -667,8 +676,8 @@ export class IdentityPanel {
                 )
               : null,
             renewBtn,
-            status,
-            error,
+            status ? h('p', { class: 'muted' }, status) : null,
+            error ? h('p', { class: 'error' }, error) : null,
           )
         : null,
       h('p', { class: 'note' }, 'Or run this again wherever hlid is, and paste the result below:'),
@@ -681,19 +690,12 @@ export class IdentityPanel {
     );
   }
 
-  private async renewNow(
-    device: StoredDevice,
-    status: HTMLElement,
-    error: HTMLElement,
-    btn: HTMLButtonElement,
-  ): Promise<void> {
-    if (!this.mailbox || !device.cert || !device.fingerprint) return;
-    error.hidden = true;
-    status.hidden = false;
-    status.textContent = 'Waiting for the other end to approve…';
-    btn.disabled = true;
+  private async renewNow(device: StoredDevice): Promise<void> {
+    if (!this.mailbox || !device.cert || !device.fingerprint || this.renewal.busy) return;
+    this.renewal = { busy: true, status: 'Waiting for the other end to approve…', error: null };
+    this.renderIfShowing();
     this.waiting?.abort();
-    this.waiting = new AbortController();
+    const waiting = (this.waiting = new AbortController());
     try {
       const outcome = await renewWithoutCode({
         mailbox: this.mailbox,
@@ -707,7 +709,7 @@ export class IdentityPanel {
         // `tryAutoRenewal` has always got this right; the button did not.
         days: Math.min(this.certDays, certLifetimeDays(decodeDeviceCert(device.cert))),
         pinned: device.fingerprint,
-        signal: this.waiting.signal,
+        signal: waiting.signal,
       });
       switch (outcome.kind) {
         case 'no-holder':
@@ -723,14 +725,15 @@ export class IdentityPanel {
           await this.keep(device, outcome.cert, outcome.card, outcome.result, 'renewed');
           break;
       }
+      this.renewal = { busy: false, status: null, error: null };
     } catch (e) {
-      status.hidden = true;
-      error.textContent = e instanceof Error ? e.message : String(e);
-      error.hidden = false;
+      // A panel closed meanwhile has said all it is going to.
+      if (waiting.signal.aborted) return;
+      this.renewal = { busy: false, status: null, error: e instanceof Error ? e.message : String(e) };
     } finally {
-      btn.disabled = false;
-      this.waiting = null;
+      if (this.waiting === waiting) this.waiting = null;
     }
+    this.renderIfShowing();
   }
 
   private async forget(): Promise<void> {

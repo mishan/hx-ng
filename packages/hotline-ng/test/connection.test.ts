@@ -519,6 +519,66 @@ describe('moderation', () => {
   });
 });
 
+describe('accounts', () => {
+  const ADMIN = { access: ['read_users', 'modify_users'], raw_bits: [] };
+
+  it('keeps what the account may do current, and saved for a resume', async () => {
+    server.on('login', () => ({ ok: loginOk({ caps: ['accounts'], accounts: ADMIN }) }));
+    const conn = await connect();
+    expect(conn.accounts).toEqual(ADMIN);
+
+    let heard: unknown = null;
+    conn.on('account_changed', () => (heard = conn.accounts));
+    const demoted = { access: ['read_users'], raw_bits: [41] };
+    server.event('account_changed', demoted);
+    await settle();
+    expect(heard).toEqual(demoted);
+    const saved = JSON.parse(sessionStorage.getItem('hxd-ng.session')!) as { accounts: unknown };
+    expect(saved.accounts).toEqual(demoted);
+  });
+
+  it('takes what a resync says, for a change the gap swallowed', async () => {
+    server.on('login', () => ({ ok: loginOk({ caps: ['accounts'], accounts: ADMIN }) }));
+    await connect();
+    const demoted = { access: [], raw_bits: [] };
+    server.on('resume', () => ({ error: { code: 'resync_required', text: 'gap' } }));
+    server.on('sync', () => ({ ok: { server: { name: 'Test', subject: 'hi' }, users: [], seq: 977, accounts: demoted } }));
+    const resumed = new Connection(CREDS);
+    await resumed.start();
+    await settle();
+    expect(resumed.accounts).toEqual(demoted);
+    // And saved with the seq it is good for, so a reload does not bring
+    // back what the gap swallowed.
+    const saved = JSON.parse(sessionStorage.getItem('hxd-ng.session')!) as { accounts: unknown; seq: number };
+    expect(saved).toMatchObject({ accounts: demoted, seq: 977 });
+  });
+
+  it('has none where the server administers none', async () => {
+    const conn = await connect();
+    expect(conn.accounts).toBeNull();
+  });
+
+  it('sends the frames the wire specifies', async () => {
+    const conn = await connect();
+    const account = { login: 'eve', name: 'Eve', password: true, access: [], raw_bits: [] };
+    server.on('account_list', () => ({ ok: { accounts: [{ login: 'eve', name: 'Eve' }] } }));
+    for (const req of ['account_get', 'account_create', 'account_update']) server.on(req, () => ({ ok: { account } }));
+    server.on('account_delete', () => ({ ok: {} }));
+
+    expect(await conn.accountList()).toEqual({ accounts: [{ login: 'eve', name: 'Eve' }] });
+    expect(await conn.accountGet('eve')).toEqual({ account });
+    await conn.accountCreate({ login: 'eve', password: 'pw', access: ['read_chat'] });
+    await conn.accountUpdate({ login: 'eve', name: 'Eve', access: [], raw_bits: [41] });
+    await conn.accountDelete('eve');
+
+    expect(server.sent('account_list')[0]?.params).toEqual({});
+    expect(server.sent('account_get')[0]?.params).toEqual({ login: 'eve' });
+    expect(server.sent('account_create')[0]?.params).toEqual({ login: 'eve', password: 'pw', access: ['read_chat'] });
+    expect(server.sent('account_update')[0]?.params).toEqual({ login: 'eve', name: 'Eve', access: [], raw_bits: [41] });
+    expect(server.sent('account_delete')[0]?.params).toEqual({ login: 'eve' });
+  });
+});
+
 describe('identity login', () => {
   const identityCreds = (getToken: () => Promise<string>): Credentials => ({
     ...CREDS,

@@ -37,6 +37,7 @@ type SessionOf<C extends Connection> = Pick<
   | 'moderation'
   | 'banner'
   | 'avatars'
+  | 'accounts'
   | 'start'
   | 'logout'
   | 'drop'
@@ -91,4 +92,9 @@ type SessionOf<C extends Connection> = Pick<
   | 'fetchNewsAttachment'
   | 'pushRegister'
   | 'pushUnregister'
+  | 'accountList'
+  | 'accountGet'
+  | 'accountCreate'
+  | 'accountUpdate'
+  | 'accountDelete'
 >;

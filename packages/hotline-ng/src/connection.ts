@@ -429,7 +429,7 @@ export class Connection {
       if (this.resumeOnly) {
         this.closing = true;
         ws.close();
-        throw new Error('session expired');
+        throw new Error('Your session has ended. Log in again.');
       }
       if (this.creds.identity) {
         // The transport token has to exist *before* the socket that

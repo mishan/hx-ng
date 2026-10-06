@@ -80,8 +80,9 @@ function row(u: User, store: Store, media: VoiceSession | null, hooks: RosterHoo
   // A session on a plain TCP legacy socket, or a tunnel that told the
   // server its own downstream hop was unencrypted. Worth a mark because
   // a private message to one of these crosses the network in the clear,
-  // and because the person it belongs to may not know.
-  if (u.transport === 'cleartext') {
+  // and because the person it belongs to may not know. A linked server's
+  // user is `unknown`, which the spec says to treat the same.
+  if (u.transport !== 'encrypted') {
     marks.push(
       h('span', {
         class: 'mark cleartext',
@@ -106,7 +107,7 @@ function row(u: User, store: Store, media: VoiceSession | null, hooks: RosterHoo
       class: `person${u.admin ? ' admin' : ''}${u.status !== 'active' ? ' away' : ''}${me ? ' me' : ''}`,
       title:
         `uid ${u.uid} · icon ${u.icon}${u.avatar ? ' · picture' : ''}${u.admin ? ' · administrator' : ''}${status ? ` · ${status}` : ''}` +
-        (u.transport === 'cleartext' ? ' · unencrypted' : '') +
+        (u.transport !== 'encrypted' ? ' · unencrypted' : '') +
         // The handle is the part of an identity a person can read back;
         // the fingerprint is shortened because 52 characters in a
         // tooltip is not something anyone compares by eye.

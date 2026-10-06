@@ -24,8 +24,11 @@ import {
 import {
   isEvent,
   isReply,
+  ERROR_TEXT,
+  FLOODING,
   RATE_LIMITED,
   RESYNC_REQUIRED,
+  TOO_MANY_CONNECTIONS,
   type AccessSet,
   type AccountEditParams,
   type AccountListOk,
@@ -269,6 +272,8 @@ export class Connection {
    *  hands one back and Node the other, and nothing here cares which. */
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
   private closing = false;
+  /** Answered `flooding`: the `kicked` close that follows is for that. */
+  private flooded = false;
 
   state: ConnState = 'offline';
   /** The last seq we have actually processed. Resume's `last_seq`. */
@@ -333,6 +338,7 @@ export class Connection {
    *  the resume instead and let the caller ask for the password. */
   async start(opts: { resumeOnly?: boolean } = {}): Promise<void> {
     this.closing = false;
+    this.flooded = false;
     const saved = readSaved();
     if (saved && saved.url === this.creds.url) {
       this.session = saved.session;
@@ -433,9 +439,7 @@ export class Connection {
         // `doLogin()` on this same, tokenless socket the way a classic
         // login would. Close it and start over with one that carries a
         // token.
-        ws.onclose = null;
-        ws.onmessage = null;
-        ws.close();
+        this.discard(ws);
         await this.openTokenedSocket();
       }
       // else: today's behaviour — `doLogin()` runs on this same socket.
@@ -519,6 +523,12 @@ export class Connection {
       return true;
     } catch (e) {
       if (!(e instanceof WireFailure)) throw e;
+      if (e.wire.code === RATE_LIMITED || e.wire.code === TOO_MANY_CONNECTIONS) {
+        // The session is left as it was (§6.2): keep it, and resume later
+        // on a fresh socket rather than logging in over it.
+        if (this.ws) this.discard(this.ws);
+        throw e;
+      }
       if (e.wire.code !== RESYNC_REQUIRED) {
         // session_expired and friends: the session is gone, but the
         // socket is fine — log in on it rather than opening another.
@@ -637,7 +647,8 @@ export class Connection {
     // wins is the mobile-friendly answer, and this one lost.
     const reason = e.reason || '';
     if (reason === 'replaced') return this.end('This session was taken over by another connection.');
-    if (reason === 'kicked') return this.end('You were disconnected by an administrator.');
+    if (reason === 'kicked')
+      return this.end(this.flooded ? ERROR_TEXT[FLOODING]! : 'You were disconnected by an administrator.');
     if (reason === 'logout') return this.end('Logged out.');
 
     if (this.grace === null && this.session) {
@@ -664,17 +675,31 @@ export class Connection {
 
   /** Exponential backoff, capped well inside a five-minute grace window
    *  so a flaky network never sleeps through its own chance to resume. */
-  private scheduleRetry(): void {
-    const delay = Math.min(500 * 2 ** this.retry, 15000);
+  private scheduleRetry(retryAfter?: number): void {
+    const delay = retryAfter !== undefined ? retryAfter * 1000 : Math.min(500 * 2 ** this.retry, 15000);
     this.retry++;
     this.setState('reconnecting', `retrying in ${(delay / 1000).toFixed(1)}s`);
     this.retryTimer = setTimeout(() => {
       this.retryTimer = null;
       this.attach().catch((e) => {
-        if (e instanceof WireFailure) return this.end(e.wire.text || e.wire.code);
-        this.scheduleRetry();
+        if (!(e instanceof WireFailure)) return this.scheduleRetry();
+        // Pacing is never fatal, and a session refused a resume for its
+        // account's other connections lives on until its grace lapses.
+        const { code, retry_after } = e.wire;
+        if (code === RATE_LIMITED || (code === TOO_MANY_CONNECTIONS && this.session)) {
+          return this.scheduleRetry(retry_after);
+        }
+        this.end(e.wire.text || e.wire.code);
       });
     }, delay);
+  }
+
+  /** Close a socket without its close counting as a dropped connection. */
+  private discard(ws: WebSocket): void {
+    ws.onclose = null;
+    ws.onmessage = null;
+    ws.close();
+    if (this.ws === ws) this.ws = null;
   }
 
   private cancelRetry(): void {
@@ -1211,6 +1236,7 @@ export class Connection {
 
   private onReply(frame: ReplyFrame, raw: string): void {
     this.trace('in', `reply:${frame.error ? frame.error.code : 'ok'}`, raw, !!frame.error);
+    if (frame.error?.code === FLOODING) this.flooded = true;
     const p = this.pending.get(frame.reply);
     if (!p) return;
     this.pending.delete(frame.reply);

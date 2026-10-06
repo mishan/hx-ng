@@ -28,6 +28,9 @@
   --link: #1a56b8;
   --ok: #2f855a;
   --warn: #b45309;
+  /* The lightness a user's nick color is held to, for contrast. */
+  --nick-l-min: 0;
+  --nick-l-max: 0.5;
   --shadow: 0 1px 2px rgb(0 0 0 / 6%), 0 8px 24px rgb(0 0 0 / 6%);
 
   --mono: ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Mono", Menlo, Consolas, monospace;
@@ -50,6 +53,8 @@
     --link: #7fb4ff;
     --ok: #6fcf97;
     --warn: #f0b45b;
+    --nick-l-min: 0.72;
+    --nick-l-max: 1;
     --shadow: 0 1px 2px rgb(0 0 0 / 40%), 0 12px 32px rgb(0 0 0 / 35%);
   }
 }
@@ -69,6 +74,8 @@
   --link: #7fb4ff;
   --ok: #6fcf97;
   --warn: #f0b45b;
+  --nick-l-min: 0.72;
+  --nick-l-max: 1;
   --shadow: 0 1px 2px rgb(0 0 0 / 40%), 0 12px 32px rgb(0 0 0 / 35%);
 }
 

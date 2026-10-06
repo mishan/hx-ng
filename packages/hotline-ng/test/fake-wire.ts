@@ -119,6 +119,10 @@ export class FakeServer {
       .then((reply) => {
         if (socket.readyState !== FakeSocket.OPEN) return;
         socket.onmessage?.({ data: JSON.stringify({ reply: frame.id, ...reply }) });
+        // As the server does: every refused handshake but a resync ends
+        // the connection it came on.
+        const handshake = frame.req === 'login' || frame.req === 'resume';
+        if (handshake && reply.error && reply.error.code !== 'resync_required') socket.close();
       });
   }
 }

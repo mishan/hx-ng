@@ -774,6 +774,7 @@ button.call:disabled { opacity: 0.45; cursor: default; }
 .person:not(.me):hover { background: var(--surface-2); }
 .person .who { min-width: 0; display: flex; flex-direction: column; line-height: 1.25; }
 .person .nick { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.person .tag { font-size: 0.68rem; color: var(--muted); }
 .person .status { font-size: 0.68rem; color: var(--muted); }
 .person.admin .nick { color: var(--admin); font-weight: 620; }
 .person.me .nick { font-weight: 620; }

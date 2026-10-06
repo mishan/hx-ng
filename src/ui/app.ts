@@ -1493,12 +1493,15 @@ export class App {
     // it, and the server has the last word.
     // Not on a classic server, which has no reports and whose kick this
     // client does not send yet.
-    const mayKick = !conn.classic && (conn.moderator || this.store.self?.admin === true);
+    // The server's own account is beyond all three, and a linked server's
+    // user beyond a report or a purge here, which cannot cross the link.
+    const mayKick = !conn.classic && !u.system && (conn.moderator || this.store.self?.admin === true);
+    const local = !conn.classic && !u.system && !u.remote;
     const choice = await choose(u.nick, [
       ['message', 'Send a private message'],
-      ...(conn.classic ? [] : [['report', 'Report to the moderators…'] as ['report', string]]),
+      ...(local ? [['report', 'Report to the moderators…'] as ['report', string]] : []),
       ...(mayKick ? [['kick', 'Disconnect…', true] as ['kick', string, boolean]] : []),
-      ...(conn.moderator ? [['purge', 'Purge recent output…', true] as ['purge', string, boolean]] : []),
+      ...(local && conn.moderator ? [['purge', 'Purge recent output…', true] as ['purge', string, boolean]] : []),
     ]);
     try {
       if (choice === 'message') {

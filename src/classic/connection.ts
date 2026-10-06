@@ -634,6 +634,7 @@ export class ClassicConnection implements Session {
       // Nothing on the classic wire says otherwise, and the hop from the
       // relay to the server is plain TCP.
       transport: 'cleartext',
+      ...(u.color !== undefined ? { color: u.color } : {}),
     };
   }
 

@@ -92,6 +92,24 @@ export interface User {
    *  §4.2). A change that clears it is a `user_changed` without the key,
    *  so a roster keeps the whole object rather than merging into it. */
   avatar?: Avatar;
+  /** The nick color the user chose, `0x00RRGGBB`; for a linked server's
+   *  user, its home server's. Theirs to choose, and a client's to tone
+   *  down for contrast. */
+  color?: number;
+  /** Present only for a user of a linked server (hxd-ng's
+   *  `docs/server-link.md` §5). Such a user is never `admin`, and can be
+   *  messaged and kicked but not reported or purged. */
+  remote?: RemoteServer;
+  /** The server's own account: never kicked, banned or reported. */
+  system?: boolean;
+}
+
+export interface RemoteServer {
+  /** The home server's name. */
+  server: string;
+  tag: string;
+  /** Whether this server already puts `tag` in the user's nick. */
+  tagged: boolean;
 }
 
 /** A reference to an avatar's canonical bytes. The id is the SHA-256 of

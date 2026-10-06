@@ -19,6 +19,7 @@ import {
   type FileDownloadOk,
   type FileFetchOptions,
   type FileInfo,
+  FILES_ACTS,
   type FilesConfig,
   type FilesListOk,
 } from './files.js';
@@ -638,9 +639,19 @@ export class Connection {
   private async snapshot(): Promise<SyncOk> {
     const ok = await this.request<SyncOk>('sync', {});
     this.gotSnapshot = true;
-    if (ok.accounts) this.accounts = ok.accounts;
+    if (ok.accounts) this.adoptAccess(ok.accounts);
     if (this.self) this.hooks.onSnapshot?.({ self: this.self, users: ok.users, server: ok.server });
     return ok;
+  }
+
+  /** What this session's account may do now. The `files` block's `may`
+   *  is some of the same bits, and the server judges each change by them
+   *  as they are now, not as they were at login. */
+  private adoptAccess(set: AccessSet): void {
+    this.accounts = set;
+    if (this.files?.writable) {
+      this.files = { writable: true, may: FILES_ACTS.filter((act) => set.access.includes(act)) };
+    }
   }
 
   private onClose(e: CloseEvent): void {
@@ -1281,7 +1292,7 @@ export class Connection {
       const id = (frame.data as { id?: unknown } | null)?.id;
       if (typeof id === 'number') this.noteHistoryId(id);
     }
-    if (frame.ev === 'account_changed') this.accounts = frame.data as AccessSet;
+    if (frame.ev === 'account_changed') this.adoptAccess(frame.data as AccessSet);
     this.persist();
     const set = this.handlers.get(frame.ev);
     if (!set) return; // unknown `ev` values are ignored, per spec

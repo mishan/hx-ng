@@ -30,17 +30,19 @@ export interface FileDownloadOk {
   media_type?: string | null;
 }
 
-/** A change to the file area, by the access bit it needs. */
-export type FilesAct =
-  | 'create_folders'
-  | 'delete_files'
-  | 'delete_folders'
-  | 'rename_files'
-  | 'rename_folders'
-  | 'move_files'
-  | 'move_folders'
-  | 'comment_files'
-  | 'comment_folders';
+/** The changes to the file area, by the access bit each needs. */
+export const FILES_ACTS = [
+  'create_folders',
+  'delete_files',
+  'delete_folders',
+  'rename_files',
+  'rename_folders',
+  'move_files',
+  'move_folders',
+  'comment_files',
+  'comment_folders',
+] as const;
+export type FilesAct = (typeof FILES_ACTS)[number];
 
 /** The login reply's `files` block: what this session may change, so a
  *  client offers only what it would not be refused. */

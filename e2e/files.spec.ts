@@ -94,7 +94,7 @@ root = "files"
     await row('readme.txt').locator('.file-more').click();
     await page.getByRole('button', { name: 'Rename or move…' }).click();
     await dialog.getByLabel('New path').fill('Docs/notes.txt');
-    await dialog.getByRole('button', { name: 'Move' }).click();
+    await dialog.getByRole('button', { name: 'Save' }).click();
     await expect(row('readme.txt')).toHaveCount(0);
 
     await row('Docs').locator('.file-row').click();

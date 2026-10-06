@@ -441,8 +441,15 @@ export class App {
       const splash = h('div', { class: 'connect' }, h('p', { class: 'muted' }, 'Resuming your session…'));
       this.root.prepend(splash);
       this.connect(saved, { resumeOnly: true })
-        .catch(() => {
+        .catch((e: Error) => {
           screen.hidden = false;
+          // A session refused for now, or out of reach, is kept for the
+          // next reload; logging in here would start another beside it.
+          this.connectForm?.fail(
+            hasSavedSession(saved.url)
+              ? `${e.message.replace(/([^.!?])$/, '$1.')} Your session is still there: reload to go back into it.`
+              : e.message,
+          );
         })
         .finally(() => splash.remove());
     }

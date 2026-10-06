@@ -152,6 +152,8 @@ export interface ConnectScreen {
    *  notification tapped on this screen was for. A server the config
    *  does not let this form change is left as it is. */
   fill(d: { url: string; login: string }): void;
+  /** Say why the form is showing: a connection made for it that failed. */
+  fail(text: string): void;
 }
 
 export function connectScreen(
@@ -298,6 +300,10 @@ export function connectScreen(
         password.input.value = '';
       }
       (login.input.value ? password.input : login.input).focus();
+    },
+    fail(text) {
+      error.textContent = text;
+      error.hidden = false;
     },
   };
 }

@@ -462,7 +462,7 @@ export class Connection {
       if (this.resumeOnly) {
         this.closing = true;
         ws.close();
-        throw new Error('session expired');
+        throw new Error('Your session has ended. Log in again.');
       }
       // The server closes a connection whose resume it refused (§6.2),
       // and an identity login needs a socket opened with a token anyway.

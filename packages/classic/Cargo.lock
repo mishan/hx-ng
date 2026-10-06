@@ -52,12 +52,12 @@ dependencies = [
 [[package]]
 name = "hxproto"
 version = "0.1.0"
-source = "git+https://github.com/mishan/hx-libs.git?rev=c48d709a8efbbe112632a66ab69f1208c3809a6f#c48d709a8efbbe112632a66ab69f1208c3809a6f"
+source = "git+https://github.com/mishan/hx-libs.git?rev=694528aa38f2760950ff3dc469b20bfcbdb095bd#694528aa38f2760950ff3dc469b20bfcbdb095bd"
 
 [[package]]
 name = "hxsession"
 version = "0.1.0"
-source = "git+https://github.com/mishan/hx-libs.git?rev=c48d709a8efbbe112632a66ab69f1208c3809a6f#c48d709a8efbbe112632a66ab69f1208c3809a6f"
+source = "git+https://github.com/mishan/hx-libs.git?rev=694528aa38f2760950ff3dc469b20bfcbdb095bd#694528aa38f2760950ff3dc469b20bfcbdb095bd"
 dependencies = [
  "hxproto",
 ]

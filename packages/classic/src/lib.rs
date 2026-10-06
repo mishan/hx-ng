@@ -36,6 +36,8 @@ enum JsEvent {
         text: String,
     },
     Broadcast {
+        uid: u16,
+        from: String,
         text: String,
     },
     Disconnecting {
@@ -176,6 +178,10 @@ fn closed(c: Closed) -> (String, bool) {
             format!("The connection stopped making sense: {why}."),
             false,
         ),
+        Closed::TooLarge(n) => (
+            format!("The server sent more at once than this client takes ({n} bytes)."),
+            false,
+        ),
         Closed::Hangup => ("The connection closed.".into(), false),
         // `Closed` may grow; a reason is better than none.
         #[allow(unreachable_patterns)]
@@ -192,16 +198,23 @@ fn js_event(e: Event) -> JsEvent {
         },
         Event::Agreement(text) => JsEvent::Agreement { text },
         Event::Ready => JsEvent::Ready,
-        Event::Chat { cid, uid, text } => JsEvent::Chat { cid, uid, text },
-        Event::Message { uid, from, text } => JsEvent::Message { uid, from, text },
-        Event::Broadcast(text) => JsEvent::Broadcast { text },
+        Event::Chat { cid, uid, text, .. } => JsEvent::Chat { cid, uid, text },
+        Event::Message {
+            uid, from, text, ..
+        } => JsEvent::Message { uid, from, text },
+        Event::Broadcast { uid, from, text } => JsEvent::Broadcast { uid, from, text },
         Event::Disconnecting(text) => JsEvent::Disconnecting { text },
-        Event::UserList(users) => JsEvent::UserList {
+        Event::UserList { users, .. } => JsEvent::UserList {
             users: users.into_iter().map(user).collect(),
         },
         Event::UserChanged { cid, user: u } => JsEvent::UserChanged { cid, user: user(u) },
         Event::UserLeft { cid, uid } => JsEvent::UserLeft { cid, uid },
-        Event::SelfInfo { uid, icon, .. } => JsEvent::SelfInfo { uid, icon },
+        // Janus and hlservd leave our uid out; there is nothing to say then.
+        Event::SelfInfo {
+            uid: Some(uid),
+            icon: Some(icon),
+            ..
+        } => JsEvent::SelfInfo { uid, icon },
         Event::UserInfo { trans, name, info } => JsEvent::UserInfo { trans, name, info },
         Event::FileList { trans, files } => JsEvent::FileList {
             trans,

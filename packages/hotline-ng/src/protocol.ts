@@ -11,6 +11,8 @@
  * carries `id`, a reply `reply`, an event `seq`.
  */
 
+import type { FilesConfig } from './files.js';
+
 // --- Envelopes ----------------------------------------------------------
 
 export interface ReqFrame {
@@ -308,7 +310,8 @@ export interface LoginOk {
   avatars?: AvatarLimits;
   /** Present exactly when `caps` lists `accounts`: what this session's
    *  account may do, so a client knows whether to offer an editor. */
-  accounts?: AccessSet;
+  accounts?: AccessSet;  /** Present exactly when `caps` lists `files`. */
+  files?: FilesConfig;
 }
 
 export interface ResumeParams {

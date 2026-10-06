@@ -19,6 +19,7 @@ import {
   type FileDownloadOk,
   type FileFetchOptions,
   type FileInfo,
+  type FilesConfig,
   type FilesListOk,
 } from './files.js';
 import {
@@ -193,6 +194,7 @@ interface Saved {
   banner?: BannerInfo | null;
   avatars?: AvatarLimits | null;
   accounts?: AccessSet | null;
+  files?: FilesConfig | null;
 }
 
 const SAVED_KEY = 'hxd-ng.session';
@@ -318,6 +320,9 @@ export class Connection {
    *  current by `account_changed` and saved with the session. `null`
    *  means the server administers no accounts: offer no editor. */
   accounts: AccessSet | null = null;
+  /** What this session may change in the file area, from the login reply
+   *  or the saved session. `null` means no file area. */
+  files: FilesConfig | null = null;
   /** Round-trip time of the last explicit `ping`, in milliseconds. */
   rtt: number | null = null;
 
@@ -356,6 +361,7 @@ export class Connection {
       this.banner = saved.banner ?? null;
       this.avatars = saved.avatars ?? null;
       this.accounts = saved.accounts ?? null;
+      this.files = saved.files ?? null;
     } else if (opts.resumeOnly) {
       throw new Error('no session to resume');
     }
@@ -482,6 +488,7 @@ export class Connection {
     this.banner = ok.banner ?? null;
     this.avatars = ok.avatars ?? null;
     this.accounts = ok.accounts ?? null;
+    this.files = ok.files ?? null;
     // Only a session that may detach is worth remembering: without the
     // permission a resume can only ever answer session_expired, and
     // storing a token we know is useless just invites a confusing
@@ -874,7 +881,7 @@ export class Connection {
     return res.blob();
   }
 
-  // --- read-only Files (docs/hotline-ng.md §7.2) ----------------------
+  // --- Files (docs/hotline-ng.md §7.2) --------------------------------
 
   async filesList(path = ''): Promise<FilesListOk> {
     const listing = await this.request<FilesListOk>('files_list', path ? { path } : {});
@@ -886,6 +893,25 @@ export class Connection {
     const info = await this.request<FileInfo>('files_info', { path });
     parseDecimalU64(info.size);
     return info;
+  }
+
+  async filesMkdir(path: string): Promise<void> {
+    await this.request('files_mkdir', { path });
+  }
+
+  /** A folder goes with everything in it. */
+  async filesDelete(path: string): Promise<void> {
+    await this.request('files_delete', { path });
+  }
+
+  /** Rename, move, or both: `to` is the entry's whole new path. */
+  async filesMove(path: string, to: string): Promise<void> {
+    await this.request('files_move', { path, to });
+  }
+
+  /** `''` clears it. */
+  async filesComment(path: string, comment: string): Promise<void> {
+    await this.request('files_comment', { path, comment });
   }
 
   async prepareFileDownload(path: string): Promise<FileDownloadOk> {
@@ -1290,6 +1316,7 @@ export class Connection {
       moderator: this.moderator,
       moderation: this.moderation,
       accounts: this.accounts,
+      files: this.files,
     });
   }
 

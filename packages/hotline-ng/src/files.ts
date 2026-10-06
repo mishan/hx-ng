@@ -1,4 +1,4 @@
-/** Read-only Files wire shapes (`hxd-ng` docs/hotline-ng.md §7.2). */
+/** Files wire shapes (`hxd-ng` docs/hotline-ng.md §7.2). */
 
 export type FileKind = 'file' | 'folder';
 export type DecimalU64 = string;
@@ -28,6 +28,26 @@ export interface FileDownloadOk {
   url: string;
   size: DecimalU64;
   media_type?: string | null;
+}
+
+/** A change to the file area, by the access bit it needs. */
+export type FilesAct =
+  | 'create_folders'
+  | 'delete_files'
+  | 'delete_folders'
+  | 'rename_files'
+  | 'rename_folders'
+  | 'move_files'
+  | 'move_folders'
+  | 'comment_files'
+  | 'comment_folders';
+
+/** The login reply's `files` block: what this session may change, so a
+ *  client offers only what it would not be refused. */
+export interface FilesConfig {
+  /** `false`: nothing in the area can change, and `may` is empty. */
+  writable: boolean;
+  may: FilesAct[];
 }
 
 export interface FileFetchOptions {

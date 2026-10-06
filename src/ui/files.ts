@@ -6,8 +6,10 @@ import {
   WireFailure,
   type FileEntry,
   type FileInfo,
+  type FilesAct,
 } from '@hotline-ng/client';
 
+import { ask, choose } from './ask';
 import { fill, h } from './dom';
 import { Sight } from './sight';
 
@@ -102,11 +104,17 @@ export class FilesView {
     }
     const refresh = h('button', { class: 'ghost' }, 'Refresh');
     refresh.onclick = () => void this.load(path);
+    let mkdir: HTMLElement | null = null;
+    if (this.may('create_folders')) {
+      mkdir = h('button', { class: 'ghost' }, 'New folder');
+      mkdir.onclick = () => void this.mkdir();
+    }
     return h(
       'div',
       { class: 'files-bar' },
       h('div', { class: 'files-crumbs' }, ...crumbs),
       h('span', { class: 'spacer' }),
+      mkdir,
       refresh,
     );
   }
@@ -123,7 +131,11 @@ export class FilesView {
       const path = this.path ? `${this.path}/${entry.name}` : entry.name;
       button.onclick = () =>
         entry.kind === 'folder' ? void this.load(path) : void this.inspect(path);
-      return button;
+      const acts = this.acts(entry);
+      if (!acts.length) return h('div', { class: 'file-line' }, button);
+      const more = h('button', { class: 'ghost file-more', title: `More for ${entry.name}` }, '\u22ef');
+      more.onclick = () => void this.act(entry, path, acts);
+      return h('div', { class: 'file-line' }, button, more);
     });
     const body = h('div', { class: 'files-body' });
     body.append(
@@ -259,6 +271,86 @@ export class FilesView {
           b.disabled = false;
         }
       }
+    }
+  }
+
+  private may(act: FilesAct): boolean {
+    return this.connection()?.files?.may.includes(act) ?? false;
+  }
+
+  /** What this session may do to an entry: only what it would not be
+   *  refused, by the login reply's `files` block. */
+  private acts(entry: FileEntry): ['move' | 'comment' | 'delete', string, boolean?][] {
+    const folder = entry.kind === 'folder';
+    const may = (file: FilesAct, dir: FilesAct) => this.may(folder ? dir : file);
+    return [
+      ...(may('rename_files', 'rename_folders') || may('move_files', 'move_folders')
+        ? [['move', 'Rename or move…'] as ['move', string]]
+        : []),
+      ...(may('comment_files', 'comment_folders') ? [['comment', 'Comment…'] as ['comment', string]] : []),
+      ...(may('delete_files', 'delete_folders') ? [['delete', 'Delete…', true] as ['delete', string, boolean]] : []),
+    ];
+  }
+
+  private async act(entry: FileEntry, path: string, acts: ReturnType<FilesView['acts']>): Promise<void> {
+    const connection = this.connection();
+    const choice = await choose(entry.name, acts);
+    if (!connection || !choice) return;
+    if (choice === 'move') {
+      const a = await ask({
+        title: `Rename or move ${entry.name}`,
+        body: 'Its whole path from the top of the file area: change the last part to rename it, the rest to move it.',
+        fields: [{ kind: 'text', name: 'to', label: 'New path', value: path, required: true }],
+        ok: 'Move',
+      });
+      const to = String(a?.to ?? '').trim();
+      if (to && to !== path) await this.change(() => connection.filesMove(path, to));
+    } else if (choice === 'comment') {
+      await this.change(async () => {
+        const info = await connection.fileInfo(path);
+        const a = await ask({
+          title: `Comment on ${entry.name}`,
+          fields: [{ kind: 'textarea', name: 'comment', label: 'Comment', value: info.comment ?? '', max: 200 }],
+          ok: 'Save',
+        });
+        if (a) await connection.filesComment(path, String(a.comment ?? ''));
+      });
+    } else {
+      const a = await ask({
+        title: `Delete ${entry.name}`,
+        body: entry.kind === 'folder' ? 'The folder goes with everything in it.' : 'The file goes for good.',
+        fields: [],
+        ok: 'Delete',
+        danger: true,
+      });
+      if (a) await this.change(() => connection.filesDelete(path));
+    }
+  }
+
+  private async mkdir(): Promise<void> {
+    const connection = this.connection();
+    const a = await ask({
+      title: 'New folder',
+      fields: [{ kind: 'text', name: 'name', label: 'Name', required: true }],
+      ok: 'Create',
+    });
+    const name = String(a?.name ?? '').trim();
+    if (!connection || !name) return;
+    await this.change(() => connection.filesMkdir(this.path ? `${this.path}/${name}` : name));
+  }
+
+  /** Make a change, then show the folder as it is now, with why the
+   *  change was refused if it was. */
+  private async change(what: () => Promise<unknown>): Promise<void> {
+    let failure: string | null = null;
+    try {
+      await what();
+    } catch (error) {
+      failure = this.message(error);
+    }
+    await this.load(this.path);
+    if (failure) {
+      this.page.querySelector('.files-bar')?.after(h('p', { class: 'files-state error', role: 'alert' }, failure));
     }
   }
 

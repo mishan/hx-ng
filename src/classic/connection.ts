@@ -193,6 +193,7 @@ export class ClassicConnection implements Session {
   moderation: Session['moderation'] = null;
   /** No account administration over this wire yet: no editor offered. */
   accounts: Session['accounts'] = null;
+  files: Session['files'] = null;
   banner: Session['banner'] = null;
   avatars: Session['avatars'] = null;
   news: NewsConfig | null = null;
@@ -892,6 +893,22 @@ export class ClassicConnection implements Session {
 
   async fileInfo(): Promise<never> {
     throw unavailable('file details');
+  }
+
+  async filesMkdir(): Promise<never> {
+    throw unavailable('making folders');
+  }
+
+  async filesDelete(): Promise<never> {
+    throw unavailable('deleting files');
+  }
+
+  async filesMove(): Promise<never> {
+    throw unavailable('moving files');
+  }
+
+  async filesComment(): Promise<never> {
+    throw unavailable('commenting on files');
   }
 
   async prepareFileDownload(): Promise<never> {

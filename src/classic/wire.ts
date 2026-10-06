@@ -93,7 +93,7 @@ export type ClassicEvent =
   | { type: 'ready' }
   | { type: 'chat'; cid: number; uid: number; text: string }
   | { type: 'message'; uid: number; from: string; text: string }
-  | { type: 'broadcast'; text: string }
+  | { type: 'broadcast'; uid: number; from: string; text: string }
   | { type: 'disconnecting'; text: string }
   | { type: 'user_list'; users: ClassicUser[] }
   | { type: 'user_changed'; cid: number; user: ClassicUser }

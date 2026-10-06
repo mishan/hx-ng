@@ -425,7 +425,10 @@ export class ClassicConnection implements Session {
         });
         return;
       case 'broadcast':
-        this.emit('broadcast', { from: { uid: 0, nick: this.serverName || 'Server' }, text: e.text });
+        this.emit('broadcast', {
+          from: { uid: e.uid, nick: e.from || this.serverName || 'Server' },
+          text: e.text,
+        });
         return;
       case 'disconnecting':
         this.emit('notice', { text: e.text });

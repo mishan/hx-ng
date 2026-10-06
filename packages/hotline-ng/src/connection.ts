@@ -25,6 +25,7 @@ import {
   isEvent,
   isReply,
   ERROR_TEXT,
+  errorText,
   FLOODING,
   RATE_LIMITED,
   RESYNC_REQUIRED,
@@ -272,6 +273,9 @@ export class Connection {
    *  hands one back and Node the other, and nothing here cares which. */
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
   private closing = false;
+  /** A handshake under way, whose caller retries if it fails: a close
+   *  meanwhile is part of that failure, not a second one. */
+  private attaching = false;
   /** Answered `flooding`: the `kicked` close that follows is for that. */
   private flooded = false;
 
@@ -360,7 +364,15 @@ export class Connection {
       throw new Error('no session to resume');
     }
     this.resumeOnly = opts.resumeOnly ?? false;
-    await this.attach();
+    try {
+      await this.attach();
+    } catch (e) {
+      // The caller has the refusal and will not keep this connection, so
+      // nothing here may go on trying.
+      this.closing = true;
+      this.cancelRetry();
+      throw e;
+    }
   }
 
   /** End the session now, with no grace window. */
@@ -420,34 +432,37 @@ export class Connection {
   }
 
   private async attach(): Promise<void> {
+    this.attaching = true;
+    try {
+      await this.handshake();
+    } catch (e) {
+      // Every refused handshake but `resync_required` closes the
+      // connection (§6.2). Let it go here, so its close is not taken for
+      // a dropped connection and retried behind the caller's back.
+      if (this.ws) this.discard(this.ws);
+      throw e;
+    } finally {
+      this.attaching = false;
+    }
+  }
+
+  private async handshake(): Promise<void> {
     this.setState(this.session ? 'reconnecting' : 'connecting');
 
     if (this.session && this.token) {
       const ws = await this.openSocket(this.creds.url);
-      const ok = await this.tryResume();
-      if (ok) return;
+      if (await this.tryResume()) return;
       if (this.resumeOnly) {
         this.closing = true;
         ws.close();
         throw new Error('session expired');
       }
-      if (this.creds.identity) {
-        // The transport token has to exist *before* the socket that
-        // redeems it opens — it's presented in the upgrade URL itself
-        // (hxd-ng's `docs/hotline-ng-auth.md` §7.1), not on a frame sent
-        // after — so a resume that failed cannot fall through to
-        // `doLogin()` on this same, tokenless socket the way a classic
-        // login would. Close it and start over with one that carries a
-        // token.
-        this.discard(ws);
-        await this.openTokenedSocket();
-      }
-      // else: today's behaviour — `doLogin()` runs on this same socket.
-    } else if (this.creds.identity) {
-      await this.openTokenedSocket();
-    } else {
-      await this.openSocket(this.creds.url);
+      // The server closes a connection whose resume it refused (§6.2),
+      // and an identity login needs a socket opened with a token anyway.
+      this.discard(ws);
     }
+    if (this.creds.identity) await this.openTokenedSocket();
+    else await this.openSocket(this.creds.url);
 
     await this.doLogin();
   }
@@ -523,15 +538,12 @@ export class Connection {
       return true;
     } catch (e) {
       if (!(e instanceof WireFailure)) throw e;
-      if (e.wire.code === RATE_LIMITED || e.wire.code === TOO_MANY_CONNECTIONS) {
-        // The session is left as it was (§6.2): keep it, and resume later
-        // on a fresh socket rather than logging in over it.
-        if (this.ws) this.discard(this.ws);
-        throw e;
-      }
+      // The session is left as it was (§6.2): keep it, and resume later
+      // on a fresh socket rather than logging in over it.
+      if (e.wire.code === RATE_LIMITED || e.wire.code === TOO_MANY_CONNECTIONS) throw e;
       if (e.wire.code !== RESYNC_REQUIRED) {
-        // session_expired and friends: the session is gone, but the
-        // socket is fine — log in on it rather than opening another.
+        // session_expired and friends: the session is gone, and a fresh
+        // login is what is left.
         this.session = null;
         this.token = null;
         this.seq = 0;
@@ -640,7 +652,7 @@ export class Connection {
     for (const p of this.pending.values()) p.reject(new Error('connection closed'));
     this.pending.clear();
     this.ws = null;
-    if (this.closing) return;
+    if (this.closing || this.attaching) return;
 
     // The server names the two closes that mean "do not come back".
     // `replaced` is another device taking the session over — last device
@@ -676,12 +688,14 @@ export class Connection {
   /** Exponential backoff, capped well inside a five-minute grace window
    *  so a flaky network never sleeps through its own chance to resume. */
   private scheduleRetry(retryAfter?: number): void {
+    this.cancelRetry();
     const delay = retryAfter !== undefined ? retryAfter * 1000 : Math.min(500 * 2 ** this.retry, 15000);
     this.retry++;
     this.setState('reconnecting', `retrying in ${(delay / 1000).toFixed(1)}s`);
     this.retryTimer = setTimeout(() => {
       this.retryTimer = null;
       this.attach().catch((e) => {
+        if (this.closing) return;
         if (!(e instanceof WireFailure)) return this.scheduleRetry();
         // Pacing is never fatal, and a session refused a resume for its
         // account's other connections lives on until its grace lapses.
@@ -689,7 +703,7 @@ export class Connection {
         if (code === RATE_LIMITED || (code === TOO_MANY_CONNECTIONS && this.session)) {
           return this.scheduleRetry(retry_after);
         }
-        this.end(e.wire.text || e.wire.code);
+        this.end(errorText(e.wire));
       });
     }, delay);
   }

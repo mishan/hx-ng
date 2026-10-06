@@ -158,7 +158,7 @@ describe('resume', () => {
     expect(second.state).toBe('online');
   });
 
-  it('logs in on the same socket when the session is gone', async () => {
+  it('logs in on a fresh socket when the session is gone', async () => {
     await connect();
     server.on('resume', () => ({ error: { code: 'session_expired', text: 'gone' } }));
     const second = new Connection(CREDS, {});
@@ -166,7 +166,8 @@ describe('resume', () => {
     expect(server.sent('resume')).toHaveLength(1);
     expect(server.sent('login')).toHaveLength(2); // the first connect, then this one
     expect(second.state).toBe('online');
-    expect(server.sockets).toHaveLength(2); // no third socket was opened to do it
+    // The server closed the one the resume was refused on.
+    expect(server.sockets).toHaveLength(3);
   });
 
   it('catches public history up after an expired session needs a fresh login', async () => {
@@ -245,6 +246,26 @@ describe('resume', () => {
     expect(server.sent('resume').map((f) => f.params.session)).toEqual(['s_1', 's_1']);
     expect(server.sent('login')).toHaveLength(1);
     expect(conn.state).toBe('online');
+  });
+  it('retries a reconnect login refused rate_limited once per refusal, and stops on logout', async () => {
+    server.on('login', () => ({ ok: loginOk({ detach: null }) }));
+    const conn = await connect();
+    server.on('login', () => ({ error: { code: 'rate_limited', text: 'slow down', retry_after: 1 } }));
+    conn.drop();
+    // The backoff, a refusal, its second, and a second refusal.
+    await new Promise((resolve) => setTimeout(resolve, 1700));
+    expect(server.sent('login')).toHaveLength(3);
+
+    await conn.logout();
+    await new Promise((resolve) => setTimeout(resolve, 1200));
+    expect(server.sent('login')).toHaveLength(3);
+  });
+
+  it('goes on trying nothing once start is refused', async () => {
+    server.on('login', () => ({ error: { code: 'rate_limited', text: 'slow down', retry_after: 0 } }));
+    await expect(new Connection(CREDS, {}).start()).rejects.toThrow('slow down');
+    await new Promise((resolve) => setTimeout(resolve, 700));
+    expect(server.sent('login')).toHaveLength(1);
   });
 });
 

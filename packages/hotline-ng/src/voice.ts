@@ -38,6 +38,7 @@ import { type Connection, WireFailure } from './connection.js';
 import {
   CAM_SEND_MID,
   parseRecvMid,
+  RATE_LIMITED,
   SCR_SEND_MID,
   sendMid,
   type VideoConfig,
@@ -285,6 +286,8 @@ export class VoiceSession {
   }
 
   teardown(): void {
+    if (this.resubscribeTimer !== null) clearTimeout(this.resubscribeTimer);
+    this.resubscribeTimer = null;
     this.pc?.close();
     this.pc = null;
     this.turn = Promise.resolve();
@@ -572,8 +575,9 @@ export class VoiceSession {
   private resubscribe(): void {
     if (this.resubscribeTimer !== null) return;
     void this.subscribeAll().catch((e) => {
-      const after = e instanceof WireFailure ? e.wire.retry_after : undefined;
-      if (after === undefined) return this.fail(e);
+      if (!(e instanceof WireFailure) || e.wire.code !== RATE_LIMITED) return this.fail(e);
+      // `retry_after` is a MAY; without one, ask again in a second.
+      const after = e.wire.retry_after ?? 1;
       this.resubscribeTimer = setTimeout(() => {
         this.resubscribeTimer = null;
         if (this.watching) this.resubscribe();

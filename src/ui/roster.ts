@@ -54,10 +54,11 @@ export function renderRoster(el: HTMLElement, store: Store, media: VoiceSession 
   );
 }
 
-/** A user's own color, pulled toward the theme's text color so that no
- *  choice of it is unreadable on either background. */
+/** A user's own color at a lightness the theme can read: its hue and
+ *  chroma kept, its lightness held to the theme's range. */
 function nickColor(c: number): string {
-  return `color-mix(in oklab, #${(c & 0xffffff).toString(16).padStart(6, '0')} 70%, var(--text))`;
+  const hex = (c & 0xffffff).toString(16).padStart(6, '0');
+  return `oklch(from #${hex} clamp(var(--nick-l-min), l, var(--nick-l-max)) c h)`;
 }
 
 function row(u: User, store: Store, media: VoiceSession | null, hooks: RosterHooks): HTMLElement {

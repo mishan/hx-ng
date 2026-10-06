@@ -54,6 +54,12 @@ export function renderRoster(el: HTMLElement, store: Store, media: VoiceSession 
   );
 }
 
+/** A user's own color, pulled toward the theme's text color so that no
+ *  choice of it is unreadable on either background. */
+function nickColor(c: number): string {
+  return `color-mix(in oklab, #${(c & 0xffffff).toString(16).padStart(6, '0')} 70%, var(--text))`;
+}
+
 function row(u: User, store: Store, media: VoiceSession | null, hooks: RosterHooks): HTMLElement {
   const me = u.uid === store.self?.uid;
   const status = statusLabel(u.status);
@@ -108,6 +114,8 @@ function row(u: User, store: Store, media: VoiceSession | null, hooks: RosterHoo
       title:
         `uid ${u.uid} · icon ${u.icon}${u.avatar ? ' · picture' : ''}${u.admin ? ' · administrator' : ''}${status ? ` · ${status}` : ''}` +
         (u.transport !== 'encrypted' ? ' · unencrypted' : '') +
+        (u.remote ? ` · from ${u.remote.server}` : '') +
+        (u.system ? ' · this server' : '') +
         // The handle is the part of an identity a person can read back;
         // the fingerprint is shortened because 52 characters in a
         // tooltip is not something anyone compares by eye.
@@ -120,7 +128,8 @@ function row(u: User, store: Store, media: VoiceSession | null, hooks: RosterHoo
     h(
       'span',
       { class: 'who' },
-      h('span', { class: 'nick' }, u.nick),
+      h('span', { class: 'nick', style: u.color !== undefined ? { color: nickColor(u.color) } : {} }, u.nick),
+      u.remote && !u.remote.tagged ? h('span', { class: 'tag' }, u.remote.tag) : null,
       status ? h('span', { class: 'status' }, status) : null,
     ),
     // Always there, empty or not, so the menu button lines up down the list.

@@ -1384,6 +1384,7 @@ export class App {
     this.panes?.available('accounts', may);
     if (!may && this.accountsOpen) this.showAccounts(false);
     this.accountsView.refresh();
+    this.files.refresh();
     this.renderRail();
   }
 

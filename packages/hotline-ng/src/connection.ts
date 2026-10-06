@@ -19,6 +19,8 @@ import {
   type FileDownloadOk,
   type FileFetchOptions,
   type FileInfo,
+  FILES_ACTS,
+  type FilesConfig,
   type FilesListOk,
 } from './files.js';
 import {
@@ -194,6 +196,7 @@ interface Saved {
   banner?: BannerInfo | null;
   avatars?: AvatarLimits | null;
   accounts?: AccessSet | null;
+  files?: FilesConfig | null;
 }
 
 const SAVED_KEY = 'hxd-ng.session';
@@ -322,6 +325,9 @@ export class Connection {
    *  current by `account_changed` and saved with the session. `null`
    *  means the server administers no accounts: offer no editor. */
   accounts: AccessSet | null = null;
+  /** What this session may change in the file area, from the login reply
+   *  or the saved session. `null` means no file area. */
+  files: FilesConfig | null = null;
   /** Round-trip time of the last explicit `ping`, in milliseconds. */
   rtt: number | null = null;
 
@@ -360,6 +366,7 @@ export class Connection {
       this.banner = saved.banner ?? null;
       this.avatars = saved.avatars ?? null;
       this.accounts = saved.accounts ?? null;
+      this.files = saved.files ?? null;
     } else if (opts.resumeOnly) {
       throw new Error('no session to resume');
     }
@@ -497,6 +504,7 @@ export class Connection {
     this.banner = ok.banner ?? null;
     this.avatars = ok.avatars ?? null;
     this.accounts = ok.accounts ?? null;
+    this.files = ok.files ?? null;
     // Only a session that may detach is worth remembering: without the
     // permission a resume can only ever answer session_expired, and
     // storing a token we know is useless just invites a confusing
@@ -643,9 +651,19 @@ export class Connection {
   private async snapshot(): Promise<SyncOk> {
     const ok = await this.request<SyncOk>('sync', {});
     this.gotSnapshot = true;
-    if (ok.accounts) this.accounts = ok.accounts;
+    if (ok.accounts) this.adoptAccess(ok.accounts);
     if (this.self) this.hooks.onSnapshot?.({ self: this.self, users: ok.users, server: ok.server });
     return ok;
+  }
+
+  /** What this session's account may do now. The `files` block's `may`
+   *  is some of the same bits, and the server judges each change by them
+   *  as they are now, not as they were at login. */
+  private adoptAccess(set: AccessSet): void {
+    this.accounts = set;
+    if (this.files?.writable) {
+      this.files = { writable: true, may: FILES_ACTS.filter((act) => set.access.includes(act)) };
+    }
   }
 
   private onClose(e: CloseEvent): void {
@@ -888,7 +906,7 @@ export class Connection {
     return res.blob();
   }
 
-  // --- read-only Files (docs/hotline-ng.md §7.2) ----------------------
+  // --- Files (docs/hotline-ng.md §7.2) --------------------------------
 
   async filesList(path = ''): Promise<FilesListOk> {
     const listing = await this.request<FilesListOk>('files_list', path ? { path } : {});
@@ -900,6 +918,25 @@ export class Connection {
     const info = await this.request<FileInfo>('files_info', { path });
     parseDecimalU64(info.size);
     return info;
+  }
+
+  async filesMkdir(path: string): Promise<void> {
+    await this.request('files_mkdir', { path });
+  }
+
+  /** A folder goes with everything in it. */
+  async filesDelete(path: string): Promise<void> {
+    await this.request('files_delete', { path });
+  }
+
+  /** Rename, move, or both: `to` is the entry's whole new path. */
+  async filesMove(path: string, to: string): Promise<void> {
+    await this.request('files_move', { path, to });
+  }
+
+  /** `''` clears it. */
+  async filesComment(path: string, comment: string): Promise<void> {
+    await this.request('files_comment', { path, comment });
   }
 
   async prepareFileDownload(path: string): Promise<FileDownloadOk> {
@@ -1269,7 +1306,7 @@ export class Connection {
       const id = (frame.data as { id?: unknown } | null)?.id;
       if (typeof id === 'number') this.noteHistoryId(id);
     }
-    if (frame.ev === 'account_changed') this.accounts = frame.data as AccessSet;
+    if (frame.ev === 'account_changed') this.adoptAccess(frame.data as AccessSet);
     this.persist();
     const set = this.handlers.get(frame.ev);
     if (!set) return; // unknown `ev` values are ignored, per spec
@@ -1304,6 +1341,7 @@ export class Connection {
       moderator: this.moderator,
       moderation: this.moderation,
       accounts: this.accounts,
+      files: this.files,
     });
   }
 

@@ -576,6 +576,17 @@ describe('accounts', () => {
     expect(saved.accounts).toEqual(demoted);
   });
 
+  it.each([
+    { files: { writable: true, may: ['delete_files'] }, now: ['create_folders', 'comment_files'] },
+    { files: { writable: false, may: [] }, now: [] },
+  ] as const)('keeps what the file area lets it change current: $files.writable', async ({ files, now }) => {
+    server.on('login', () => ({ ok: loginOk({ caps: ['files'], files: { ...files, may: [...files.may] } }) }));
+    const conn = await connect();
+    server.event('account_changed', { access: ['read_chat', 'create_folders', 'comment_files'], raw_bits: [] });
+    await settle();
+    expect(conn.files).toEqual({ writable: files.writable, may: now });
+  });
+
   it('takes what a resync says, for a change the gap swallowed', async () => {
     server.on('login', () => ({ ok: loginOk({ caps: ['accounts'], accounts: ADMIN }) }));
     await connect();

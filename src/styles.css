@@ -1111,6 +1111,9 @@ dialog.picker header input { width: 9rem; }
   text-align: left;
 }
 .file-row:hover { background: var(--surface-2); }
+.file-line { display: flex; align-items: center; }
+.file-line .file-row { flex: 1; min-width: 0; }
+.file-more { padding: 0 0.5rem; color: var(--muted); }
 .file-glyph { color: var(--muted); text-align: center; }
 .file-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .file-size { color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
@@ -1562,7 +1565,7 @@ button.ghost.danger:hover { color: var(--admin); border-color: var(--admin); }
 @media (pointer: coarse) {
   .topbar button, .rail-item, .roster-close, .crumb,
   .news-bar button, .news-search, .files-bar button, .identity-bar button, .composer-input,
-  .line-actions button, .person-more, dialog.ask button, .mod-head button, .mod-actions button {
+  .line-actions button, .person-more, .file-more, dialog.ask button, .mod-head button, .mod-actions button {
     min-height: 44px;
   }
   .rail-foot button, dialog.settings button, .setting-choice, .setting-toggle { min-height: 44px; }

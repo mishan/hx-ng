@@ -34,7 +34,7 @@
  * the one place to change if so.
  */
 
-import type { Connection } from './connection.js';
+import { type Connection, WireFailure } from './connection.js';
 import {
   CAM_SEND_MID,
   parseRecvMid,
@@ -166,6 +166,7 @@ export class VoiceSession {
    *  add them to. `addIceCandidate` rejects outright in that state, and
    *  the server is free to start trickling the moment it has offered. */
   private earlyIce: (RTCIceCandidateInit | null)[] = [];
+  private resubscribeTimer: ReturnType<typeof setTimeout> | null = null;
 
   /** The room. The public chat is 0, and voice is one room at a time. */
   cid = 0;
@@ -200,7 +201,7 @@ export class VoiceSession {
       this.pruneRemote();
       this.hooks.onRoom();
       this.hooks.onControls();
-      if (this.watching) void this.subscribeAll().catch((e) => this.fail(e));
+      if (this.watching) this.resubscribe();
     });
   }
 
@@ -247,7 +248,13 @@ export class VoiceSession {
     this.pc = this.newPeerConnection();
     for (const t of this.mic.getTracks()) this.pc.addTrack(t, this.mic);
 
-    const ok = await this.conn.request<VoiceJoinOk>('voice_join', { cid: this.cid });
+    let ok: VoiceJoinOk;
+    try {
+      ok = await this.conn.request<VoiceJoinOk>('voice_join', { cid: this.cid });
+    } catch (e) {
+      this.teardown();
+      throw e;
+    }
     this.codec = ok.codec;
     this.participants = ok.participants;
     this.joined = true;
@@ -557,6 +564,21 @@ export class VoiceSession {
       for (const mid of [...this.remote.keys()]) this.dropRemote(mid);
     }
     this.hooks.onControls();
+  }
+
+  /** `subscribeAll` for a publication list that changed under us. A
+   *  rate-limited one is asked again once the server will take it, with
+   *  whatever the list is by then. */
+  private resubscribe(): void {
+    if (this.resubscribeTimer !== null) return;
+    void this.subscribeAll().catch((e) => {
+      const after = e instanceof WireFailure ? e.wire.retry_after : undefined;
+      if (after === undefined) return this.fail(e);
+      this.resubscribeTimer = setTimeout(() => {
+        this.resubscribeTimer = null;
+        if (this.watching) this.resubscribe();
+      }, after * 1000);
+    });
   }
 
   private async subscribeAll(): Promise<void> {

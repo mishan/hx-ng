@@ -228,6 +228,24 @@ describe('resume', () => {
     expect(asked).toBe(2);
     expect(recovered).toEqual([11]);
   });
+
+  it.each([
+    { code: 'rate_limited', retry_after: 0 },
+    { code: 'too_many_connections' },
+  ])('keeps a session whose resume is refused $code, and resumes it later', async (error) => {
+    const conn = await connect();
+    let asked = 0;
+    server.on('resume', () =>
+      ++asked === 1 ? { error: { text: 'not now', ...error } } : { ok: { replay: 0, self: user(1, 'Alice') } },
+    );
+    conn.drop();
+    // The first retry's backoff, then the refusal's own.
+    await new Promise((resolve) => setTimeout(resolve, 1700));
+
+    expect(server.sent('resume').map((f) => f.params.session)).toEqual(['s_1', 's_1']);
+    expect(server.sent('login')).toHaveLength(1);
+    expect(conn.state).toBe('online');
+  });
 });
 
 describe('resync recovery', () => {

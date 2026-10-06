@@ -34,6 +34,10 @@ export interface EventFrame {
 export interface WireError {
   code: string;
   text: string;
+  /** Whole seconds until a `rate_limited` request would be taken. */
+  retry_after?: number;
+  /** When a `banned` login's ban lapses (Unix seconds); `null` for never. */
+  expires_at?: number | null;
 }
 
 export type ServerFrame = ReplyFrame | EventFrame;
@@ -59,8 +63,9 @@ export type Status = 'active' | 'idle' | 'detached';
  *  looks, never more. It is present on every roster row whether or not
  *  the server runs the identity endpoints, so a client can warn before a
  *  private message goes somewhere unencrypted without feature-detecting
- *  anything. */
-export type Transport = 'encrypted' | 'cleartext';
+ *  anything. A linked server's user is `unknown`, and is to be treated
+ *  as `cleartext`. */
+export type Transport = 'encrypted' | 'cleartext' | 'unknown';
 
 /** What a roster row is entitled to show about someone's identity, and
  *  no more: never `age` or `outcome`, which are the server's business
@@ -1468,17 +1473,23 @@ export const SESSION_EXPIRED = 'session_expired';
 /** "Slow down", never "there is nothing more" — a loop that pages on
  *  the client's behalf has to tell the two apart. */
 export const RATE_LIMITED = 'rate_limited';
+/** Refused because the account holds as many connections as it may; on
+ *  a `resume`, the session is left as it was. */
+export const TOO_MANY_CONNECTIONS = 'too_many_connections';
+/** Fatal, unlike `rate_limited`: the `kicked` that follows is the
+ *  server's, not an administrator's. */
+export const FLOODING = 'flooding';
 
 /** Human wording for the codes a person can actually act on. Anything
  *  not listed falls back to the server's own `text`, which is always
  *  present and always meant for a human. */
 export const ERROR_TEXT: Record<string, string> = {
   login_failed: 'That account and password did not match.',
-  banned: 'This server has banned your address.',
   server_full: 'The server is full.',
   session_expired: 'Your session expired. Logging in again.',
   access_denied: 'You do not have permission to do that.',
   rate_limited: 'Slow down — the server is rate-limiting this connection.',
+  flooding: 'You were disconnected for sending faster than this server allows.',
   not_logged_in: 'Not logged in.',
   unknown_method: 'This server is older than this client and does not know that request.',
   voice_disabled: 'This server does not offer voice chat.',
@@ -1535,7 +1546,10 @@ export function errorText(e: WireError): string {
   // `||` rather than `??` on the text: a server that sends an empty one
   // has said nothing, and nothing rendered as an error message is worse
   // than the bare code — at least a code can be looked up.
-  return ERROR_TEXT[e.code] || e.text || e.code;
+  const text = ERROR_TEXT[e.code] || e.text || e.code;
+  // The server's `banned` text names the reason but not when it lapses.
+  if (e.code === 'banned' && e.expires_at) return `${text} (until ${new Date(e.expires_at * 1000).toLocaleString()})`;
+  return text;
 }
 
 /** `errorText` for the moderation requests, where `no_such_user` means

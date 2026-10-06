@@ -2004,7 +2004,7 @@ export class App {
     // network in the clear, and the only moment that is worth saying is
     // the moment before it is sent.
     const peer = pm && conv.peer.uid !== undefined ? this.store.user(conv.peer.uid) : undefined;
-    const cleartext = peer?.transport === 'cleartext';
+    const cleartext = !!peer && peer.transport !== 'encrypted';
     this.composerHint.textContent = !pm
       ? 'public chat'
       : cleartext

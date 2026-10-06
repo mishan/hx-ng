@@ -20,7 +20,7 @@ export interface Frame {
 
 export interface Reply {
   ok?: unknown;
-  error?: { code: string; text: string };
+  error?: { code: string; text: string; retry_after?: number };
 }
 
 type Handler = (params: Record<string, unknown>, frame: Frame) => Reply | Promise<Reply>;

@@ -799,6 +799,7 @@ button.call:disabled { opacity: 0.45; cursor: default; }
 .mark.screen::before { content: '\25A4'; color: var(--accent); }
 .mark.paused { opacity: 0.45; }
 .mark.cleartext::before { content: '\26A0'; color: var(--warn); }
+.mark.transport-unknown::before { content: '\26A0'; color: var(--muted); }
 
 /* --- connect screen --------------------------------------------------- */
 

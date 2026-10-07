@@ -2015,13 +2015,17 @@ export class App {
     // network in the clear, and the only moment that is worth saying is
     // the moment before it is sent.
     const peer = pm && conv.peer.uid !== undefined ? this.store.user(conv.peer.uid) : undefined;
-    const cleartext = !!peer && peer.transport !== 'encrypted';
+    // Unknown (a linked server's user) warns too, as what it is: it may be
+    // in the clear, and nothing here can say it is not.
+    const transport = peer?.transport;
     this.composerHint.textContent = !pm
       ? 'public chat'
-      : cleartext
-        ? `private message — ${peer.nick} is on an unencrypted connection`
-        : 'private message';
-    this.composerHint.classList.toggle('warn', cleartext);
+      : transport === 'cleartext'
+        ? `private message — ${peer?.nick} is on an unencrypted connection`
+        : transport === 'unknown'
+          ? `private message — whether ${peer?.nick}'s connection is encrypted is not known`
+          : 'private message';
+    this.composerHint.classList.toggle('warn', !!peer && transport !== 'encrypted');
   }
 
   private renderUnreadTitle(): void {

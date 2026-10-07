@@ -88,12 +88,21 @@ function row(u: User, store: Store, media: VoiceSession | null, hooks: RosterHoo
   // server its own downstream hop was unencrypted. Worth a mark because
   // a private message to one of these crosses the network in the clear,
   // and because the person it belongs to may not know. A linked server's
-  // user is `unknown`, which the spec says to treat the same.
-  if (u.transport !== 'encrypted') {
+  // user is `unknown`: the spec says never to take that for encrypted,
+  // so it is marked too, but as what it is rather than as cleartext,
+  // or every remote user would look like the ones who really are.
+  if (u.transport === 'cleartext') {
     marks.push(
       h('span', {
         class: 'mark cleartext',
         title: 'Unencrypted connection — anything sent here can be read in transit',
+      }),
+    );
+  } else if (u.transport === 'unknown') {
+    marks.push(
+      h('span', {
+        class: 'mark transport-unknown',
+        title: 'On another server — whether their own connection is encrypted is not known here',
       }),
     );
   }
@@ -114,7 +123,8 @@ function row(u: User, store: Store, media: VoiceSession | null, hooks: RosterHoo
       class: `person${u.admin ? ' admin' : ''}${u.status !== 'active' ? ' away' : ''}${me ? ' me' : ''}`,
       title:
         `uid ${u.uid} · icon ${u.icon}${u.avatar ? ' · picture' : ''}${u.admin ? ' · administrator' : ''}${status ? ` · ${status}` : ''}` +
-        (u.transport !== 'encrypted' ? ' · unencrypted' : '') +
+        (u.transport === 'cleartext' ? ' · unencrypted' : '') +
+        (u.transport === 'unknown' ? ' · connection not known' : '') +
         (u.remote ? ` · from ${u.remote.server}` : '') +
         (u.system ? ' · this server' : '') +
         // The handle is the part of an identity a person can read back;

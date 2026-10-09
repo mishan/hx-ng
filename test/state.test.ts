@@ -41,6 +41,16 @@ describe('addressing a conversation', () => {
     expect(addressOf(s.openPm({ uid: 9, nick: 'a guest' }))).toEqual({ to: 9 });
   });
 
+  it('answers another session of its own account by uid, apart from the account', () => {
+    const s = new Store();
+    s.me = () => 'Admin';
+    const roster = s.openPm({ uid: 10, nick: 'misha' });
+    const c = s.openPm({ uid: 10, login: 'admin', nick: 'misha' });
+    expect(c.id).toBe(roster.id);
+    expect(addressOf(c)).toEqual({ to: 10 });
+    expect(s.pmWith({ login: 'admin' })).toBeUndefined();
+  });
+
   it('says there is no way to reach a guest who has left', () => {
     const s = new Store();
     s.put(person(5, 'a guest'));

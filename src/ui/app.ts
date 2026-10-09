@@ -505,6 +505,7 @@ export class App {
       onState: (s, detail) => this.onState(s, detail),
       onLogin: (ok) => {
         this.store.server = ok.server;
+        this.store.forgetPmUids();
         // Every login, not just the first: a resume that fails after a
         // server restart logs in again on this connection, and the
         // operator may have changed the banner, or taken it down.

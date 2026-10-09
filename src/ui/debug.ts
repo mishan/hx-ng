@@ -75,6 +75,8 @@ export class DebugPanel {
     copyBtn.onclick = () => {
       void this.copyReport(copyBtn);
     };
+    const closeBtn = h('button', { class: 'ghost' }, 'Close');
+    closeBtn.onclick = () => this.toggle(false);
 
     const tabs = (['wire', 'session', 'media'] as Tab[]).map((t) => {
       const b = h('button', { class: `tab ${t === this.tab ? 'on' : ''}`, dataset: { tab: t } },
@@ -95,6 +97,7 @@ export class DebugPanel {
         pauseBtn,
         clearBtn,
         copyBtn,
+        closeBtn,
       ),
       h('div', { class: 'debug-body' }, this.list, this.facts, this.mediaEl),
     );

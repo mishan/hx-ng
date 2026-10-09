@@ -21,7 +21,14 @@ export interface AvatarChoice {
   remove: () => Promise<void>;
 }
 
-export function pickIcon(current: number, avatar?: AvatarChoice): Promise<number | null> {
+/** The icon picked and, when the picker was given a name to edit, the
+ *  name as left in its field. */
+export interface Picked {
+  icon: number;
+  nick?: string;
+}
+
+export function pickIcon(current: number, avatar?: AvatarChoice, nick?: string): Promise<Picked | null> {
   return new Promise((resolve) => {
     let chosen = current;
 
@@ -56,8 +63,15 @@ export function pickIcon(current: number, avatar?: AvatarChoice): Promise<number
       for (const [id, b] of buttons) b.hidden = q !== '' && !String(id).startsWith(q);
     };
 
+    const nickInput = nick === undefined
+      ? null
+      : h('input', { type: 'text', value: nick, placeholder: 'name', ariaLabel: 'Name', spellcheck: false });
+    if (nickInput) nickInput.onkeydown = (e) => {
+      if (e.key === 'Enter') done(chosen);
+    };
+
     const cancel = h('button', { class: 'ghost', type: 'button' }, 'Cancel');
-    const ok = h('button', { class: 'primary', type: 'button' }, 'Use this icon');
+    const ok = h('button', { class: 'primary', type: 'button' }, nickInput ? 'Save' : 'Use this icon');
     cancel.onclick = () => done(null);
     ok.onclick = () => done(chosen);
 
@@ -75,7 +89,7 @@ export function pickIcon(current: number, avatar?: AvatarChoice): Promise<number
     const dialog = h(
       'dialog',
       { class: 'picker' },
-      h('header', {}, h('h2', {}, 'Choose an icon'), readout, h('div', { class: 'spacer' }), search),
+      h('header', {}, h('h2', {}, nickInput ? 'Name and icon' : 'Choose an icon'), nickInput, readout, h('div', { class: 'spacer' }), search),
       grid,
       h('footer', {}, ...pictureBtns, pictureBtns.length ? h('div', { class: 'spacer' }) : null, cancel, ok),
     );
@@ -87,7 +101,7 @@ export function pickIcon(current: number, avatar?: AvatarChoice): Promise<number
     function done(value: number | null): void {
       if (!dialog.isConnected) return;
       dialog.remove();
-      resolve(value);
+      resolve(value === null ? null : { icon: value, nick: nickInput?.value.trim() });
     }
 
     document.body.append(dialog);

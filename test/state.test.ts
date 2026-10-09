@@ -51,6 +51,21 @@ describe('addressing a conversation', () => {
     expect(s.pmWith({ login: 'admin' })).toBeUndefined();
   });
 
+  it('forgets uids a new roster or a new login cannot vouch for', () => {
+    const s = new Store();
+    const gone = s.openPm({ uid: 5, nick: 'a guest' });
+    const here = s.openPm({ uid: 6, nick: 'another' });
+    const known = s.openPm({ uid: 7, login: 'alice', nick: 'Alice' });
+    s.replaceRoster([person(6, 'another'), person(7, 'Alice')]);
+    expect(addressOf(gone)).toBeNull();
+    expect(addressOf(here)).toEqual({ to: 6 });
+
+    s.forgetPmUids();
+    expect(addressOf(here)).toBeNull();
+    expect(s.pmWith({ uid: 6 })).toBeUndefined();
+    expect(addressOf(known)).toEqual({ to_login: 'alice' });
+  });
+
   it('says there is no way to reach a guest who has left', () => {
     const s = new Store();
     s.put(person(5, 'a guest'));

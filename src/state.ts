@@ -256,6 +256,19 @@ export class Store {
   replaceRoster(users: User[]): void {
     this.users.clear();
     for (const u of users) this.users.set(u.uid, u);
+    for (const key of [...this.pmIndex.keys()]) {
+      const uid = key.startsWith('uid:') ? Number(key.slice(4)) : undefined;
+      if (uid !== undefined && !this.users.has(uid)) this.forgetPmUid(uid);
+    }
+  }
+
+  /** A new login: whoever held a uid before it may be gone, and the uid
+   *  someone else's, with nothing on this side having seen them leave —
+   *  a server restart hands every uid out afresh. */
+  forgetPmUids(): void {
+    for (const key of [...this.pmIndex.keys()]) {
+      if (key.startsWith('uid:')) this.forgetPmUid(Number(key.slice(4)));
+    }
   }
 
   put(u: User): void {
@@ -265,6 +278,11 @@ export class Store {
   remove(uid: number): User | undefined {
     const u = this.users.get(uid);
     this.users.delete(uid);
+    this.forgetPmUid(uid);
+    return u;
+  }
+
+  private forgetPmUid(uid: number): void {
     // The roster row is gone, and with it the only thing that made this
     // uid mean anything. Uids are the legacy wire's 16-bit ids and the
     // server reuses them, so a conversation that kept this one would
@@ -278,7 +296,6 @@ export class Store {
       const c = this.conversations.get(id);
       if (c) c.peer.uid = undefined;
     }
-    return u;
   }
 
   conversation(id: ConvId): Conversation | undefined {

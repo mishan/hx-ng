@@ -173,6 +173,8 @@ export class Store {
    * and nothing about mail should be drawn at all.
    */
   mail: InboxCounts | null = null;
+  /** This session's account, or `null` for a guest. */
+  me: () => string | null = () => null;
   /**
    * The lowest stored id this client has pulled, and therefore where the
    * next page backwards starts. Undefined only before the first page:
@@ -303,7 +305,11 @@ export class Store {
    */
   openPm(who: { uid?: number; login?: string; nick: string }): Conversation {
     const uid = who.uid !== undefined && who.uid > 0 ? who.uid : undefined;
-    const login = who.login || undefined;
+    // Another session of this account names this account as its login,
+    // which is no way to tell it apart or to answer it: a reply to it is
+    // a message to oneself. Its uid is the one that reaches it.
+    const login =
+      who.login && who.login.toLowerCase() !== this.me()?.toLowerCase() ? who.login : undefined;
     const nameless = uid === undefined && login === undefined;
 
     const byLogin = login !== undefined ? this.pmWith({ login }) : undefined;

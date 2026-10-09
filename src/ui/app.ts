@@ -303,6 +303,7 @@ export class App {
     private root: HTMLElement,
     private config: AppConfig,
   ) {
+    this.store.me = () => this.conn?.self?.identity?.account ?? this.account;
     this.debug = new DebugPanel(
       () => this.facts(),
       () => this.media?.stats() ?? Promise.resolve({ media: 'not connected' }),

@@ -179,8 +179,9 @@ export function connectScreen(
   const iconArt = h('span', { class: 'icon-cell-fixed' }, icon(chosenIcon, 2));
   const iconBtn = h('button', { class: 'icon-button', type: 'button' }, iconArt, h('span', { class: 'muted' }, `#${chosenIcon}`));
   iconBtn.onclick = () => {
-    void pickIcon(chosenIcon).then((id) => {
-      if (id === null) return;
+    void pickIcon(chosenIcon).then((picked) => {
+      if (picked === null) return;
+      const id = picked.icon;
       chosenIcon = id;
       iconArt.replaceChildren(icon(id, 2));
       iconBtn.lastElementChild!.textContent = `#${id}`;

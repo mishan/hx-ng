@@ -2170,7 +2170,7 @@ export class App {
     const phone = matchMedia(PHONE);
     phone.addEventListener('change', () => this.placeTopbar(phone.matches));
 
-    this.pill.onclick = () => this.debug.toggle(true);
+    this.pill.onclick = () => this.debug.toggle();
     this.notifyBtn.onclick = () => void this.togglePush();
     this.meButton.onclick = () => void this.editSelf();
     this.mailBtn.onclick = () =>
@@ -2419,10 +2419,15 @@ export class App {
           },
         }
       : undefined;
-    const id = await pickIcon(me.icon, avatar);
-    if (id === null || id === me.icon) return;
+    const picked = await pickIcon(me.icon, avatar, me.nick);
+    if (picked === null) return;
+    const change = {
+      ...(picked.icon !== me.icon && { icon: picked.icon }),
+      ...(picked.nick && picked.nick !== me.nick && { nick: picked.nick }),
+    };
+    if (!Object.keys(change).length) return;
     try {
-      await conn.request('nick', { icon: id });
+      await conn.request('nick', change);
     } catch (e) {
       this.say(e instanceof WireFailure ? errorText(e.wire) : String(e));
     }

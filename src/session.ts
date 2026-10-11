@@ -78,6 +78,8 @@ type SessionOf<C extends Connection> = Pick<
   | 'fileDownloadUrl'
   | 'fetchFile'
   | 'prepareFilePreview'
+  | 'prepareFileUpload'
+  | 'uploadFile'
   | 'fetchFilePreview'
   | 'newsTree'
   | 'newsThreads'

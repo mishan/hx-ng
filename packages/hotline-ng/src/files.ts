@@ -14,6 +14,9 @@ export interface FileEntry {
 
 export interface FilesListOk {
   path: string;
+  /** Whether `files_upload` would take a file into this folder; absent
+   *  from a server without uploads. */
+  uploadable?: boolean;
   entries: FileEntry[];
 }
 
@@ -50,6 +53,36 @@ export interface FilePreviewOk {
   height?: number;
 }
 
+/** `files_upload`'s answer (`hxd-ng` docs/ng-uploads.md). */
+export interface FileUploadOk {
+  /** Same-server bearer URL the pieces are `PUT` to. */
+  url: string;
+  /** Where the first piece starts: past what the server already holds of
+   *  this file, when this account left part of it. */
+  offset: DecimalU64;
+  /** The most one piece may carry. */
+  piece: DecimalU64;
+  /** The Large File resume digest of the part the server holds, as hex. */
+  digest?: string;
+}
+
+/** The Large File resume digest (fogWraith Capabilities-Large-File.md)
+ *  of `file` at `offset`, as hex: the window's length, then SHA-256 of the
+ *  offset and the window, the 64 KiB before `offset` or all of it. */
+export async function resumeDigest(file: Blob, offset: bigint): Promise<string> {
+  const windowLen = offset < 65_536n ? offset : 65_536n;
+  const window = new Uint8Array(
+    await file.slice(Number(offset - windowLen), Number(offset)).arrayBuffer(),
+  );
+  const hashed = new Uint8Array(8 + window.length);
+  new DataView(hashed.buffer).setBigUint64(0, offset);
+  hashed.set(window, 8);
+  const digest = new Uint8Array(40);
+  new DataView(digest.buffer).setBigUint64(0, windowLen);
+  digest.set(new Uint8Array(await crypto.subtle.digest('SHA-256', hashed)), 8);
+  return Array.from(digest, (b) => b.toString(16).padStart(2, '0')).join('');
+}
+
 /** The changes to the file area, by the access bit each needs. */
 export const FILES_ACTS = [
   'create_folders',
@@ -61,6 +94,8 @@ export const FILES_ACTS = [
   'move_folders',
   'comment_files',
   'comment_folders',
+  'upload_files',
+  'upload_anywhere',
 ] as const;
 export type FilesAct = (typeof FILES_ACTS)[number];
 

@@ -1,7 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { Connection, WireFailure, type Credentials } from '../src/connection';
-import { decimalU64, formatEntrySize, formatFileSize, parseDecimalU64 } from '../src/files';
+import {
+  decimalU64,
+  formatEntrySize,
+  formatFileSize,
+  parseDecimalU64,
+  resumeDigest,
+} from '../src/files';
 import type { LoginOk } from '../src/protocol';
 import { installFakeWire, uninstallFakeWire, type FakeServer } from './fake-wire';
 
@@ -181,5 +187,118 @@ describe('Files requests and downloads', () => {
     await expect(failed).rejects.toBeInstanceOf(WireFailure);
     await expect(failed).rejects.toMatchObject({ wire: { code: 'not_found' } });
     expect(fetch).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('uploads', () => {
+  const file = new Blob([new Uint8Array(10).map((_, i) => i * 3)]);
+  type Put = { url: string; range: string | undefined; digest: string | undefined; bytes: number[] };
+
+  /** Answers each PUT with the next response, and records what was sent. */
+  function stubPuts(responses: Response[]): Put[] {
+    const puts: Put[] = [];
+    vi.stubGlobal('fetch', async (url: string, init: RequestInit) => {
+      const headers = init.headers as Record<string, string>;
+      puts.push({
+        url,
+        range: headers['Content-Range'],
+        digest: headers['Upload-Digest'],
+        bytes: [...new Uint8Array(await (init.body as Blob).arrayBuffer())],
+      });
+      return responses.shift()!;
+    });
+    return puts;
+  }
+  const accepted = (offset: number) => new Response(null, { status: 204, headers: { 'Upload-Offset': String(offset) } });
+  const conflict = (offset: number) => new Response(null, { status: 409, headers: { 'Upload-Offset': String(offset) } });
+  const published = (path: string) => new Response(JSON.stringify({ path }), { status: 201 });
+
+  it('sends pieces from where the server says, and resolves with where it was published', async () => {
+    server.on('files_upload', () => ({ ok: { url: '/files/upload/tok', offset: '0', piece: '4' } }));
+    const puts = stubPuts([accepted(4), conflict(6), published('Uploads/a.bin')]);
+    const connection = new Connection(CREDS);
+    await connection.start();
+    const progress: bigint[] = [];
+    const path = await connection.uploadFile('Uploads/a.bin', file, { onProgress: (n) => progress.push(n) });
+
+    expect(path).toBe('Uploads/a.bin');
+    expect(server.sent('files_upload')[0]?.params).toEqual({ path: 'Uploads/a.bin', size: '10' });
+    expect(puts.map((p) => p.range)).toEqual(['bytes 0-3/10', 'bytes 4-7/10', 'bytes 6-9/10']);
+    expect(puts[2]?.bytes).toEqual([18, 21, 24, 27]);
+    expect(puts[0]?.url).toBe('http://test/files/upload/tok');
+    expect(progress).toEqual([0n, 4n]);
+  });
+
+  it('carries on from a quoted part only when it is the start of this file', async () => {
+    const digest = await resumeDigest(file, 4n);
+    server.on('files_upload', () => ({ ok: { url: '/files/upload/tok', offset: '4', piece: '8', digest } }));
+    const puts = stubPuts([published('a.bin')]);
+    const connection = new Connection(CREDS);
+    await connection.start();
+    await connection.uploadFile('a.bin', file);
+    expect(puts).toHaveLength(1);
+    expect(puts[0]).toMatchObject({ range: 'bytes 4-9/10', digest });
+
+    // Another file's part: started over.
+    let asked = 0;
+    server.on('files_upload', () =>
+      asked++ === 0
+        ? { ok: { url: '/files/upload/tok', offset: '4', piece: '16', digest: '00'.repeat(40) } }
+        : { ok: { url: '/files/upload/new', offset: '0', piece: '16' } },
+    );
+    const again = stubPuts([published('a.bin')]);
+    await connection.uploadFile('a.bin', file);
+    expect(server.sent('files_upload').at(-1)?.params).toEqual({ path: 'a.bin', size: '10', fresh: true });
+    expect(again[0]).toMatchObject({ url: 'http://test/files/upload/new', range: 'bytes 0-9/10', digest: undefined });
+  });
+
+  it('digests as the server does', async () => {
+    // hxfiles_xfer::resume_digest::encode(4, [0, 3, 6, 9]), as hex.
+    expect(await resumeDigest(file, 4n)).toBe(
+      '0000000000000004' + '4eb4895fbd97e7eb240cbc2f287f03e62b23e155fe3cc971e5ad0917524ec0ca',
+    );
+  });
+
+  it('sends an empty file as one piece with no range, and waits out a busy server', async () => {
+    server.on('files_upload', () => ({ ok: { url: '/files/upload/tok', offset: '0', piece: '16' } }));
+    const busy = new Response(null, { status: 503, headers: { 'Retry-After': '0' } });
+    const puts = stubPuts([busy, published('empty.txt')]);
+    const connection = new Connection(CREDS);
+    await connection.start();
+    await connection.uploadFile('empty.txt', new Blob([]));
+    expect(puts.map((p) => [p.range, p.bytes.length])).toEqual([
+      [undefined, 0],
+      [undefined, 0],
+    ]);
+  });
+
+  it('stops when canceled, without asking again', async () => {
+    server.on('files_upload', () => ({ ok: { url: '/files/upload/tok', offset: '0', piece: '4' } }));
+    const abort = new AbortController();
+    stubPuts([accepted(4)]);
+    const connection = new Connection(CREDS);
+    await connection.start();
+    const uploading = connection.uploadFile('a.bin', file, {
+      signal: abort.signal,
+      onProgress: (sent) => sent === 4n && abort.abort(new DOMException('canceled', 'AbortError')),
+    });
+    await expect(uploading).rejects.toMatchObject({ name: 'AbortError' });
+    expect(server.sent('files_upload')).toHaveLength(1);
+  });
+
+  it('asks again when its upload is gone, and reports a refusal in the wire\'s terms', async () => {
+    server.on('files_upload', () => ({ ok: { url: '/files/upload/tok', offset: '0', piece: '16' } }));
+    stubPuts([new Response(null, { status: 404 }), published('a.bin')]);
+    const connection = new Connection(CREDS);
+    await connection.start();
+    await connection.uploadFile('a.bin', file);
+    expect(server.sent('files_upload')).toHaveLength(2);
+
+    stubPuts([
+      new Response(JSON.stringify({ error: { code: 'already_exists', text: 'Taken.' } }), { status: 422 }),
+    ]);
+    await expect(connection.uploadFile('a.bin', file)).rejects.toMatchObject({
+      wire: { code: 'already_exists' },
+    });
   });
 });

@@ -1100,7 +1100,7 @@ dialog.picker header input { width: 9rem; }
 }
 .files-link:hover { text-decoration: underline; }
 .files-separator { color: var(--muted); }
-.files-body { min-height: 0; overflow-y: auto; padding: 0.45rem; }
+.files-body { flex: 1; min-height: 0; overflow-y: auto; padding: 0.45rem; }
 .file-row {
   width: 100%;
   display: grid;
@@ -1128,6 +1128,7 @@ dialog.picker header input { width: 9rem; }
 .file-info dd { margin: 0; overflow-wrap: anywhere; }
 .file-actions { display: flex; gap: 0.5rem; margin-top: 1rem; }
 .file-preview { margin-top: 1rem; }
+.files-view.dropping .files-body { outline: 2px dashed var(--accent); outline-offset: -4px; }
 .file-preview img, .file-preview video {
   display: block; max-width: 100%; height: auto; border: 1px solid var(--line);
 }

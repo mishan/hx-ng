@@ -927,6 +927,14 @@ export class ClassicConnection implements Session {
     throw unavailable('downloading');
   }
 
+  async prepareFileUpload(): Promise<never> {
+    throw unavailable('uploading');
+  }
+
+  async uploadFile(): Promise<never> {
+    throw unavailable('uploading');
+  }
+
   async prepareFilePreview(): Promise<never> {
     throw unavailable('previews');
   }

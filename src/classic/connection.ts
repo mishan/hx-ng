@@ -927,6 +927,14 @@ export class ClassicConnection implements Session {
     throw unavailable('downloading');
   }
 
+  async prepareFilePreview(): Promise<never> {
+    throw unavailable('previews');
+  }
+
+  async fetchFilePreview(): Promise<never> {
+    throw unavailable('previews');
+  }
+
   // --- news -------------------------------------------------------------
 
   private nodeId(node: Node): number {

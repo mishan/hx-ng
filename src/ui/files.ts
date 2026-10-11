@@ -41,6 +41,8 @@ export class FilesView {
   private generation = 0;
   /** The download under way, which is also what makes one at a time. */
   private abort: AbortController | null = null;
+  /** The image preview on screen, let go of when the next one is. */
+  private previewUrl: string | null = null;
 
   private sight = new Sight();
 
@@ -166,7 +168,7 @@ export class FilesView {
     try {
       const info = await connection.fileInfo(path);
       if (generation !== this.generation) return;
-      this.renderInfo(info);
+      this.renderInfo(info, generation);
     } catch (error) {
       if (generation !== this.generation) return;
       fill(
@@ -177,7 +179,7 @@ export class FilesView {
     }
   }
 
-  private renderInfo(info: FileInfo): void {
+  private renderInfo(info: FileInfo, generation: number): void {
     const size = parseDecimalU64(info.size);
     const download = h(
       'button',
@@ -187,6 +189,8 @@ export class FilesView {
     download.onclick = () => void this.download(info.path, info.name, size, download);
     const back = h('button', { class: 'ghost' }, 'Back');
     back.onclick = () => void this.load(this.path);
+    const preview = h('div', { class: 'file-preview', hidden: true });
+    void this.preview(info, preview, generation);
     fill(
       this.page,
       this.bar(this.path),
@@ -202,8 +206,56 @@ export class FilesView {
           info.comment ? h('dd', {}, info.comment) : null,
         ),
         h('div', { class: 'file-actions' }, back, download),
+        preview,
       ),
     );
+  }
+
+  /** What the server makes of the file, under its details: nothing for a
+   *  file it makes nothing of, or that this account may not download. */
+  private async preview(info: FileInfo, into: HTMLElement, generation: number): Promise<void> {
+    const connection = this.connection();
+    if (!connection?.files?.previews?.length) return;
+    try {
+      const prepared = await connection.prepareFilePreview(info.path);
+      const body = await connection.fetchFilePreview(prepared);
+      if (generation !== this.generation) return;
+      if (prepared.kind === 'image') {
+        if (this.previewUrl) URL.revokeObjectURL(this.previewUrl);
+        this.previewUrl = URL.createObjectURL(body);
+        fill(
+          into,
+          h('img', {
+            src: this.previewUrl,
+            alt: `Preview of ${info.name}`,
+            width: prepared.width,
+            height: prepared.height,
+          }),
+        );
+      } else {
+        const text = await body.text();
+        if (generation !== this.generation) return;
+        fill(
+          into,
+          prepared.truncated
+            ? h(
+                'p',
+                { class: 'file-preview-note' },
+                `Showing the first ${formatFileSize(BigInt(body.size))} of ${formatFileSize(parseDecimalU64(prepared.size))}.`,
+              )
+            : null,
+          h('pre', {}, text),
+        );
+      }
+      into.hidden = false;
+    } catch (error) {
+      if (generation !== this.generation) return;
+      if (error instanceof WireFailure && ['unsupported', 'access_denied'].includes(error.wire.code)) {
+        return;
+      }
+      fill(into, h('p', { class: 'files-state error' }, this.message(error)));
+      into.hidden = false;
+    }
   }
 
   private async download(

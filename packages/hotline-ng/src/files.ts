@@ -30,6 +30,24 @@ export interface FileDownloadOk {
   media_type?: string | null;
 }
 
+/** What `files_preview` serves in place of the file: an image the server
+ *  has drawn again, or the start of a text as UTF-8. */
+export type FilePreviewKind = 'image' | 'text';
+
+export interface FilePreviewOk {
+  kind: FilePreviewKind;
+  /** Same-server, short-lived bearer URL, as a download's. */
+  url: string;
+  media_type: string;
+  /** The file's, not the preview's. */
+  size: DecimalU64;
+  /** A text shown only from its start. */
+  truncated: boolean;
+  /** An image's, as drawn. */
+  width?: number;
+  height?: number;
+}
+
 /** The changes to the file area, by the access bit each needs. */
 export const FILES_ACTS = [
   'create_folders',
@@ -50,6 +68,8 @@ export interface FilesConfig {
   /** `false`: nothing in the area can change, and `may` is empty. */
   writable: boolean;
   may: FilesAct[];
+  /** The kinds `files_preview` makes; absent where the server has none. */
+  previews?: FilePreviewKind[];
 }
 
 export interface FileFetchOptions {

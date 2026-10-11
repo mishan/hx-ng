@@ -18,6 +18,7 @@ import {
   parseDecimalU64,
   type FileDownloadOk,
   type FileFetchOptions,
+  type FilePreviewOk,
   type FileInfo,
   FILES_ACTS,
   type FilesConfig,
@@ -662,7 +663,7 @@ export class Connection {
   private adoptAccess(set: AccessSet): void {
     this.accounts = set;
     if (this.files?.writable) {
-      this.files = { writable: true, may: FILES_ACTS.filter((act) => set.access.includes(act)) };
+      this.files = { ...this.files, may: FILES_ACTS.filter((act) => set.access.includes(act)) };
     }
   }
 
@@ -945,8 +946,26 @@ export class Connection {
     return prepared;
   }
 
+  /** `unsupported` for a file the server makes no preview of. */
+  async prepareFilePreview(path: string): Promise<FilePreviewOk> {
+    const prepared = await this.request<FilePreviewOk>('files_preview', { path });
+    parseDecimalU64(prepared.size);
+    return prepared;
+  }
+
+  /** The preview's bytes, which are small and made by the server. */
+  async fetchFilePreview(prepared: FilePreviewOk, signal?: AbortSignal): Promise<Blob> {
+    const response = await fetch(this.fileDownloadUrl(prepared), { signal });
+    if (response.ok) return response.blob();
+    await response.body?.cancel().catch(() => undefined);
+    throw new WireFailure({
+      code: 'not_found',
+      text: 'This preview has expired or is no longer authorized.',
+    });
+  }
+
   /** Resolve a prepared same-server path without exposing the origin. */
-  fileDownloadUrl(prepared: FileDownloadOk): string {
+  fileDownloadUrl(prepared: FileDownloadOk | FilePreviewOk): string {
     if (!/^\/files\/[A-Za-z0-9_-]+$/.test(prepared.url)) {
       throw new Error('invalid file download URL');
     }

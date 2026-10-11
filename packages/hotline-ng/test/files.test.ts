@@ -140,6 +140,32 @@ describe('Files requests and downloads', () => {
     expect(canceled).toBe(true);
   });
 
+  it('fetches a preview the server made, and reports one that has expired', async () => {
+    server.on('files_preview', () => ({
+      ok: {
+        kind: 'text',
+        url: '/files/preview',
+        media_type: 'text/plain; charset=utf-8',
+        size: '300000',
+        truncated: true,
+      },
+    }));
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(new Response('line\n', { status: 200 }))
+      .mockResolvedValueOnce(new Response('not found', { status: 404 }));
+    vi.stubGlobal('fetch', fetch);
+    const connection = new Connection(CREDS);
+    await connection.start();
+    const prepared = await connection.prepareFilePreview('notes.txt');
+    expect(server.sent('files_preview')[0]?.params).toEqual({ path: 'notes.txt' });
+    expect(await (await connection.fetchFilePreview(prepared)).text()).toBe('line\n');
+    expect(fetch.mock.calls[0]?.[0]).toBe('http://test/files/preview');
+    await expect(connection.fetchFilePreview(prepared)).rejects.toMatchObject({
+      wire: { code: 'not_found' },
+    });
+  });
+
   it('reports an expired bound token and never silently retries it', async () => {
     server.on('files_download', () => ({ ok: { url: '/files/stale', size: '9' } }));
     const fetch = vi.fn(() => Promise.resolve(new Response('not found', { status: 404 })));

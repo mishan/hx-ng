@@ -1127,6 +1127,13 @@ dialog.picker header input { width: 9rem; }
 .file-info dt { color: var(--muted); }
 .file-info dd { margin: 0; overflow-wrap: anywhere; }
 .file-actions { display: flex; gap: 0.5rem; margin-top: 1rem; }
+.file-preview { margin-top: 1rem; }
+.file-preview img { display: block; max-width: 100%; height: auto; border: 1px solid var(--line); }
+.file-preview pre {
+  margin: 0; padding: 0.75rem; max-height: 60vh; overflow: auto;
+  white-space: pre-wrap; overflow-wrap: anywhere; border: 1px solid var(--line);
+}
+.file-preview-note { margin: 0 0 0.5rem; color: var(--muted); }
 /* The download under way, kept under whichever folder is being looked at. */
 .files-transfer {
   flex: none;

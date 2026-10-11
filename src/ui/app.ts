@@ -877,6 +877,7 @@ export class App {
     // have the reader refresh what it shows, or remember to when next
     // opened.
     conn.on('news_posted', (d) => this.news.onPosted(d));
+    conn.on('news_edited', (d) => this.news.onEdited(d));
     conn.on('news_deleted', (d) => this.news.onDeleted(d));
     conn.on('news_purged', (d) => this.news.onPurged(d));
     conn.on('news_node', (d) => this.news.onNode(d));

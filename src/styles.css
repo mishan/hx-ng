@@ -1264,6 +1264,14 @@ button.ghost.danger:hover { color: var(--admin); border-color: var(--admin); }
 .news-article.deleted { background: transparent; }
 .news-meta { display: flex; gap: 0.5rem; align-items: baseline; font-size: 0.78rem; }
 .news-author { font-weight: 600; }
+.news-feed {
+  font-size: 0.68rem;
+  color: var(--muted);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 0 0.3rem;
+  white-space: nowrap;
+}
 .news-id { margin-left: auto; font-variant-numeric: tabular-nums; }
 .news-subject-line { font-weight: 600; margin-top: 0.15rem; }
 .news-text { white-space: pre-wrap; margin-top: 0.3rem; line-height: 1.45; }

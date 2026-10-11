@@ -11,7 +11,7 @@ import { expect, test } from '@playwright/test';
 
 import { buildHxdNg, hxdNgAvailable, startServer, type RunningServer } from './hxd-ng';
 
-const NG_PORT = 5830;
+const NG_PORT = 5835;
 
 test.describe('uploads against a real hxd-ng server', () => {
   test.skip(!hxdNgAvailable(), 'requires a sibling hxd-ng checkout (with cargo) at ../hxd-ng');

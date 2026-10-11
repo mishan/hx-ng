@@ -41,8 +41,10 @@ export class FilesView {
   private generation = 0;
   /** The download under way, which is also what makes one at a time. */
   private abort: AbortController | null = null;
-  /** The image preview on screen, let go of when the next one is. */
+  /** The image preview on screen, and the preview being fetched: both
+   *  let go of when the page moves on. */
   private previewUrl: string | null = null;
+  private previewAbort: AbortController | null = null;
 
   private sight = new Sight();
 
@@ -71,6 +73,7 @@ export class FilesView {
     this.generation++;
     this.abort?.abort();
     this.abort = null;
+    this.dropPreview();
     this.path = '';
     this.el.hidden = true;
     // Put away with the session, so opening it again is a bring-forward.
@@ -85,6 +88,7 @@ export class FilesView {
     const connection = this.connection();
     if (!connection) return;
     this.entries = null;
+    this.dropPreview();
     const generation = ++this.generation;
     fill(this.page, this.bar(path), h('p', { class: 'files-state' }, 'Loading…'));
     try {
@@ -163,6 +167,7 @@ export class FilesView {
     const connection = this.connection();
     if (!connection) return;
     this.entries = null;
+    this.dropPreview();
     const generation = ++this.generation;
     fill(this.page, this.bar(this.path), h('p', { class: 'files-state' }, 'Loading details…'));
     try {
@@ -211,17 +216,27 @@ export class FilesView {
     );
   }
 
+  private dropPreview(): void {
+    this.previewAbort?.abort();
+    this.previewAbort = null;
+    if (this.previewUrl) URL.revokeObjectURL(this.previewUrl);
+    this.previewUrl = null;
+  }
+
   /** What the server makes of the file, under its details: nothing for a
    *  file it makes nothing of, or that this account may not download. */
   private async preview(info: FileInfo, into: HTMLElement, generation: number): Promise<void> {
     const connection = this.connection();
     if (!connection?.files?.previews?.length) return;
+    const abort = new AbortController();
+    this.previewAbort = abort;
     try {
       const prepared = await connection.prepareFilePreview(info.path);
-      const body = await connection.fetchFilePreview(prepared);
+      // A kind this client does not draw may be the whole file.
+      if (prepared.kind !== 'image' && prepared.kind !== 'text') return;
+      const body = await connection.fetchFilePreview(prepared, abort.signal);
       if (generation !== this.generation) return;
       if (prepared.kind === 'image') {
-        if (this.previewUrl) URL.revokeObjectURL(this.previewUrl);
         this.previewUrl = URL.createObjectURL(body);
         fill(
           into,
@@ -237,11 +252,13 @@ export class FilesView {
         if (generation !== this.generation) return;
         fill(
           into,
+          // What arrives is converted, so its size is not a part of the
+          // file's to set beside it.
           prepared.truncated
             ? h(
                 'p',
                 { class: 'file-preview-note' },
-                `Showing the first ${formatFileSize(BigInt(body.size))} of ${formatFileSize(parseDecimalU64(prepared.size))}.`,
+                `Showing the start of this ${formatFileSize(parseDecimalU64(prepared.size))} file.`,
               )
             : null,
           h('pre', {}, text),
@@ -250,10 +267,14 @@ export class FilesView {
       into.hidden = false;
     } catch (error) {
       if (generation !== this.generation) return;
-      if (error instanceof WireFailure && ['unsupported', 'access_denied'].includes(error.wire.code)) {
-        return;
-      }
-      fill(into, h('p', { class: 'files-state error' }, this.message(error)));
+      const code = error instanceof WireFailure ? error.wire.code : null;
+      if (code === 'unsupported' || code === 'access_denied') return;
+      fill(
+        into,
+        code === 'too_large'
+          ? h('p', { class: 'file-preview-note' }, 'Too large to preview.')
+          : h('p', { class: 'files-state error', role: 'alert' }, this.message(error)),
+      );
       into.hidden = false;
     }
   }

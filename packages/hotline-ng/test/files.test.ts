@@ -164,6 +164,10 @@ describe('Files requests and downloads', () => {
     await expect(connection.fetchFilePreview(prepared)).rejects.toMatchObject({
       wire: { code: 'not_found' },
     });
+    // A kind it does not know may be the whole file, and is not fetched.
+    const video = { ...prepared, kind: 'video' } as unknown as typeof prepared;
+    await expect(connection.fetchFilePreview(video)).rejects.toThrow('not fetched whole');
+    expect(fetch).toHaveBeenCalledTimes(2);
   });
 
   it('reports an expired bound token and never silently retries it', async () => {

@@ -953,8 +953,12 @@ export class Connection {
     return prepared;
   }
 
-  /** The preview's bytes, which are small and made by the server. */
+  /** The preview's bytes, which are small and made by the server; a kind
+   *  this library does not know may be neither, and is refused. */
   async fetchFilePreview(prepared: FilePreviewOk, signal?: AbortSignal): Promise<Blob> {
+    if (prepared.kind !== 'image' && prepared.kind !== 'text') {
+      throw new Error(`a ${String(prepared.kind)} preview is not fetched whole`);
+    }
     const response = await fetch(this.fileDownloadUrl(prepared), { signal });
     if (response.ok) return response.blob();
     await response.body?.cancel().catch(() => undefined);

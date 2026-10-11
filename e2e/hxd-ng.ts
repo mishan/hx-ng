@@ -128,7 +128,7 @@ export interface ServerOptions {
   accounts?: Record<string, string>;
   /** Files written into the server's directory before it starts, by
    *  path: a `[files] root` has to exist when the server reads it. */
-  files?: Record<string, string>;
+  files?: Record<string, string | Uint8Array>;
 }
 
 /** Starts a freshly built `hxd` in a throwaway directory. By default a

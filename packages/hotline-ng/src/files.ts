@@ -30,13 +30,15 @@ export interface FileDownloadOk {
   media_type?: string | null;
 }
 
-/** What `files_preview` serves in place of the file: an image the server
- *  has drawn again, or the start of a text as UTF-8. */
-export type FilePreviewKind = 'image' | 'text';
+/** What `files_preview` serves: an image the server has drawn again, the
+ *  start of a text as UTF-8, or a video, which is the file itself,
+ *  streamed in ranges as a player asks for it. */
+export type FilePreviewKind = 'image' | 'text' | 'video';
 
 export interface FilePreviewOk {
   kind: FilePreviewKind;
-  /** Same-server, short-lived bearer URL, as a download's. */
+  /** Same-server bearer URL, as a download's; a video's lasts an hour
+   *  from each fetch. */
   url: string;
   media_type: string;
   /** The file's, not the preview's. */

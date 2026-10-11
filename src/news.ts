@@ -8,6 +8,7 @@ import {
   type NewsAttachment,
   type NewsAuthor,
   type NewsConfig,
+  type NewsFeed,
   type NewsNode,
   type NewsScope,
   type NewsSub,
@@ -44,9 +45,14 @@ export function isOwn(author: NewsAuthor, me: string | null): boolean {
 
 /** May a reply go under this article? The server decides, and says so if
  *  asked anyway; this is for not offering a button that can only fail. */
-export function canReply(article: NewsArticle, cfg: NewsConfig | null): boolean {
-  if (!cfg?.post || article.deleted) return false;
+export function canReply(article: NewsArticle, cfg: NewsConfig | null, feed?: NewsFeed): boolean {
+  if (!cfg?.post || article.deleted || (feed && !feed.replies)) return false;
   return cfg.max_depth === undefined || article.depth < cfg.max_depth;
+}
+
+/** May a thread be started in this category? Never in one a feed fills. */
+export function canStartThread(category: NewsNode, cfg: NewsConfig | null): boolean {
+  return !!cfg?.post && !category.feed;
 }
 
 /** Is this body markdown? Only when its article says so: a `text/plain`

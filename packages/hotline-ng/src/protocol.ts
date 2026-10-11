@@ -563,6 +563,15 @@ export interface NewsNode {
   created_at: number;
   /** Present on a bundle the request's `depth` reached into. */
   children?: NewsNode[];
+  /** Present on a category a feed fills: nobody starts a thread in it. */
+  feed?: NewsFeed;
+}
+
+/** The feed filling a category, and what it allows. */
+export interface NewsFeed {
+  name: string;
+  /** May people reply to its articles? */
+  replies: boolean;
 }
 
 /** Who wrote an article, as they were when they wrote it: a rename
@@ -573,6 +582,8 @@ export interface NewsAuthor {
   login?: string;
   /** 52 characters, Crockford base32. */
   fingerprint?: string;
+  /** The feed that posted it; the nick is the feed item's own author. */
+  feed?: string;
 }
 
 /**
@@ -1421,6 +1432,9 @@ export interface Events {
     at: number;
     attachments: number;
   };
+  /** A feed's article was rewritten because its item changed upstream:
+   *  cache invalidation, like `news_posted`. */
+  news_edited: { id: number; category: number };
   /** An article became a tombstone. */
   news_deleted: { id: number; category: number };
   /** A moderator's purge deleted many articles at once: each entry

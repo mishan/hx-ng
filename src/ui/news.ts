@@ -52,6 +52,7 @@ import {
   attachmentLabel,
   attachmentProblem,
   canReply,
+  canStartThread,
   coalesced,
   draftProblem,
   excerpt,
@@ -532,6 +533,12 @@ export class NewsView {
     ) {
       this.invalidate();
     }
+  }
+
+  /** A feed's article rewritten: the words on screen are stale, and
+   *  nothing else is. */
+  onEdited(d: Events['news_edited']): void {
+    if (this.shows(d)) this.invalidate();
   }
 
   onDeleted(d: Events['news_deleted']): void {
@@ -1209,7 +1216,10 @@ export class NewsView {
     };
     if (this.pendingRefresh) action('New activity', () => void this.load(), { on: true, title: 'Something changed here. Load it.' });
     if (s.at === 'category') {
-      const may = !!this.hooks.conn()?.news?.post;
+      const may = canStartThread(s.category, this.hooks.conn()?.news ?? null);
+      const why = s.category.feed
+        ? `The feed ${s.category.feed.name} fills this category.`
+        : 'You may not post here.';
       action(
         'New thread',
         () => {
@@ -1217,7 +1227,7 @@ export class NewsView {
           this.focusDraft = true;
           this.render();
         },
-        { disabled: !may || this.draft?.parent === undefined && this.draft !== null, title: may ? 'Start a thread' : 'You may not post here.' },
+        { disabled: !may || this.draft?.parent === undefined && this.draft !== null, title: may ? 'Start a thread' : why },
       );
     }
     const followScope: NewsScope | null = !this.subscribable()
@@ -1316,6 +1326,9 @@ export class NewsView {
         { class: 'news-node' },
         h('span', { class: 'glyph' }, node.kind === 'bundle' ? '▸' : '#'),
         h('span', { class: 'name' }, node.name),
+        node.feed
+          ? h('span', { class: 'news-feed', title: `Filled by the feed ${node.feed.name}` }, node.feed.name)
+          : null,
         h(
           'span',
           { class: 'count' },
@@ -1472,6 +1485,9 @@ export class NewsView {
         'div',
         { class: 'news-meta' },
         h('span', { class: 'news-author' }, a.deleted ? 'Deleted' : a.from.nick || 'guest'),
+        !a.deleted && a.from.feed
+          ? h('span', { class: 'news-feed', title: `Posted by the feed ${a.from.feed}` }, a.from.feed)
+          : null,
         stamp(a.at),
         h('span', { class: 'news-id muted' }, `#${a.id}`),
       ),
@@ -1489,7 +1505,7 @@ export class NewsView {
     }
 
     const actions: HTMLElement[] = [];
-    if (canReply(a, cfg)) {
+    if (canReply(a, cfg, inCategory(s) ? s.category.feed : undefined)) {
       const reply = h('button', {}, 'Reply');
       reply.onclick = () => {
         this.draft = {

@@ -7,6 +7,7 @@ import {
   attachmentProblem,
   tooManyAttachments,
   canReply,
+  canStartThread,
   coalesced,
   draftProblem,
   excerpt,
@@ -82,6 +83,16 @@ describe('replying', () => {
     expect(canReply(article({ deleted: true }), cfg())).toBe(false);
     expect(canReply(article(), cfg({ post: false }))).toBe(false);
     expect(canReply(article(), null)).toBe(false);
+  });
+
+  it('follows a feed: no new threads, and replies only where the feed takes them', () => {
+    const feed = (replies: boolean) => ({ ...node(1, null, 'Releases'), feed: { name: 'mobius', replies } });
+    expect(canStartThread(node(1, null, 'General'), cfg())).toBe(true);
+    expect(canStartThread(feed(true), cfg())).toBe(false);
+    expect(canStartThread(node(1, null, 'General'), cfg({ post: false }))).toBe(false);
+    expect(canReply(article(), cfg(), feed(false).feed)).toBe(false);
+    expect(canReply(article(), cfg(), feed(true).feed)).toBe(true);
+    expect(canReply(article({ depth: 3 }), cfg(), feed(true).feed)).toBe(false);
   });
 });
 

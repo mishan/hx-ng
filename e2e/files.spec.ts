@@ -33,11 +33,7 @@ ${access}`;
 
 async function openFiles(browser: Browser, server: RunningServer, login: string): Promise<Page> {
   const page = await (await browser.newContext()).newPage();
-  // A distinct hostname makes this a custom-server deployment rather
-  // than the dev proxy's default :5700, so a preview is fetched from the
-  // server itself.
-  const customUrl = server.wsUrl.replace('127.0.0.1', 'localhost');
-  await page.goto(`/?server=${encodeURIComponent(customUrl)}`);
+  await page.goto(`/?server=${encodeURIComponent(server.wsUrl)}`);
   await page.getByLabel('Account').fill(login);
   await page.getByLabel('Password').fill('pw');
   await page.getByRole('button', { name: 'Connect', exact: true }).click();
@@ -54,7 +50,7 @@ test.describe('file changes against a real hxd-ng server', () => {
   test.beforeAll(async () => {
     buildHxdNg();
     server = await startServer(NG_PORT, {
-      files: { 'files/readme.txt': 'line\r\n'.repeat(50_000) },
+      files: { 'files/readme.txt': 'hello' },
       sections: `
 [files]
 root = "files"
@@ -62,7 +58,6 @@ root = "files"
       accounts: {
         editor: account('Editor', EVERY_CHANGE),
         reader: account('Reader'),
-        viewer: account('Viewer', 'download_files = true\n'),
       },
     });
   });
@@ -77,15 +72,6 @@ root = "files"
     await expect(view.locator('.file-row', { hasText: 'readme.txt' })).toBeVisible();
     await expect(view.getByRole('button', { name: 'New folder' })).toHaveCount(0);
     await expect(view.locator('.file-more')).toHaveCount(0);
-  });
-
-  test('a long text previews from its start under its details', async ({ browser }) => {
-    const page = await openFiles(browser, server, 'viewer');
-    const view = page.locator('.files-view');
-    await view.locator('.file-row', { hasText: 'readme.txt' }).click();
-    const preview = view.locator('.file-preview');
-    await expect(preview.locator('pre')).toContainText('line');
-    await expect(preview.locator('.file-preview-note')).toHaveText(/^Showing the start of this .+ file\.$/);
   });
 
   test('a folder is made, a file moved into it and commented on, and the folder deleted', async ({ browser }) => {

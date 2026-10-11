@@ -232,6 +232,23 @@ export class FilesView {
     this.previewAbort = abort;
     try {
       const prepared = await connection.prepareFilePreview(info.path);
+      if (prepared.kind === 'video') {
+        if (generation !== this.generation) return;
+        // Asked of a bare element: setting a source starts the load.
+        fill(
+          into,
+          document.createElement('video').canPlayType(prepared.media_type)
+            ? h('video', {
+                controls: true,
+                preload: 'metadata',
+                src: connection.fileDownloadUrl(prepared),
+                ariaLabel: `Preview of ${info.name}`,
+              })
+            : h('p', { class: 'file-preview-note' }, `This browser cannot play ${prepared.media_type}.`),
+        );
+        into.hidden = false;
+        return;
+      }
       // A kind this client does not draw may be the whole file.
       if (prepared.kind !== 'image' && prepared.kind !== 'text') return;
       const body = await connection.fetchFilePreview(prepared, abort.signal);

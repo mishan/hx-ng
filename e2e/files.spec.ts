@@ -85,7 +85,7 @@ root = "files"
     await view.locator('.file-row', { hasText: 'readme.txt' }).click();
     const preview = view.locator('.file-preview');
     await expect(preview.locator('pre')).toContainText('line');
-    await expect(preview.locator('.file-preview-note')).toHaveText(/^Showing the first .+ of .+\.$/);
+    await expect(preview.locator('.file-preview-note')).toHaveText(/^Showing the start of this .+ file\.$/);
   });
 
   test('a folder is made, a file moved into it and commented on, and the folder deleted', async ({ browser }) => {

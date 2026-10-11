@@ -63,6 +63,7 @@ export {
   type ConnectionHooks,
   type ConnState,
   type Credentials,
+  type FileUploadOptions,
   type TraceEntry,
 } from './connection.js';
 export {

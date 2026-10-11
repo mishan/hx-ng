@@ -39,17 +39,41 @@ export class FilesView {
    *  `null` while something else is. */
   private entries: FileEntry[] | null = null;
   private generation = 0;
-  /** The download under way, which is also what makes one at a time. */
+  /** The download or upload under way, which is also what makes one
+   *  transfer at a time. */
   private abort: AbortController | null = null;
   /** The image preview on screen, and the preview being fetched: both
    *  let go of when the page moves on. */
   private previewUrl: string | null = null;
   private previewAbort: AbortController | null = null;
+  /** Whether the folder listed takes uploads from this session. */
+  private uploadable = false;
 
   private sight = new Sight();
 
   constructor(private connection: () => Session | null) {
     this.el.append(this.page, this.transfer);
+    // The whole view, so a file dropped a little wide of the listing is
+    // not opened by the browser in place of the app; taken only while a
+    // listing that takes uploads is on screen and nothing else is moving.
+    const takes = (e: DragEvent) =>
+      this.uploadable && this.entries !== null && e.dataTransfer?.types.includes('Files') === true;
+    this.el.ondragover = (e) => {
+      if (!e.dataTransfer?.types.includes('Files')) return;
+      e.preventDefault();
+      const open = takes(e) && this.abort === null;
+      e.dataTransfer.dropEffect = open ? 'copy' : 'none';
+      this.el.classList.toggle('dropping', open);
+    };
+    this.el.ondragleave = (e) => {
+      if (!this.el.contains(e.relatedTarget as Node | null)) this.el.classList.remove('dropping');
+    };
+    this.el.ondrop = (e) => {
+      if (!e.dataTransfer?.types.includes('Files')) return;
+      e.preventDefault();
+      this.el.classList.remove('dropping');
+      if (takes(e)) void this.upload([...e.dataTransfer.files]);
+    };
   }
 
   show(open: boolean): void {
@@ -63,9 +87,11 @@ export class FilesView {
     if (this.sight.set(on)) void this.load(this.path);
   }
 
-  /** Draw the listing again for what this session may now change. */
+  /** Show the listing again for what this session may now change:
+   *  asked of the server, since whether the folder takes uploads is its
+   *  to say. */
   refresh(): void {
-    if (this.entries) this.renderListing(this.entries);
+    if (this.entries) void this.load(this.path);
   }
 
   reset(): void {
@@ -96,6 +122,7 @@ export class FilesView {
       if (generation !== this.generation) return;
       this.path = listing.path;
       this.entries = listing.entries;
+      this.uploadable = listing.uploadable === true;
       this.renderListing(listing.entries);
     } catch (error) {
       if (generation !== this.generation) return;
@@ -128,11 +155,20 @@ export class FilesView {
       mkdir = h('button', { class: 'ghost' }, 'New folder');
       mkdir.onclick = () => void this.mkdir();
     }
+    let upload: HTMLElement | null = null;
+    if (this.uploadable && this.entries) {
+      const pick = h('input', { type: 'file', multiple: true, hidden: true });
+      pick.onchange = () => void this.upload([...(pick.files ?? [])]);
+      const button = h('button', { class: 'ghost files-upload', disabled: this.abort !== null }, 'Upload');
+      button.onclick = () => pick.click();
+      upload = h('span', {}, button, pick);
+    }
     return h(
       'div',
       { class: 'files-bar' },
       h('div', { class: 'files-crumbs' }, ...crumbs),
       h('span', { class: 'spacer' }),
+      upload,
       mkdir,
       refresh,
     );
@@ -371,7 +407,7 @@ export class FilesView {
         this.abort = null;
         // The button that started it may have been redrawn since; any
         // Download on screen now waited on this one.
-        for (const b of this.page.querySelectorAll<HTMLButtonElement>('.file-download')) {
+        for (const b of this.page.querySelectorAll<HTMLButtonElement>('.file-download, .files-upload')) {
           b.disabled = false;
         }
       }
@@ -433,6 +469,57 @@ export class FilesView {
         danger: true,
       });
       if (a) await this.change(() => connection.filesDelete(path));
+    }
+  }
+
+  /** Uploads `files` into the folder on screen, one at a time, in the
+   *  strip a download uses and as one of its transfers at a time. */
+  private async upload(files: File[]): Promise<void> {
+    const connection = this.connection();
+    if (!connection || this.abort || !files.length) return;
+    const abort = new AbortController();
+    this.abort = abort;
+    const folder = this.path;
+    const status = (...children: (Node | string)[]) => {
+      if (this.abort !== abort) return;
+      this.transfer.hidden = false;
+      fill(this.transfer, ...children);
+    };
+    const cancel = h('button', { class: 'ghost danger' }, 'Cancel');
+    cancel.onclick = () => abort.abort();
+    for (const b of this.page.querySelectorAll<HTMLButtonElement>('.file-download, .files-upload')) {
+      b.disabled = true;
+    }
+    let done = 0;
+    try {
+      for (const file of files) {
+        const size = BigInt(file.size);
+        const path = folder ? `${folder}/${file.name}` : file.name;
+        status(`${file.name}: starting ${formatFileSize(size)}… `, cancel);
+        await connection.uploadFile(path, file, {
+          signal: abort.signal,
+          onProgress: (sent) =>
+            status(`${file.name}: ${formatFileSize(sent)} of ${formatFileSize(size)} `, cancel),
+        });
+        done++;
+      }
+      status(done === 1 ? `Uploaded ${files[0]!.name}.` : `Uploaded ${done} files.`);
+    } catch (error) {
+      if (error instanceof DOMException && error.name === 'AbortError') {
+        status(done ? `Upload canceled after ${done} of ${files.length} files.` : 'Upload canceled.');
+      } else {
+        status(h('span', { class: 'error' }, this.message(error)));
+      }
+    } finally {
+      if (this.abort === abort) {
+        this.abort = null;
+        // What arrived is in the folder; show it if that is still where
+        // this view is, and let the buttons go either way.
+        if (this.entries && this.path === folder) void this.load(folder);
+        for (const b of this.page.querySelectorAll<HTMLButtonElement>('.file-download, .files-upload')) {
+          b.disabled = false;
+        }
+      }
     }
   }
 

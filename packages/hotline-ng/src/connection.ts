@@ -19,8 +19,10 @@ import {
   type FileDownloadOk,
   type FileFetchOptions,
   type FilePreviewOk,
+  type FileUploadOk,
   type FileInfo,
   FILES_ACTS,
+  resumeDigest,
   type FilesConfig,
   type FilesListOk,
 } from './files.js';
@@ -220,6 +222,41 @@ const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout
 export function hasSavedSession(url: string): boolean {
   const s = readSaved();
   return !!s && s.url === url;
+}
+
+/** How many tries in a row may go astray before an upload gives up: with
+ *  the doubling waits between them, a minute without the server. */
+const UPLOAD_RETRIES = 5;
+/** The most this client sends in one piece. */
+const UPLOAD_PIECE = 1n << 20n;
+
+export interface FileUploadOptions {
+  comment?: string;
+  signal?: AbortSignal;
+  /** How much of the file the server holds, as it grows. */
+  onProgress?: (sent: bigint) => void;
+}
+
+function delay(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(resolve, ms);
+    signal?.addEventListener(
+      'abort',
+      () => {
+        clearTimeout(timer);
+        reject(signal.reason);
+      },
+      { once: true },
+    );
+  });
+}
+
+/** A refused piece as the wire error its body carries, when it carries one. */
+async function uploadFailure(response: Response): Promise<WireFailure> {
+  const body = (await response.json().catch(() => null)) as { error?: WireError } | null;
+  return new WireFailure(
+    body?.error ?? { code: 'not_available', text: `The upload was refused (${response.status}).` },
+  );
 }
 
 export class WireFailure extends Error {
@@ -946,6 +983,107 @@ export class Connection {
     return prepared;
   }
 
+  /** `files_upload`: reserves an upload of `size` bytes to `path`. */
+  async prepareFileUpload(
+    path: string,
+    size: bigint,
+    options: { comment?: string; fresh?: boolean } = {},
+  ): Promise<FileUploadOk> {
+    const prepared = await this.request<FileUploadOk>('files_upload', {
+      path,
+      size: decimalU64(size),
+      ...(options.comment ? { comment: options.comment } : {}),
+      ...(options.fresh ? { fresh: true } : {}),
+    });
+    parseDecimalU64(prepared.offset);
+    parseDecimalU64(prepared.piece);
+    return prepared;
+  }
+
+  /**
+   * Upload `file` to `path` in pieces, carrying on from what the server
+   * already holds of it when that is the start of this file, and from
+   * wherever the server says when a piece goes astray. Resolves with the
+   * path it was published at, which a drop box may have renamed.
+   */
+  async uploadFile(path: string, file: Blob, options: FileUploadOptions = {}): Promise<string> {
+    const size = BigInt(file.size);
+    let failures = 0;
+    // Each pass asks for the upload afresh: after the first, because the
+    // token went with its session or the partial moved under it.
+    for (;;) {
+      options.signal?.throwIfAborted();
+      let prepared: FileUploadOk;
+      try {
+        prepared = await this.prepareFileUpload(path, size, { comment: options.comment });
+      } catch (error) {
+        // Asked between a session's socket closing and its resume: the
+        // upload waits for it, as a piece waits for a dropped connection.
+        if (!(error instanceof Error) || error.message !== 'not connected') throw error;
+        if (++failures > UPLOAD_RETRIES) throw error;
+        await delay(1000 * 2 ** failures, options.signal);
+        continue;
+      }
+      let offset = parseDecimalU64(prepared.offset);
+      let echo = prepared.digest;
+      if (echo !== undefined && (await resumeDigest(file, offset)) !== echo) {
+        prepared = await this.prepareFileUpload(path, size, { comment: options.comment, fresh: true });
+        offset = 0n;
+        echo = undefined;
+      }
+      // Smaller than the server allows, where it allows that, so progress
+      // moves and a dropped connection costs little. A blind upload's one
+      // piece is the whole file.
+      const allowed = parseDecimalU64(prepared.piece);
+      const piece = allowed === size || allowed < UPLOAD_PIECE ? allowed : UPLOAD_PIECE;
+      options.onProgress?.(offset);
+      for (;;) {
+        options.signal?.throwIfAborted();
+        const end = offset + piece < size ? offset + piece : size;
+        const headers: Record<string, string> = {};
+        if (size > 0n) headers['Content-Range'] = `bytes ${offset}-${end - 1n}/${size}`;
+        if (echo !== undefined) headers['Upload-Digest'] = echo;
+        let response: Response;
+        try {
+          response = await fetch(this.fileUploadUrl(prepared), {
+            method: 'PUT',
+            headers,
+            body: file.slice(Number(offset), Number(end)),
+            signal: options.signal,
+          });
+        } catch (error) {
+          // A dropped connection costs the piece, not the upload.
+          if (options.signal?.aborted || ++failures > UPLOAD_RETRIES) throw error;
+          await delay(1000 * 2 ** failures, options.signal);
+          continue;
+        }
+        const told = response.headers.get('Upload-Offset');
+        if (response.status === 201) {
+          return ((await response.json()) as { path: string }).path;
+        }
+        if (response.status === 204 || (response.status === 409 && told !== null)) {
+          if (told === null) throw new Error('The server did not say where the upload stands.');
+          offset = parseDecimalU64(told);
+          if (response.status === 204) {
+            echo = undefined;
+            failures = 0;
+            options.onProgress?.(offset);
+          } else if (++failures > UPLOAD_RETRIES) {
+            throw new Error('The server and this upload disagree on where it stands.');
+          }
+          continue;
+        }
+        if (response.status === 404 && ++failures <= UPLOAD_RETRIES) break;
+        if (response.status === 503 && ++failures <= UPLOAD_RETRIES) {
+          const wait = Number(response.headers.get('Retry-After') ?? '1');
+          await delay(1000 * (Number.isFinite(wait) ? wait : 1), options.signal);
+          continue;
+        }
+        throw await uploadFailure(response);
+      }
+    }
+  }
+
   /** `unsupported` for a file the server makes no preview of. */
   async prepareFilePreview(path: string): Promise<FilePreviewOk> {
     const prepared = await this.request<FilePreviewOk>('files_preview', { path });
@@ -966,6 +1104,13 @@ export class Connection {
       code: 'not_found',
       text: 'This preview has expired or is no longer authorized.',
     });
+  }
+
+  private fileUploadUrl(prepared: FileUploadOk): string {
+    if (!/^\/files\/upload\/[A-Za-z0-9_-]+$/.test(prepared.url)) {
+      throw new Error('invalid file upload URL');
+    }
+    return `${this.httpBase()}${prepared.url}`;
   }
 
   /** Resolve a prepared same-server path without exposing the origin. */

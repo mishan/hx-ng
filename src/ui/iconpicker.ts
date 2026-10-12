@@ -37,13 +37,25 @@ export function pickIcon(current: number, avatar?: AvatarChoice, nick?: string):
     for (const id of iconIds()) {
       const b = h(
         'button',
-        { class: `icon-cell${id === current ? ' on' : ''}`, title: `icon ${id}`, type: 'button' },
+        {
+          class: `icon-cell${id === current ? ' on' : ''}`,
+          title: `icon ${id}`,
+          ariaLabel: `icon ${id}`,
+          ariaPressed: String(id === current),
+          // One stop in the tab order for the whole grid; arrows move in it.
+          tabIndex: id === current ? 0 : -1,
+          type: 'button',
+        },
         icon(id, 2),
       );
       b.onclick = () => {
-        buttons.get(chosen)?.classList.remove('on');
+        const was = buttons.get(chosen);
+        was?.classList.remove('on');
+        was?.setAttribute('aria-pressed', 'false');
         chosen = id;
         b.classList.add('on');
+        b.setAttribute('aria-pressed', 'true');
+        rove(b);
         readout.textContent = `icon ${id}`;
       };
       b.ondblclick = () => done(chosen);
@@ -51,16 +63,43 @@ export function pickIcon(current: number, avatar?: AvatarChoice, nick?: string):
       grid.append(b);
     }
 
-    const readout = h('span', { class: 'muted' }, `icon ${current}`);
+    const rove = (to: HTMLButtonElement): void => {
+      for (const b of buttons.values()) b.tabIndex = b === to ? 0 : -1;
+    };
+    grid.onkeydown = (e) => {
+      const shown = [...buttons.values()].filter((b) => !b.hidden);
+      const i = shown.indexOf(document.activeElement as HTMLButtonElement);
+      if (i < 0) return;
+      // The grid wraps to the dialog's width: a row is as many cells as
+      // sit level with the first.
+      const row = shown.findIndex((b) => b.offsetTop !== shown[0]!.offsetTop);
+      const cols = row > 0 ? row : shown.length;
+      const step = { ArrowLeft: -1, ArrowRight: 1, ArrowUp: -cols, ArrowDown: cols, Home: -i, End: shown.length }[e.key];
+      if (step === undefined) return;
+      e.preventDefault();
+      const next = shown[Math.max(0, Math.min(shown.length - 1, i + step))]!;
+      rove(next);
+      next.focus();
+    };
+
+    if (!buttons.has(current)) {
+      const first = buttons.values().next().value;
+      if (first) rove(first);
+    }
+
+    const readout = h('span', { class: 'muted', role: 'status' }, `icon ${current}`);
     const search = h('input', {
       type: 'search',
       placeholder: 'icon number…',
+      ariaLabel: 'Icon number',
       inputMode: 'numeric',
       spellcheck: false,
     });
     search.oninput = () => {
       const q = search.value.trim();
       for (const [id, b] of buttons) b.hidden = q !== '' && !String(id).startsWith(q);
+      const first = [...buttons.values()].find((b) => !b.hidden);
+      if (first && [...buttons.values()].every((b) => b.hidden || b.tabIndex < 0)) rove(first);
     };
 
     const nickInput = nick === undefined
@@ -88,7 +127,7 @@ export function pickIcon(current: number, avatar?: AvatarChoice, nick?: string):
 
     const dialog = h(
       'dialog',
-      { class: 'picker' },
+      { class: 'picker', ariaLabel: nickInput ? 'Name and icon' : 'Choose an icon' },
       h('header', {}, h('h2', {}, nickInput ? 'Name and icon' : 'Choose an icon'), nickInput, readout, h('div', { class: 'spacer' }), search),
       grid,
       h('footer', {}, ...pictureBtns, pictureBtns.length ? h('div', { class: 'spacer' }) : null, cancel, ok),
@@ -100,6 +139,8 @@ export function pickIcon(current: number, avatar?: AvatarChoice, nick?: string):
 
     function done(value: number | null): void {
       if (!dialog.isConnected) return;
+      // `close` first: it is what gives the focus back to the opener.
+      dialog.close();
       dialog.remove();
       resolve(value === null ? null : { icon: value, nick: nickInput?.value.trim() });
     }

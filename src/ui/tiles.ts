@@ -118,7 +118,7 @@ export class Tiles {
     video.muted = true;
     if (opts.mirror) video.classList.add('mirror');
 
-    const note = h('span', { class: 'tile-note' });
+    const note = h('span', { class: 'tile-note', role: 'status' });
     const play = h('button', { class: 'tile-play', type: 'button', hidden: true }, 'Tap to play');
     const caption = h('figcaption', {});
     const fig = h(

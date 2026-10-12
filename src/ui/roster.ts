@@ -37,7 +37,7 @@ export function renderRoster(el: HTMLElement, store: Store, media: VoiceSession 
   const rows = users.map((u) => row(u, store, media, hooks));
   const close = h(
     'button',
-    { class: 'roster-close', type: 'button', title: 'Hide the user list' },
+    { class: 'roster-close', type: 'button', title: 'Hide the user list', ariaLabel: 'Hide the user list' },
     '\u00d7',
   );
   close.onclick = () => hooks.onClose();
@@ -46,7 +46,7 @@ export function renderRoster(el: HTMLElement, store: Store, media: VoiceSession 
     h(
       'div',
       { class: 'roster-head' },
-      h('span', {}, users.length === 1 ? '1 person' : `${users.length} people`),
+      h('h2', { class: 'roster-count' }, users.length === 1 ? '1 person' : `${users.length} people`),
       h('div', { class: 'spacer' }),
       close,
     ),
@@ -69,19 +69,11 @@ function row(u: User, store: Store, media: VoiceSession | null, hooks: RosterHoo
 
   const marks: HTMLElement[] = [];
   if (voice) {
-    marks.push(
-      h('span', {
-        class: `mark ${voice.muted ? 'muted-mic' : 'mic'}`,
-        title: voice.muted ? 'in voice, muted' : 'in voice',
-      }),
-    );
+    marks.push(mark(voice.muted ? 'muted-mic' : 'mic', voice.muted ? 'in voice, muted' : 'in voice'));
   }
   for (const p of pubs) {
     marks.push(
-      h('span', {
-        class: `mark ${p.kind === 'camera' ? 'cam' : 'screen'}${p.paused ? ' paused' : ''}`,
-        title: `${p.kind}${p.paused ? ' (paused)' : ''}`,
-      }),
+      mark(`${p.kind === 'camera' ? 'cam' : 'screen'}${p.paused ? ' paused' : ''}`, `${p.kind}${p.paused ? ' (paused)' : ''}`),
     );
   }
   // A session on a plain TCP legacy socket, or a tunnel that told the
@@ -92,18 +84,10 @@ function row(u: User, store: Store, media: VoiceSession | null, hooks: RosterHoo
   // so it is marked too, but as what it is rather than as cleartext,
   // or every remote user would look like the ones who really are.
   if (u.transport === 'cleartext') {
-    marks.push(
-      h('span', {
-        class: 'mark cleartext',
-        title: 'Unencrypted connection — anything sent here can be read in transit',
-      }),
-    );
+    marks.push(mark('cleartext', 'Unencrypted connection — anything sent here can be read in transit'));
   } else if (u.transport === 'unknown') {
     marks.push(
-      h('span', {
-        class: 'mark transport-unknown',
-        title: 'On another server — whether their own connection is encrypted is not known here',
-      }),
+      mark('transport-unknown', 'On another server — whether their own connection is encrypted is not known here'),
     );
   }
 
@@ -133,13 +117,13 @@ function row(u: User, store: Store, media: VoiceSession | null, hooks: RosterHoo
         (u.identity
           ? ` · ${u.identity.handle ?? `unattested (${u.identity.fingerprint.slice(0, 8)}…)`}`
           : ''),
-      tabIndex: 0,
     },
     art,
     h(
       'span',
       { class: 'who' },
       h('span', { class: 'nick', style: u.color !== undefined ? { color: nickColor(u.color) } : {} }, u.nick),
+      u.admin ? h('span', { class: 'sr-only' }, ', administrator') : null,
       u.remote && !u.remote.tagged ? h('span', { class: 'tag' }, u.remote.tag) : null,
       status ? h('span', { class: 'status' }, status) : null,
     ),
@@ -149,15 +133,22 @@ function row(u: User, store: Store, media: VoiceSession | null, hooks: RosterHoo
   if (!me) {
     // A button of its own rather than a right-click: a phone has none,
     // and a menu nobody can find is a feature nobody has.
-    const more = h('button', { class: 'ghost person-more', type: 'button', title: `More for ${u.nick}` }, '\u22ef');
+    const more = h(
+      'button',
+      { class: 'ghost person-more', type: 'button', title: `More for ${u.nick}`, ariaLabel: `More for ${u.nick}` },
+      '\u22ef',
+    );
     more.onclick = (e) => {
       e.stopPropagation();
       hooks.onMore(u);
     };
-    more.onkeydown = (e) => e.stopPropagation();
     el.append(more);
+    // The name is the button, so the marks and More beside it are read
+    // as themselves rather than folded into it.
+    const who = el.querySelector<HTMLElement>('.who')!;
+    Object.assign(who, { tabIndex: 0, role: 'button' });
     el.onclick = () => hooks.onMessage(u);
-    el.onkeydown = (e) => {
+    who.onkeydown = (e) => {
       if (e.key === 'Enter' || e.key === ' ') {
         e.preventDefault();
         hooks.onMessage(u);
@@ -165,4 +156,9 @@ function row(u: User, store: Store, media: VoiceSession | null, hooks: RosterHoo
     };
   }
   return el;
+}
+
+/** A status mark: drawn by CSS, and read as its title. */
+function mark(kind: string, label: string): HTMLElement {
+  return h('span', { class: `mark ${kind}`, title: label, role: 'img', ariaLabel: label });
 }

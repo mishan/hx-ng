@@ -59,7 +59,7 @@ import {
 import { ask, choose, type Field } from './ask';
 import { connectScreen, remembered, type ConnectScreen, type Details } from './connect';
 import { DebugPanel } from './debug';
-import { clock, fill, h } from './dom';
+import { badge, clock, fill, h } from './dom';
 import { FilesView } from './files';
 import { icon } from './icons';
 import { type AvatarChoice, pickIcon } from './iconpicker';
@@ -200,23 +200,27 @@ export class App {
 
   // Long-lived DOM.
   private shell = h('div', { class: 'app', hidden: true });
-  private serverName = h('strong', { class: 'server-name' });
+  private serverName = h('h1', { class: 'server-name' });
   private subject = h('span', { class: 'subject' });
   private pill = h('button', { class: 'pill', title: 'Connection state' });
   private rail = h('nav', { class: 'rail' });
   private callbar = h('div', { class: 'callbar', hidden: true });
   private tiles = new Tiles();
   private transcript = h('div', { class: 'transcript' });
+  /** Each new line of the conversation on screen, for a screen reader:
+   *  the transcript is redrawn whole too often to be a live region. */
+  private heard = h('div', { class: 'sr-only', role: 'log' });
   private composer = h('textarea', {
     class: 'composer-input',
     rows: 1,
     placeholder: 'Say something to everyone…',
+    ariaLabel: 'Message',
     spellcheck: true,
   });
   private composerHint = h('span', { class: 'composer-hint' });
   private attachBtn = h(
     'button',
-    { class: 'ghost attach', title: 'Attach an image', hidden: true },
+    { class: 'ghost attach', title: 'Attach an image', ariaLabel: 'Attach an image', hidden: true },
     '📎',
   );
   /** The file picker, kept out of the layout: the paperclip clicks it. */
@@ -1058,7 +1062,7 @@ export class App {
     const label = media
       ? `${name} — ${media.width}×${media.height}, ready to send`
       : `${name} — uploading…`;
-    const remove = h('button', { class: 'ghost', title: 'Remove this image' }, '✕');
+    const remove = h('button', { class: 'ghost', title: 'Remove this image', ariaLabel: 'Remove this image' }, '✕');
     remove.onclick = () => this.clearAttachment();
     fill(this.attachChip, h('span', {}, label), remove);
     this.attachChip.hidden = false;
@@ -1796,7 +1800,7 @@ export class App {
     fill(
       this.mailBtn,
       h('span', {}, 'Mail'),
-      mail.unread ? h('span', { class: 'badge' }, String(mail.unread)) : null,
+      mail.unread ? badge(mail.unread) : null,
     );
     this.mailBtn.classList.toggle('unread', mail.unread > 0);
     this.mailBtn.title = this.store.mailExhausted
@@ -1813,6 +1817,11 @@ export class App {
       // drawn from. A merge rewrites that array, so redraw instead.
       if (this.store.revision !== this.drawnRevision) this.renderTranscript();
       else appendLine(this.transcript, line, conv, this.store, this.images, this.transcriptOptions());
+      const mine = line.from?.uid !== undefined && line.from.uid === this.store.self?.uid;
+      if (fresh && !mine && !this.store.covered) {
+        this.heard.append(h('p', {}, line.from?.nick ? `${line.from.nick}: ${line.text}` : line.text));
+        while (this.heard.childElementCount > 20) this.heard.firstElementChild?.remove();
+      }
     }
     // The active conversation's badge moves too while the news reader
     // covers it.
@@ -1881,25 +1890,35 @@ export class App {
       const peer = c.peer.uid !== undefined ? this.store.user(c.peer.uid) : undefined;
       const el = h(
         'button',
-        { class: `rail-item${active ? ' on' : ''}${c.unread ? ' unread' : ''}` },
+        {
+          class: `rail-item${active ? ' on' : ''}${c.unread ? ' unread' : ''}`,
+          ariaCurrent: active ? 'page' : null,
+          dataset: { key: `c:${c.id}` },
+        },
         c.kind === 'lobby'
-          ? h('span', { class: 'rail-glyph' }, '#')
+          ? h('span', { class: 'rail-glyph', ariaHidden: 'true' }, '#')
           : peer
             ? face(peer, 1)
             : icon(128, 1),
         h('span', { class: 'rail-title' }, c.title),
-        c.unread ? h('span', { class: 'badge' }, String(c.unread)) : null,
+        c.unread ? badge(c.unread) : null,
       );
       el.onclick = () => this.select(c.id);
-      if (c.kind === 'pm') {
-        const close = h('span', { class: 'rail-close', title: 'Close' }, '×');
-        close.onclick = (e) => {
-          e.stopPropagation();
-          this.closeConversation(c.id);
-        };
-        el.append(close);
-      }
-      return el;
+      if (c.kind !== 'pm') return el;
+      // Beside the conversation's button rather than in it, where it
+      // could be neither focused nor told apart from it.
+      const close = h(
+        'button',
+        {
+          class: 'rail-close',
+          title: 'Close',
+          ariaLabel: `Close the conversation with ${c.title}`,
+          dataset: { key: `x:${c.id}` },
+        },
+        '×',
+      );
+      close.onclick = () => this.closeConversation(c.id);
+      return h('div', { class: 'rail-pm' }, el, close);
     });
     // News sits under the lobby: it is the server's, like the lobby, and
     // not a conversation with anyone. Only where the server has some and
@@ -1916,10 +1935,12 @@ export class App {
         {
           class: `rail-item${this.newsOpen ? ' on' : ''}${unread ? ' unread' : ''}`,
           title: unread ? `${unread} unread in what you follow` : 'News',
+          ariaCurrent: this.newsOpen ? 'page' : null,
+          dataset: { key: 'news' },
         },
-        h('span', { class: 'rail-glyph' }, '¶'),
+        h('span', { class: 'rail-glyph', ariaHidden: 'true' }, '¶'),
         h('span', { class: 'rail-title' }, 'News'),
-        unread ? h('span', { class: 'badge' }, String(unread)) : null,
+        unread ? badge(unread) : null,
       );
       news.onclick = () => this.showNews(true);
     }
@@ -1927,8 +1948,13 @@ export class App {
     if (conn?.hasCap(CAP_FILES) && conn.state !== 'offline') {
       files = h(
         'button',
-        { class: `rail-item${this.filesOpen ? ' on' : ''}`, title: 'Files' },
-        h('span', { class: 'rail-glyph' }, '▤'),
+        {
+          class: `rail-item${this.filesOpen ? ' on' : ''}`,
+          title: 'Files',
+          ariaCurrent: this.filesOpen ? 'page' : null,
+          dataset: { key: 'files' },
+        },
+        h('span', { class: 'rail-glyph', ariaHidden: 'true' }, '▤'),
         h('span', { class: 'rail-title' }, 'Files'),
       );
       files.onclick = () => this.showFiles(true);
@@ -1941,10 +1967,12 @@ export class App {
         {
           class: `rail-item${this.reportsOpen ? ' on' : ''}${open ? ' unread' : ''}`,
           title: open ? `${open} ${open === 1 ? 'report' : 'reports'} waiting` : 'Reports',
+          ariaCurrent: this.reportsOpen ? 'page' : null,
+          dataset: { key: 'reports' },
         },
-        h('span', { class: 'rail-glyph' }, '⚑'),
+        h('span', { class: 'rail-glyph', ariaHidden: 'true' }, '⚑'),
         h('span', { class: 'rail-title' }, 'Reports'),
-        open ? h('span', { class: 'badge' }, String(open)) : null,
+        open ? badge(open, 'waiting') : null,
       );
       reports.onclick = () => this.showReports(true);
     }
@@ -1952,8 +1980,13 @@ export class App {
     if (conn && mayAdminister(conn.accounts) && conn.state !== 'offline') {
       accounts = h(
         'button',
-        { class: `rail-item${this.accountsOpen ? ' on' : ''}`, title: 'Accounts' },
-        h('span', { class: 'rail-glyph' }, '☺'),
+        {
+          class: `rail-item${this.accountsOpen ? ' on' : ''}`,
+          title: 'Accounts',
+          ariaCurrent: this.accountsOpen ? 'page' : null,
+          dataset: { key: 'accounts' },
+        },
+        h('span', { class: 'rail-glyph', ariaHidden: 'true' }, '☺'),
         h('span', { class: 'rail-title' }, 'Accounts'),
       );
       accounts.onclick = () => this.showAccounts(true);
@@ -1962,13 +1995,16 @@ export class App {
     // Everything above the drawer's foot is redrawn and the foot is left
     // where it is: taken out and put back, it would drop the focus from
     // whichever of its buttons had it, every time anything arrived.
+    // The rest is put back with the focus where it was.
+    const focused = this.rail.contains(document.activeElement) ? (document.activeElement as HTMLElement).dataset.key : undefined;
     if (this.drawerFoot.parentNode !== this.rail) this.rail.append(this.drawerFoot);
     while (this.rail.firstChild !== this.drawerFoot) this.rail.firstChild!.remove();
     this.drawerFoot.before(
-      ...[h('div', { class: 'rail-head' }, 'Conversations'), lobby, news, files, reports, accounts, ...rest].filter(
+      ...[h('h2', { class: 'rail-head' }, 'Conversations'), lobby, news, files, reports, accounts, ...rest].filter(
         (el): el is HTMLElement => !!el,
       ),
     );
+    if (focused) this.rail.querySelector<HTMLElement>(`[data-key="${CSS.escape(focused)}"]`)?.focus();
     this.paintMenuUnread();
   }
 
@@ -2112,6 +2148,8 @@ export class App {
             this.applySelfView();
             this.renderCallbar();
           });
+          // The one switch whose label does not change with it.
+          buttons[buttons.length - 1]!.setAttribute('aria-pressed', String(this.selfView));
         }
       }
     }
@@ -2276,6 +2314,7 @@ export class App {
 
     this.chatPane.append(
       this.transcript,
+      this.heard,
       // The chip sits above the composer rather than inside it: the
       // composer is one row of controls, and an attachment is a thing
       // already sent to the server that the next line will carry.

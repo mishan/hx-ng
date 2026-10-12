@@ -21,8 +21,8 @@
   --line: #e2dfd8;
   --line-soft: #edeae4;
   --text: #1b1d23;
-  --muted: #6c7280;
-  --accent: #b8641a;
+  --muted: #5f6572;
+  --accent: #9c5312;
   --accent-soft: #f6e5d3;
   --admin: #a8291f;
   --link: #1a56b8;
@@ -130,7 +130,7 @@ input, textarea {
   padding: 0.4rem 0.55rem;
 }
 
-input:focus-visible, textarea:focus-visible, button:focus-visible {
+input:focus-visible, textarea:focus-visible, select:focus-visible, button:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 1px;
 }
@@ -259,6 +259,8 @@ img.avatar {
 
 .server { display: flex; align-items: baseline; gap: 0.6rem; min-width: 0; overflow: hidden; flex: 0 1 auto; }
 .server-name {
+  margin: 0;
+  font-size: inherit;
   font-weight: 620;
   letter-spacing: -0.01em;
   overflow: hidden;
@@ -348,7 +350,9 @@ button.ghost.danger { color: var(--admin); border-color: var(--admin); }
 }
 
 .rail-head, .roster-head {
+  margin: 0;
   font-size: 0.7rem;
+  font-weight: inherit;
   text-transform: uppercase;
   letter-spacing: 0.08em;
   color: var(--muted);
@@ -356,6 +360,7 @@ button.ghost.danger { color: var(--admin); border-color: var(--admin); }
 }
 
 .roster-head { display: flex; align-items: center; }
+.roster-count { margin: 0; font: inherit; }
 
 /* Shown only on the narrow layout, where the roster is dismissible. */
 .roster-close {
@@ -386,8 +391,18 @@ button.ghost.danger { color: var(--admin); border-color: var(--admin); }
 .rail-item.unread { color: var(--text); font-weight: 560; }
 .rail-glyph { color: var(--muted); width: 16px; text-align: center; }
 .rail-title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.rail-close { color: var(--muted); opacity: 0; padding: 0 0.15rem; }
-.rail-item:hover .rail-close { opacity: 1; }
+.rail-pm { position: relative; flex: none; }
+.rail-pm .rail-item { padding-right: 1.6rem; }
+.rail-close {
+  position: absolute;
+  right: 0.35rem;
+  top: 50%;
+  translate: 0 -50%;
+  color: var(--muted);
+  opacity: 0;
+  padding: 0 0.15rem;
+}
+.rail-pm:hover .rail-close, .rail-close:focus-visible { opacity: 1; }
 .rail-close:hover { color: var(--admin); }
 
 /* The mailbox, which is the server's count rather than this client's:
@@ -789,6 +804,8 @@ button.call:disabled { opacity: 0.45; cursor: default; }
 }
 .person:not(.me) { cursor: pointer; }
 .person:not(.me):hover { background: var(--surface-2); }
+.person:has(> .who:focus-visible) { outline: 2px solid var(--accent); outline-offset: -2px; }
+.person .who:focus-visible { outline: none; }
 .person .who { min-width: 0; display: flex; flex-direction: column; line-height: 1.25; }
 .person .nick { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .person .tag { font-size: 0.68rem; color: var(--muted); }
@@ -1714,4 +1731,8 @@ dialog.settings button.ghost:hover { background: var(--surface-2); color: var(--
 @media (max-width: 40em) {
   .accounts-body { flex-direction: column; }
   .accounts-list { flex: none; max-height: 35vh; overflow-y: auto; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, ::before, ::after { animation: none !important; transition: none !important; }
 }

@@ -79,7 +79,9 @@ export function ask(q: Ask): Promise<Answer | null> {
       for (const f of q.fields) {
         const input = inputs.get(f.name)!;
         if (f.kind !== 'check' && f.kind !== 'choice' && f.required && !input.value.trim()) {
-          input.focus();
+          input.setCustomValidity('Fill in this field.');
+          input.reportValidity();
+          input.addEventListener('input', () => input.setCustomValidity(''), { once: true });
           return;
         }
       }
@@ -91,11 +93,13 @@ export function ask(q: Ask): Promise<Answer | null> {
       done(out);
     };
 
-    const dialog = h('dialog', { class: 'picker ask' }, form);
+    const dialog = h('dialog', { class: 'picker ask', ariaLabel: q.title }, form);
     dialog.addEventListener('close', () => done(null));
 
     function done(value: Answer | null): void {
       if (!dialog.isConnected) return;
+      // `close` first: it is what gives the focus back to the opener.
+      dialog.close();
       dialog.remove();
       resolve(value);
     }
@@ -122,7 +126,7 @@ export function choose<K extends string>(title: string, options: [K, string, boo
     cancel.onclick = () => done(null);
     const dialog = h(
       'dialog',
-      { class: 'picker ask' },
+      { class: 'picker ask', ariaLabel: title },
       h('header', {}, h('h2', {}, title)),
       h('div', { class: 'ask-body ask-choices' }, ...buttons),
       h('footer', {}, cancel),
@@ -131,6 +135,7 @@ export function choose<K extends string>(title: string, options: [K, string, boo
 
     function done(value: K | null): void {
       if (!dialog.isConnected) return;
+      dialog.close();
       dialog.remove();
       resolve(value);
     }

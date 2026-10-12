@@ -227,8 +227,7 @@ export function mediaEl(media: HistoryMedia, cache: MediaCache): HTMLElement {
       // Click opens the image at its own size, in its own tab: the row
       // is a preview, and a 2048-pixel photograph deserves better than
       // a 420-pixel column.
-      img.onclick = () => window.open(url, '_blank', 'noopener');
-      frame.replaceChildren(img);
+      frame.replaceChildren(h('a', { href: url, target: '_blank', rel: 'noopener' }, img));
       frame.classList.add('loaded');
     });
   });

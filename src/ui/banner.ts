@@ -58,7 +58,9 @@ export class BannerStrip {
 
   private draw(src: string, link: string | undefined): void {
     // The policy before the source, so it is in place before any fetch.
-    const img = h('img', { referrerPolicy: 'no-referrer', src, alt: 'Server banner', draggable: false });
+    // Said as where it goes, when it is a link.
+    const alt = link && schemeAllowed(link) ? `Server banner, linking to ${link}` : 'Server banner';
+    const img = h('img', { referrerPolicy: 'no-referrer', src, alt, draggable: false });
     // Only for the banner still drawn: an image replaced by a later one
     // can fail after it is gone, and must not take the new one down.
     const drawn = this.generation;

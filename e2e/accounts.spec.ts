@@ -134,7 +134,7 @@ test.describe('account administration against a real hxd-ng server', () => {
     await makerView.getByRole('textbox', { name: 'Login' }).fill('made');
     await makerView.getByRole('button', { name: 'Make account' }).click();
     await expect(makerView.locator('.mod-notice')).toHaveText('Made made.');
-    await expect(makerView.locator('.mod-error')).toHaveCount(0);
+    await expect(makerView.locator('.mod-error')).toBeEmpty();
 
     // Chat history goes with reading chat unless set apart.
     const admin = await logIn(browser, server, 'admin');

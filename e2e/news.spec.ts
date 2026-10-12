@@ -289,12 +289,12 @@ ng_requests = 0
     await editor.locator('.news-subject-input').fill('Formatting');
     await editor.locator('.news-body-input').fill('# Heading\n\nSome **bold**, and `#1` in code.\n\n- one\n- two');
     await editor.getByRole('button', { name: 'Preview', exact: true }).click();
-    await expect(editor.locator('.news-preview h1')).toHaveText('Heading');
+    await expect(editor.locator('.news-preview').getByRole('heading', { name: 'Heading', level: 3 })).toBeVisible();
     await editor.getByRole('button', { name: 'Edit', exact: true }).click();
     await editor.getByRole('button', { name: 'Post', exact: true }).click();
 
     const body = editor.locator('.news-article').first().locator('.news-text');
-    await expect(body.locator('h1')).toHaveText('Heading');
+    await expect(body.getByRole('heading', { name: 'Heading', level: 3 })).toBeVisible();
     await expect(body.locator('strong')).toHaveText('bold');
     await expect(body.locator('li')).toHaveText(['one', 'two']);
     await expect(body.locator('code')).toHaveText('#1');

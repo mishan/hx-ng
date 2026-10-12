@@ -78,3 +78,8 @@ body.tiled .panebody > .mod-view[hidden],
 body.tiled .panebody > .accounts-view[hidden] {
   display: flex !important;
 }
+
+/* mullion's close cross is narrower than the 24px a pointer target
+   needs, and sits against its tab, so neither has room to spare. */
+body.tiled .paneshut { min-width: 24px; }
+body.tiled .panetab, body.tiled .paneshut { min-height: 24px; }

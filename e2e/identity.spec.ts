@@ -424,7 +424,9 @@ test.describe('identity: enrollment and login against a real hxd-ng server', () 
     hlid(hlidDir, ['init', '--name', 'Alice']);
 
     await page.goto('/');
-    await page.getByRole('button', { name: 'Identity keys…' }).click();
+    const opener = page.getByRole('button', { name: 'Identity keys…' });
+    await opener.click();
+    await expect(page.getByRole('heading', { name: 'Identity' })).toBeFocused();
     const keyRows = page.locator('.identity-body .field-row code');
     const devicePub = await keyRows.nth(0).textContent();
     const deviceEncPub = await keyRows.nth(1).textContent();
@@ -464,11 +466,13 @@ test.describe('identity: enrollment and login against a real hxd-ng server', () 
     const renew = page.getByRole('button', { name: 'Renew now' });
     await expect(renew).toBeVisible({ timeout: 20_000 });
     await renew.click();
-    // A renewal the user pressed a button for announces nothing — the
-    // expiry moving is the whole of what happened, and the banner goes
-    // with it, the certificate no longer being near its end.
+    // The expiry moves, the banner goes with it, the certificate no
+    // longer being near its end, and the focus the button had goes to
+    // the notice that says so.
     await expect.poll(expiryText, { timeout: 20_000 }).not.toBe(before);
     await expect(renew).toBeHidden();
+    await expect(page.locator('.identity-body .became')).toHaveText('This certificate was renewed.');
+    await expect(page.locator('.identity-body .became')).toBeFocused();
 
     // Thirty-five days out again, not ninety: the same or less (§8).
     const expiry = await expiryText();
@@ -476,6 +480,10 @@ test.describe('identity: enrollment and login against a real hxd-ng server', () 
     const daysOut = (Date.parse(expiry!) - Date.now()) / 86_400_000;
     expect(daysOut).toBeGreaterThan(30);
     expect(daysOut).toBeLessThan(40);
+
+    // Closed, the panel gives the focus back to what opened it.
+    await page.locator('.identity-bar').getByRole('button', { name: 'Close' }).press('Enter');
+    await expect(opener).toBeFocused();
 
     agent.stop();
   });

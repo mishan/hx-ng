@@ -93,9 +93,14 @@ export class IdentityPanel {
    *  startup and taken out of the address bar there. */
   private scanned: Scanned | null = null;
   private scanError: string | null = null;
-  /** Set when a certificate was renewed in the background, so the panel
-   *  can say so the next time it is opened. */
-  private renewedQuietly = false;
+  /** What to say about a renewal: one made in the background, said the
+   *  next time the panel is opened, or one just asked for. */
+  private renewed: string | null = null;
+  /** What had the focus before the panel was opened, to get it back. */
+  private opener: HTMLElement | null = null;
+  /** The mailbox the panel was last drawn for. */
+  private drawnMailbox: string | undefined;
+  private title = h('h2', { class: 'identity-title', tabIndex: -1 }, 'Identity');
   /** How "Renew now" is going. On the panel rather than in the elements
    *  that show it, because the panel renders again whenever discovery
    *  answers, and one that answers after the click would otherwise
@@ -119,7 +124,7 @@ export class IdentityPanel {
     this.el = h(
       'section',
       { class: 'identity-panel', hidden: true },
-      h('header', { class: 'identity-bar' }, h('strong', {}, 'Identity'), h('div', { class: 'spacer' }), closeBtn),
+      h('header', { class: 'identity-bar' }, this.title, h('div', { class: 'spacer' }), closeBtn),
       this.body,
     );
   }
@@ -132,17 +137,25 @@ export class IdentityPanel {
   }
 
   toggle(force?: boolean): void {
+    const was = this.open;
+    const had = this.el.contains(document.activeElement);
     this.open = force ?? !this.open;
     this.el.hidden = !this.open;
     if (!this.open) {
+      // The focus would go to the page with the panel hiding it.
+      if (was && had && this.opener?.isConnected) this.opener.focus();
       this.waiting?.abort();
       this.waiting = null;
       // Said once: gone when the panel that said them closes. Not as they
       // render, since an open panel renders again as its mailbox loads.
       this.becameLabel = null;
-      this.renewedQuietly = false;
+      this.renewed = null;
       this.renewal = { busy: false, status: null, error: null };
       return;
+    }
+    if (!was) {
+      this.opener = document.activeElement as HTMLElement | null;
+      this.title.focus();
     }
     if (this.device || this.unsupported) this.render();
     else void this.load();
@@ -169,6 +182,11 @@ export class IdentityPanel {
   }
 
   private async findMailbox(): Promise<void> {
+    // Redrawn only for a mailbox other than the one drawn: a redraw
+    // takes whatever is half typed into the paste or the code with it.
+    const redraw = () => {
+      if (this.mailbox?.base !== this.drawnMailbox || this.scanError) this.renderIfShowing();
+    };
     const server = this.serverUrl().trim();
     // A scan names its own mailbox, and the point of that is that the
     // user cannot end up pointed at the wrong one — so it wins over
@@ -193,14 +211,14 @@ export class IdentityPanel {
         // camera at a code and has no server field to correct.
         this.scanError = `${this.scanned.mailbox} is not answering, or hosts no enrollment mailbox. Scan the code again, or enroll by pasting.`;
       }
-      this.renderIfShowing();
+      redraw();
       return;
     }
     if (!server) {
       // Cleared rather than left alone: a code box for a server this
       // panel is no longer pointed at would post to the wrong place.
       this.mailbox = null;
-      this.renderIfShowing();
+      redraw();
       return;
     }
     try {
@@ -215,7 +233,7 @@ export class IdentityPanel {
       // address gets said out loud.
       this.mailbox = null;
     }
-    this.renderIfShowing();
+    redraw();
   }
 
   /** Repaint if the panel is open and there is something to paint. The
@@ -226,6 +244,18 @@ export class IdentityPanel {
   }
 
   private render(): void {
+    const inside = this.el.contains(document.activeElement);
+    const key = inside ? (document.activeElement as HTMLElement).dataset.key : undefined;
+    this.draw();
+    this.drawnMailbox = this.mailbox?.base;
+    if (!this.open || !inside) return;
+    // The body is drawn afresh: what had the focus gets it back, and
+    // focus dropped with a button that is gone goes to what replaced it.
+    if (key) this.body.querySelector<HTMLElement>(`[data-key="${CSS.escape(key)}"]`)?.focus();
+    if (!this.el.contains(document.activeElement)) (this.body.querySelector<HTMLElement>('.became') ?? this.title).focus();
+  }
+
+  private draw(): void {
     if (this.unsupported) {
       fill(this.body, h('p', { class: 'error' }, this.unsupported.message));
       return;
@@ -263,11 +293,11 @@ export class IdentityPanel {
         { class: 'muted' },
         'This browser is a device, not an identity: it holds a key certified by your identity key, which stays in hlid. Run the command below wherever hlid is, then paste back what it writes.',
       ),
-      h('div', { class: 'field-row' }, h('span', { class: 'k' }, 'Device signing key'), h('code', {}, devicePubHex), copyButton(() => devicePubHex)),
-      h('div', { class: 'field-row' }, h('span', { class: 'k' }, 'Device encryption key'), h('code', {}, deviceEncPubHex), copyButton(() => deviceEncPubHex)),
+      h('div', { class: 'field-row' }, h('span', { class: 'k' }, 'Device signing key'), h('code', {}, devicePubHex), copyButton(() => devicePubHex, 'the device signing key')),
+      h('div', { class: 'field-row' }, h('span', { class: 'k' }, 'Device encryption key'), h('code', {}, deviceEncPubHex), copyButton(() => deviceEncPubHex, 'the device encryption key')),
       this.codeSection(device),
       h('h3', {}, this.mailbox ? 'Or paste it, if you would rather' : '1. Certify this device'),
-      h('div', { class: 'cmd-row' }, certPre, copyButton(() => certCmd)),
+      h('div', { class: 'cmd-row' }, certPre, copyButton(() => certCmd, 'the command')),
       h(
         'p',
         { class: 'note' },
@@ -366,9 +396,10 @@ export class IdentityPanel {
       error.hidden = false;
       return;
     }
-    if (!this.mailbox) return;
+    if (!this.mailbox || btn.ariaDisabled === 'true') return;
 
-    btn.disabled = true;
+    // Busy, not disabled: a disabled button would drop the focus.
+    btn.ariaDisabled = 'true';
     status.hidden = false;
     status.textContent = 'Waiting for the other end to approve…';
     this.waiting?.abort();
@@ -450,7 +481,7 @@ export class IdentityPanel {
       error.textContent = e instanceof Error ? e.message : String(e);
       error.hidden = false;
     } finally {
-      btn.disabled = false;
+      btn.ariaDisabled = null;
       this.waiting = null;
     }
   }
@@ -490,15 +521,21 @@ export class IdentityPanel {
     // Set before the render that reads them, so the notice appears on
     // this paint rather than whenever the panel is next opened.
     this.becameLabel = news === 'enrolled' ? result.card.name : null;
-    this.renewedQuietly = news === 'renewed-quietly';
+    this.renewed =
+      news === 'renewed-quietly'
+        ? 'This certificate was renewed automatically.'
+        : news === 'renewed'
+          ? 'This certificate was renewed.'
+          : null;
     this.device = await getActiveDevice();
     // A closed panel renders when it is opened.
     if (this.open) this.render();
   }
 
   private async submitPaste(device: StoredDevice, raw: string, error: HTMLElement, btn: HTMLButtonElement): Promise<void> {
+    if (btn.ariaDisabled === 'true') return;
     error.hidden = true;
-    btn.disabled = true;
+    btn.ariaDisabled = 'true';
     try {
       const parsed = parseEnrollmentPaste(raw);
       let cardBytes = parsed.card;
@@ -535,7 +572,7 @@ export class IdentityPanel {
       error.textContent = e instanceof Error ? e.message : String(e);
       error.hidden = false;
     } finally {
-      btn.disabled = false;
+      btn.ariaDisabled = null;
     }
   }
 
@@ -548,7 +585,7 @@ export class IdentityPanel {
 
     fill(
       this.body,
-      this.renewedQuietly ? this.renewedNotice() : null,
+      this.renewed ? h('p', { class: 'became', role: 'status', tabIndex: -1 }, this.renewed) : null,
       this.becameLabel ? this.becameNotice(device) : null,
       // A browser that is already a device can still be handed a QR
       // code — to renew, or to move to another identity. Without this
@@ -614,15 +651,11 @@ export class IdentityPanel {
     }
   }
 
-  private renewedNotice(): HTMLElement {
-    return h('p', { class: 'became' }, 'This certificate was renewed automatically.');
-  }
-
   private becameNotice(device: StoredDevice): HTMLElement {
     const label = this.becameLabel ?? '';
     return h(
       'p',
-      { class: 'became' },
+      { class: 'became', role: 'status', tabIndex: -1 },
       'This browser is now a device of ',
       h('strong', {}, label),
       '  ',
@@ -638,7 +671,11 @@ export class IdentityPanel {
     // command below.
     const lifetime = certLifetimeDays(cert);
     const dayBtns = RENEWAL_DAYS.map((d) => {
-      const b = h('button', { class: `ghost ${d === this.certDays ? 'on' : ''}` }, `${d} days`);
+      const b = h(
+        'button',
+        { class: `ghost ${d === this.certDays ? 'on' : ''}`, ariaPressed: String(d === this.certDays), dataset: { key: `days:${d}` } },
+        `${d} days`,
+      );
       b.onclick = () => {
         this.certDays = d;
         this.render();
@@ -651,7 +688,11 @@ export class IdentityPanel {
     });
 
     const { busy, status, error } = this.renewal;
-    const renewBtn = h('button', { class: 'primary', disabled: busy }, 'Renew now');
+    const renewBtn = h(
+      'button',
+      { class: 'primary', ariaDisabled: busy ? 'true' : null, dataset: { key: 'renew' } },
+      'Renew now',
+    );
     renewBtn.onclick = () => void this.renewNow(device);
 
     return h(
@@ -683,7 +724,7 @@ export class IdentityPanel {
           )
         : null,
       h('p', { class: 'note' }, 'Or run this again wherever hlid is, and paste the result below:'),
-      h('div', { class: 'cmd-row' }, h('pre', { class: 'cmd' }, cmd), copyButton(() => cmd)),
+      h('div', { class: 'cmd-row' }, h('pre', { class: 'cmd' }, cmd), copyButton(() => cmd, 'the command')),
       h(
         'p',
         { class: 'note' },
@@ -755,8 +796,8 @@ function certLifetimeDays(cert: { issued: number; expires: number }): number {
   return Math.max(1, Math.round((cert.expires - cert.issued) / 86_400));
 }
 
-function copyButton(getText: () => string): HTMLButtonElement {
-  const btn = h('button', { class: 'ghost' }, 'Copy');
+function copyButton(getText: () => string, what: string): HTMLButtonElement {
+  const btn = h('button', { class: 'ghost', ariaLabel: `Copy ${what}` }, 'Copy');
   btn.onclick = () => void copyText(getText(), btn);
   return btn;
 }

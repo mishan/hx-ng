@@ -40,6 +40,8 @@ export class DebugPanel {
   private timer: number | null = null;
 
   open = false;
+  /** What had the focus before the drawer was opened, to get it back. */
+  private opener: HTMLElement | null = null;
 
   constructor(
     private sessionFacts: Facts,
@@ -106,8 +108,18 @@ export class DebugPanel {
   }
 
   toggle(force?: boolean): void {
+    const was = this.open;
+    const had = this.el.contains(document.activeElement);
     this.open = force ?? !this.open;
     this.el.hidden = !this.open;
+    // Into the drawer as it opens, and back to what opened it as it
+    // closes, where the focus would otherwise go to the page.
+    if (this.open && !was) {
+      this.opener = document.activeElement as HTMLElement | null;
+      this.el.querySelector<HTMLElement>('.tab.on')?.focus();
+    } else if (!this.open && was && had && this.opener?.isConnected) {
+      this.opener.focus();
+    }
     document.body.classList.toggle('debug-open', this.open);
     if (this.open) {
       // The trace is collected from the first frame but only drawn while
@@ -127,6 +139,7 @@ export class DebugPanel {
     this.tab = t;
     for (const b of this.el.querySelectorAll<HTMLElement>('.tab')) {
       b.classList.toggle('on', b.dataset.tab === t);
+      b.setAttribute('aria-pressed', String(b.dataset.tab === t));
     }
     this.list.hidden = t !== 'wire';
     this.facts.hidden = t !== 'session';

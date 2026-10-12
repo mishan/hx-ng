@@ -175,6 +175,9 @@ ng_requests = 0
     // The report closed itself, and the reporter was told.
     await expect(reports.locator('.badge')).toHaveCount(0);
     await expect(mod.locator('.mod-report')).toHaveCount(0);
+    // The button that did it went with the report, and the focus stays
+    // in the view rather than falling to the page.
+    await expect(mod.getByRole('heading', { name: 'Reports' })).toBeFocused();
     await expect(alice.locator('.line.system', { hasText: 'was acted on' })).toBeVisible();
 
     // The act is on the record, with the words it took.
@@ -267,6 +270,8 @@ ng_requests = 0
     await tall(page.locator('dialog.ask').getByRole('button', { name: 'Cancel' }));
     await page.locator('dialog.ask').getByRole('button', { name: 'Cancel' }).tap();
 
+    // Off screen, the user list is out of the tab order too.
+    await expect(page.getByRole('button', { name: 'Hide the user list' })).toBeHidden();
     await page.locator('.people-toggle').tap();
     await tall(page.locator('.person:not(.away)', { hasText: 'Bob' }).locator('.person-more'));
     await context.close();

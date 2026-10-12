@@ -45,6 +45,10 @@ export default defineConfig({
     // A phone on the LAN is the whole point of the ng wire, and it
     // cannot reach a dev server bound to loopback.
     host: true,
+    // Local worktrees under `.claude/` can link to ../hxd-ng, whose Rust
+    // `target/` holds more files than inotify's default limit lets the
+    // watcher follow.
+    watch: { ignored: ['**/.claude/**'] },
     // The HTTP endpoints — identity's (`docs/identity-keys.md` §9),
     // inline media's (`inline-media.md` §8.2), the banner's and avatars'
     // — live on the ng listener, :5700, not this dev server's :5701.

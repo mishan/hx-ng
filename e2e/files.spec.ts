@@ -74,6 +74,18 @@ root = "files"
     await expect(view.locator('.file-more')).toHaveCount(0);
   });
 
+  test('details take the focus from the row that opened them, and Back gives it to the listing', async ({ browser }) => {
+    const page = await openFiles(browser, server, 'reader');
+    const view = page.locator('.files-view');
+    const row = view.locator('.file-row', { hasText: 'readme.txt' });
+    await row.focus();
+    await page.keyboard.press('Enter');
+    await expect(view.getByRole('heading', { name: 'readme.txt' })).toBeFocused();
+    await view.getByRole('button', { name: 'Back' }).focus();
+    await page.keyboard.press('Enter');
+    await expect(row).toBeFocused();
+  });
+
   test('a folder is made, a file moved into it and commented on, and the folder deleted', async ({ browser }) => {
     const page = await openFiles(browser, server, 'editor');
     const view = page.locator('.files-view');

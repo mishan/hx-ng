@@ -42,6 +42,11 @@ function flatten(children: Child[]): (Node | string)[] {
   return out;
 }
 
+/** A count on a button, which says what it counts to a screen reader. */
+export function badge(n: number, what = 'unread', title?: string): HTMLElement {
+  return h('span', { class: 'badge', title }, String(n), h('span', { class: 'sr-only' }, ` ${what}`));
+}
+
 /** Replace an element's children in one go. */
 export function fill(el: Element, ...children: Child[]): void {
   el.replaceChildren(...flatten(children));

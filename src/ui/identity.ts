@@ -250,8 +250,9 @@ export class IdentityPanel {
       rows: 4,
       spellcheck: false,
       placeholder: 'paste the certificate here — and the card too, if hlid wrote it to a separate file',
+      ariaLabel: 'Certificate',
     });
-    const error = h('p', { class: 'error', hidden: true });
+    const error = h('p', { class: 'error', role: 'alert', hidden: true });
     const enrollBtn = h('button', { class: 'primary' }, 'Enroll from paste');
     enrollBtn.onclick = () => void this.submitPaste(device, paste.value, error, enrollBtn);
 
@@ -296,7 +297,7 @@ export class IdentityPanel {
       // is wrong with it, and quietly dropping the pinned identity and
       // the pairing proof would turn the stronger ceremony into the
       // weaker one without saying so.
-      return h('div', { class: 'enroll-code' }, h('p', { class: 'error' }, this.scanError));
+      return h('div', { class: 'enroll-code' }, h('p', { class: 'error', role: 'alert' }, this.scanError));
     }
     if (!this.mailbox) return null;
 
@@ -304,12 +305,13 @@ export class IdentityPanel {
       type: 'text',
       class: 'code-entry',
       placeholder: 'K7PM-4XWE',
+      ariaLabel: 'Enrollment code',
       spellcheck: false,
       autocomplete: 'off',
       value: this.scanned?.code ?? '',
     });
-    const status = h('p', { class: 'muted', hidden: true });
-    const error = h('p', { class: 'error', hidden: true });
+    const status = h('p', { class: 'muted', role: 'status', hidden: true });
+    const error = h('p', { class: 'error', role: 'alert', hidden: true });
     const submit = h('button', { class: 'primary' }, 'Enroll with code');
     submit.onclick = () => void this.submitCode(device, input.value, status, error, submit);
     input.onkeydown = (e) => {
@@ -676,8 +678,8 @@ export class IdentityPanel {
                 )
               : null,
             renewBtn,
-            status ? h('p', { class: 'muted' }, status) : null,
-            error ? h('p', { class: 'error' }, error) : null,
+            status ? h('p', { class: 'muted', role: 'status' }, status) : null,
+            error ? h('p', { class: 'error', role: 'alert' }, error) : null,
           )
         : null,
       h('p', { class: 'note' }, 'Or run this again wherever hlid is, and paste the result below:'),
@@ -761,6 +763,7 @@ function copyButton(getText: () => string): HTMLButtonElement {
 
 async function copyText(text: string, btn: HTMLButtonElement): Promise<void> {
   const was = btn.textContent;
+  btn.ariaLive = 'polite';
   try {
     // `navigator.clipboard` itself can be `undefined` — an insecure
     // context, an old browser, or a blocked permission — in which case

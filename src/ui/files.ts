@@ -54,10 +54,19 @@ export class FilesView {
   private uploadable = false;
 
   private sight = new Sight();
+  /** Whether a redraw took the focus with it and the next one is to put
+   *  it back, so a keyboard is not sent to the top of the document by
+   *  every folder it opens. */
+  private focusLost = false;
 
   constructor(private connection: () => Session | null) {
     this.el.append(this.page, this.transfer);
     document.body.append(this.outcome);
+    // Focus owed to a folder still loading is not taken back from
+    // wherever it has gone since.
+    document.addEventListener('focusin', (e) => {
+      if (!this.el.contains(e.target as Node)) this.focusLost = false;
+    });
     // The whole view, so a file dropped a little wide of the listing is
     // not opened by the browser in place of the app; taken only while a
     // listing that takes uploads is on screen and nothing else is moving.
@@ -110,6 +119,7 @@ export class FilesView {
     // Put away with the session, so opening it again is a bring-forward.
     this.sight = new Sight();
     this.page.replaceChildren();
+    this.focusLost = false;
     this.transfer.replaceChildren();
     this.transfer.hidden = true;
     this.outcome.textContent = '';
@@ -122,7 +132,7 @@ export class FilesView {
     this.entries = null;
     this.dropPreview();
     const generation = ++this.generation;
-    fill(this.page, this.bar(path), h('p', { class: 'files-state' }, 'Loading…'));
+    this.draw(false, this.bar(path), h('p', { class: 'files-state' }, 'Loading…'));
     try {
       const listing = await connection.filesList(path);
       if (generation !== this.generation) return;
@@ -132,11 +142,7 @@ export class FilesView {
       this.renderListing(listing.entries);
     } catch (error) {
       if (generation !== this.generation) return;
-      fill(
-        this.page,
-        this.bar(path),
-        h('p', { class: 'files-state error' }, this.message(error)),
-      );
+      this.draw(true, this.bar(path), h('p', { class: 'files-state error', role: 'alert' }, this.message(error)));
     }
     return generation;
   }
@@ -180,12 +186,25 @@ export class FilesView {
     );
   }
 
+  /** Redraw the page; `settled` is a listing or details rather than a
+   *  wait for one, and takes the focus if the page had it. */
+  private draw(settled: boolean, ...children: Node[]): void {
+    const had = this.focusLost || this.page.contains(document.activeElement);
+    fill(this.page, ...children);
+    const target = settled
+      ? (this.page.querySelector<HTMLElement>('.file-row, .file-info h2') ??
+        this.page.querySelector<HTMLElement>('.files-bar button'))
+      : null;
+    if (had) target?.focus();
+    this.focusLost = had && !target;
+  }
+
   private renderListing(entries: FileEntry[]): void {
     const rows = entries.map((entry) => {
       const button = h(
         'button',
         { class: 'file-row' },
-        h('span', { class: 'file-glyph' }, entry.kind === 'folder' ? '▸' : '□'),
+        h('span', { class: 'file-glyph', role: 'img', ariaLabel: entry.kind }, entry.kind === 'folder' ? '▸' : '□'),
         h('span', { class: 'file-name' }, entry.name),
         h('span', { class: 'file-size' }, formatEntrySize(entry)),
       );
@@ -194,7 +213,11 @@ export class FilesView {
         entry.kind === 'folder' ? void this.load(path) : void this.inspect(path);
       const acts = this.acts(entry);
       if (!acts.length) return h('div', { class: 'file-line' }, button);
-      const more = h('button', { class: 'ghost file-more', title: `More for ${entry.name}` }, '\u22ef');
+      const more = h(
+        'button',
+        { class: 'ghost file-more', title: `More for ${entry.name}`, ariaLabel: `More for ${entry.name}` },
+        '\u22ef',
+      );
       more.onclick = () => void this.act(entry, path, acts);
       return h('div', { class: 'file-line' }, button, more);
     });
@@ -202,7 +225,7 @@ export class FilesView {
     body.append(
       ...(rows.length ? rows : [h('p', { class: 'files-state' }, 'This folder is empty.')]),
     );
-    fill(this.page, this.bar(this.path), body);
+    this.draw(true, this.bar(this.path), body);
   }
 
   private async inspect(path: string): Promise<void> {
@@ -211,18 +234,14 @@ export class FilesView {
     this.entries = null;
     this.dropPreview();
     const generation = ++this.generation;
-    fill(this.page, this.bar(this.path), h('p', { class: 'files-state' }, 'Loading details…'));
+    this.draw(false, this.bar(this.path), h('p', { class: 'files-state' }, 'Loading details…'));
     try {
       const info = await connection.fileInfo(path);
       if (generation !== this.generation) return;
       this.renderInfo(info, generation);
     } catch (error) {
       if (generation !== this.generation) return;
-      fill(
-        this.page,
-        this.bar(this.path),
-        h('p', { class: 'files-state error' }, this.message(error)),
-      );
+      this.draw(true, this.bar(this.path), h('p', { class: 'files-state error', role: 'alert' }, this.message(error)));
     }
   }
 
@@ -238,13 +257,13 @@ export class FilesView {
     back.onclick = () => void this.load(this.path);
     const preview = h('div', { class: 'file-preview', hidden: true });
     void this.preview(info, preview, generation);
-    fill(
-      this.page,
+    this.draw(
+      true,
       this.bar(this.path),
       h(
         'article',
         { class: 'file-info' },
-        h('h2', {}, info.name),
+        h('h2', { tabIndex: -1 }, info.name),
         h('dl', {},
           h('dt', {}, 'Size'), h('dd', {}, formatFileSize(size)),
           info.media_type ? h('dt', {}, 'Type') : null,
@@ -378,6 +397,7 @@ export class FilesView {
       const cancel = h('button', { class: 'ghost danger' }, 'Cancel');
       cancel.onclick = () => abort.abort();
       status(`${name}: starting ${formatFileSize(size)}… `, cancel);
+      cancel.focus();
       try {
         // Prepare after the picker: a token should not spend most of its
         // short life behind a human deciding where to save it.
@@ -415,6 +435,10 @@ export class FilesView {
         // Download on screen now waited on this one.
         for (const b of this.page.querySelectorAll<HTMLButtonElement>('.file-download, .files-upload')) {
           b.disabled = false;
+        }
+        // Disabling Download, or Cancel going, took the focus.
+        if (document.activeElement === document.body) {
+          this.page.querySelector<HTMLButtonElement>('.file-download')?.focus();
         }
       }
     }

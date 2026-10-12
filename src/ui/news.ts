@@ -74,7 +74,7 @@ import {
   type DraftAttachment,
 } from '../news';
 import { ask } from './ask';
-import { fill, h, linkify } from './dom';
+import { badge, fill, h, linkify } from './dom';
 import { blockNodes, wrapSelection } from './markdown';
 import { MediaCache } from './media';
 
@@ -102,6 +102,8 @@ function writeNewsMarkdown(on: boolean): void {
 function listingText(a: NewsArticle): string {
   return isMarkdown(a.mime) ? blocksText(parseArticle(a.body, [])) : a.body;
 }
+
+const FOCUSABLE = 'button:not(:disabled), input, textarea, a[href]';
 
 type Screen =
   /** `trail` is the bundles down to the one being shown; empty is the root. */
@@ -214,6 +216,13 @@ export class NewsView {
   /** Where to scroll once the next draw lands. */
   private scrollTo: 'top' | number | null = null;
   private focusDraft = false;
+  /** The screen the last draw was of, and whether it owes the next one
+   *  the focus: a draw replaces whatever had it, and a keyboard would
+   *  otherwise start again from the top of the document. A new screen
+   *  is entered at its first control; a redraw of the same one keeps
+   *  the place, which after More is the first of what it added. */
+  private drawn: Screen | null = null;
+  private focusOwed = false;
 
   private nodes: NewsNode[] = [];
   private threads: NewsThread[] = [];
@@ -268,6 +277,11 @@ export class NewsView {
   constructor(private hooks: NewsHooks) {
     this.bar.append(this.crumbsEl, h('span', { class: 'spacer' }), this.searchBox, this.actionsEl);
     this.el.append(this.bar, this.body);
+    // Focus owed to a view still loading is not taken back from wherever
+    // it has gone since.
+    document.addEventListener('focusin', (e) => {
+      if (!this.el.contains(e.target as Node)) this.focusOwed = false;
+    });
     this.searchBox.onkeydown = (e) => {
       if (e.key === 'Enter') {
         const q = this.searchBox.value.trim();
@@ -1113,7 +1127,7 @@ export class NewsView {
     if (this.hitsNext !== null) {
       const more = h('button', { class: 'news-more' }, 'More results');
       more.onclick = () => {
-        more.disabled = true;
+        more.onclick = null;
         void this.loadMoreHits();
       };
       out.push(more);
@@ -1124,6 +1138,12 @@ export class NewsView {
   // --- drawing ----------------------------------------------------------
 
   private render(): void {
+    const had = document.activeElement as HTMLElement | null;
+    const at = this.focusable(this.body).indexOf(had!);
+    // The bar's controls come and go, so one is found again by its label.
+    const label = had && this.bar.contains(had) && had !== this.searchBox ? had.textContent : null;
+    const moved = this.screen !== this.drawn;
+    this.drawn = this.screen;
     this.renderBar();
     // Every placeholder the last draw was watching is about to be
     // replaced, and this draw watches its own.
@@ -1139,7 +1159,7 @@ export class NewsView {
             : s.at === 'following'
               ? this.followingView()
               : this.threadView();
-    fill(this.body, this.error ? h('p', { class: 'news-error' }, this.error) : null, ...content);
+    fill(this.body, this.error ? h('p', { class: 'news-error', role: 'alert' }, this.error) : null, ...content);
     if (this.notice) this.body.prepend(h('p', { class: 'news-notice' }, this.notice));
     if (this.loading) this.body.append(h('p', { class: 'news-loading' }, 'Loading…'));
 
@@ -1159,8 +1179,21 @@ export class NewsView {
             : '.news-compose textarea',
       );
       field?.focus();
+    } else if ((at >= 0 || label !== null || this.focusOwed) && !this.el.contains(document.activeElement)) {
+      const target =
+        moved || this.focusOwed
+          ? this.body.querySelector<HTMLElement>(FOCUSABLE)
+          : at >= 0
+            ? this.focusable(this.body)[at]
+            : this.focusable(this.bar).find((b) => b.textContent === label);
+      target?.focus();
+      this.focusOwed = !target;
     }
     this.acknowledge();
+  }
+
+  private focusable(root: HTMLElement): HTMLElement[] {
+    return [...root.querySelectorAll<HTMLElement>(FOCUSABLE)];
   }
 
   /** Put `error` up, or take it down, where `render` draws it, without
@@ -1168,7 +1201,7 @@ export class NewsView {
   private paintError(): void {
     this.body.querySelector(':scope > .news-error')?.remove();
     if (!this.error) return;
-    const p = h('p', { class: 'news-error' }, this.error);
+    const p = h('p', { class: 'news-error', role: 'alert' }, this.error);
     const notice = this.body.querySelector(':scope > .news-notice');
     if (notice) notice.after(p);
     else this.body.prepend(p);
@@ -1305,9 +1338,9 @@ export class NewsView {
       const open = h(
         'button',
         { class: 'news-node news-following', title: 'What you follow' },
-        h('span', { class: 'glyph' }, '★'),
+        h('span', { class: 'glyph', ariaHidden: 'true' }, '★'),
         h('span', { class: 'name' }, 'Following'),
-        n ? h('span', { class: 'badge', title: `${plural(n, 'unread article', 'unread articles')}` }, String(n)) : null,
+        n ? badge(n, 'unread', plural(n, 'unread article', 'unread articles')) : null,
       );
       open.onclick = () => this.openFollowing();
       out.push(h('div', { class: 'news-node-row' }, open));
@@ -1324,7 +1357,7 @@ export class NewsView {
       const open = h(
         'button',
         { class: 'news-node' },
-        h('span', { class: 'glyph' }, node.kind === 'bundle' ? '▸' : '#'),
+        h('span', { class: 'glyph', role: 'img', ariaLabel: node.kind }, node.kind === 'bundle' ? '▸' : '#'),
         h('span', { class: 'name' }, node.name),
         node.feed
           ? h('span', { class: 'news-feed', title: `Filled by the feed ${node.feed.name}` }, node.feed.name)
@@ -1339,7 +1372,7 @@ export class NewsView {
               ? plural(node.count, 'item', 'items')
               : plural(node.count, 'article', 'articles'),
         ),
-        unread ? h('span', { class: 'badge', title: 'Unread in what you follow here' }, String(unread)) : null,
+        unread ? badge(unread, 'unread', 'Unread in what you follow here') : null,
       );
       open.onclick = () =>
         node.kind === 'bundle' ? this.openTree([...s.trail, node]) : this.openCategory(s.trail, node);
@@ -1400,7 +1433,7 @@ export class NewsView {
           'span',
           { class: 'news-thread-head' },
           h('span', { class: 'news-thread-subject' }, a.deleted ? 'Deleted article' : a.subject),
-          unread ? h('span', { class: 'badge', title: plural(unread, 'unread reply', 'unread replies') }, String(unread)) : null,
+          unread ? badge(unread, 'unread', plural(unread, 'unread reply', 'unread replies')) : null,
         ),
         a.deleted ? null : h('span', { class: 'news-thread-excerpt' }, excerpt(listingText(a))),
         h(
@@ -1416,7 +1449,7 @@ export class NewsView {
     if (this.threadsMore) {
       const more = h('button', { class: 'news-more' }, 'Older threads');
       more.onclick = () => {
-        more.disabled = true;
+        more.onclick = null;
         void this.loadOlderThreads();
       };
       out.push(more);
@@ -1444,10 +1477,10 @@ export class NewsView {
       const open = h(
         'button',
         { class: `news-node${sub.muted ? ' muted' : ''}` },
-        h('span', { class: 'glyph' }, sub.scope === 'category' ? '#' : '¶'),
+        h('span', { class: 'glyph', ariaHidden: 'true' }, sub.scope === 'category' ? '#' : '¶'),
         h('span', { class: 'name' }, label),
         h('span', { class: 'count' }, tags),
-        unread ? h('span', { class: 'badge' }, String(unread)) : null,
+        unread ? badge(unread) : null,
       );
       open.onclick = () => void this.openSub(sub);
       const drop = h('button', { class: 'ghost small' }, sub.muted ? 'Unmute' : 'Unfollow');
@@ -1463,7 +1496,7 @@ export class NewsView {
     if (this.articlesMore) {
       const more = h('button', { class: 'news-more' }, 'More of this thread');
       more.onclick = () => {
-        more.disabled = true;
+        more.onclick = null;
         void this.loadMoreArticles();
       };
       out.push(more);

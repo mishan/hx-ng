@@ -158,7 +158,7 @@ ng_requests = 0
 
     // --- the moderator hears of it, and redacts the line ------------------
     const reports = mod.locator('.rail-item', { hasText: 'Reports' });
-    await expect(reports.locator('.badge')).toHaveText('1');
+    await expect(reports.locator('.badge')).toHaveText('1 waiting');
     await reports.click();
     const card = mod.locator('.mod-report').first();
     await expect(card).toContainText('alice reported a chat line from');

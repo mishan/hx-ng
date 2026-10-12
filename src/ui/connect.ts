@@ -131,12 +131,14 @@ function askCreateChoice(container: HTMLElement): Promise<boolean> {
       { class: 'identity-create-choice' },
       h(
         'p',
-        { class: 'muted' },
+        { class: 'muted', id: 'identity-create-note' },
         'This server will make a new account for your identity unless you say otherwise. Already linked an existing account with hlid link? That takes effect either way.',
       ),
       h('div', { class: 'button-row' }, makeBtn, guestBtn),
     );
     container.append(box);
+    makeBtn.setAttribute('aria-describedby', 'identity-create-note');
+    makeBtn.focus();
     const finish = (v: boolean) => {
       box.remove();
       resolve(v);
@@ -177,7 +179,12 @@ export function connectScreen(
   const nick = field('Nickname', 'text', saved.nick, { placeholder: 'as the account is named' });
 
   const iconArt = h('span', { class: 'icon-cell-fixed' }, icon(chosenIcon, 2));
-  const iconBtn = h('button', { class: 'icon-button', type: 'button' }, iconArt, h('span', { class: 'muted' }, `#${chosenIcon}`));
+  const iconBtn = h(
+    'button',
+    { class: 'icon-button', type: 'button', ariaLabel: `Icon #${chosenIcon}` },
+    iconArt,
+    h('span', { class: 'muted' }, `#${chosenIcon}`),
+  );
   iconBtn.onclick = () => {
     void pickIcon(chosenIcon).then((picked) => {
       if (picked === null) return;
@@ -185,10 +192,11 @@ export function connectScreen(
       chosenIcon = id;
       iconArt.replaceChildren(icon(id, 2));
       iconBtn.lastElementChild!.textContent = `#${id}`;
+      iconBtn.ariaLabel = `Icon #${id}`;
     });
   };
 
-  const error = h('p', { class: 'error', hidden: true });
+  const error = h('p', { class: 'error', role: 'alert', hidden: true });
   const submit = h('button', { class: 'primary', type: 'submit' }, 'Connect');
   const identityKeysLink = h('button', { class: 'ghost', type: 'button' }, 'Identity keys…');
   identityKeysLink.onclick = onIdentityKeys;

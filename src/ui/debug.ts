@@ -52,6 +52,7 @@ export class DebugPanel {
       class: 'filter',
       type: 'search',
       placeholder: 'filter frames…',
+      ariaLabel: 'Filter frames',
       spellcheck: false,
     });
     this.filterInput.oninput = () => {
@@ -205,6 +206,7 @@ export class DebugPanel {
     ];
     const text = lines.join('\n');
     const was = btn.textContent;
+    btn.ariaLive = 'polite';
     try {
       await navigator.clipboard.writeText(text);
       btn.textContent = 'Copied';

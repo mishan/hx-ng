@@ -239,7 +239,7 @@ ng_requests = 0
     await expect(editor.locator('.news-article')).toHaveCount(2);
     const replyId = Number((await editor.locator('.news-article').nth(1).locator('.news-id').textContent())!.slice(1));
 
-    await expect(newsItem.locator('.badge')).toHaveText('1');
+    await expect(newsItem.locator('.badge')).toHaveText('1 unread');
     const notice = reader.locator('.line.notice a.news-notice');
     await expect(notice).toContainText('posted in “Re: Release notes”');
     await reader.screenshot({ path: testInfo.outputPath('news-notified.png'), fullPage: true });

@@ -79,6 +79,7 @@ export class Tiles {
       this.el.append(tile.fig);
     }
     tile.caption.textContent = label;
+    tile.play.ariaLabel = `Play ${label}`;
     tile.video.classList.toggle('mirror', !!opts.mirror);
     tile.fig.style.order = String(opts.order ?? 0);
     if (tile.video.srcObject !== stream) this.attach(tile, stream);
@@ -87,7 +88,9 @@ export class Tiles {
 
   label(key: string, label: string): void {
     const tile = this.tiles.get(key);
-    if (tile) tile.caption.textContent = label;
+    if (!tile) return;
+    tile.caption.textContent = label;
+    tile.play.ariaLabel = `Play ${label}`;
   }
 
   has(key: string): boolean {

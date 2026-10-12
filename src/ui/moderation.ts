@@ -41,6 +41,12 @@ export function problem(e: unknown): string {
 
 export class ModerationView {
   readonly el = h('section', { class: 'mod-view', hidden: true });
+  /** Kept from one draw to the next rather than drawn with the rest, so
+   *  each is said once, when what it says changes. */
+  private errorEl = h('p', { class: 'mod-error', role: 'alert' });
+  private noticeEl = h('p', { class: 'mod-notice', role: 'status' });
+  /** Actions under way, by key: a redraw meanwhile draws them busy too. */
+  private busy = new Set<string>();
   readonly queue = new ReportQueue();
   private tab: Tab = 'open';
   private sight = new Sight();
@@ -185,13 +191,26 @@ export class ModerationView {
   }
 
   private render(): void {
+    // Drawn afresh on every report anyone files or closes, so whatever
+    // had the focus gets it back, and focus whose button went with its
+    // report goes to the heading.
+    const inside = this.el.contains(document.activeElement);
+    const focused = inside ? (document.activeElement as HTMLElement).dataset.key : undefined;
     const tabs = (['open', 'closed', 'log'] as const).map((t) => {
       const label = t === 'open' ? `Open${this.queue.count ? ` (${this.queue.count})` : ''}` : t === 'closed' ? 'Closed' : 'Log';
-      const b = h('button', { class: `ghost${this.tab === t ? ' on' : ''}`, type: 'button' }, label);
+      const b = h(
+        'button',
+        { class: `ghost${this.tab === t ? ' on' : ''}`, type: 'button', ariaPressed: String(this.tab === t), dataset: { key: `tab:${t}` } },
+        label,
+      );
       b.onclick = () => this.pick(t);
       return b;
     });
-    const refresh = h('button', { class: 'ghost', type: 'button', title: 'Ask the server again' }, 'Refresh');
+    const refresh = h(
+      'button',
+      { class: 'ghost', type: 'button', title: 'Ask the server again', dataset: { key: 'refresh' } },
+      'Refresh',
+    );
     refresh.onclick = () => void this.load(true);
 
     const body: (HTMLElement | null)[] = [];
@@ -208,17 +227,30 @@ export class ModerationView {
       if (this.tab === 'open' ? this.openMore : this.closedMore) body.push(this.more());
     }
 
-    fill(
-      this.el,
-      h('header', { class: 'mod-head' }, h('h2', {}, 'Reports'), ...tabs, h('div', { class: 'spacer' }), refresh),
-      this.error ? h('p', { class: 'mod-error' }, this.error) : null,
-      this.notice ? h('p', { class: 'mod-notice' }, this.notice) : null,
-      h('div', { class: 'mod-list' }, ...body),
+    const head = h(
+      'header',
+      { class: 'mod-head' },
+      h('h2', { tabIndex: -1 }, 'Reports'),
+      ...tabs,
+      h('div', { class: 'spacer' }),
+      refresh,
     );
+    const list = h('div', { class: 'mod-list' }, ...body);
+    if (!this.el.firstChild) this.el.append(head, this.errorEl, this.noticeEl, list);
+    else {
+      this.el.firstElementChild!.replaceWith(head);
+      this.el.lastElementChild!.replaceWith(list);
+    }
+    // Only when it changed: a text node replaced by the same words can be
+    // said again.
+    if (this.errorEl.textContent !== (this.error ?? '')) this.errorEl.textContent = this.error ?? '';
+    if (this.noticeEl.textContent !== (this.notice ?? '')) this.noticeEl.textContent = this.notice ?? '';
+    if (focused) this.el.querySelector<HTMLElement>(`[data-key="${CSS.escape(focused)}"]`)?.focus();
+    if (inside && document.activeElement === document.body) head.querySelector('h2')!.focus();
   }
 
   private more(): HTMLElement {
-    const b = h('button', { class: 'ghost', type: 'button' }, 'Older');
+    const b = h('button', { class: 'ghost', type: 'button', dataset: { key: 'more' } }, 'Older');
     b.onclick = () => void this.load(false);
     return b;
   }
@@ -306,7 +338,7 @@ export class ModerationView {
         this.urls.push(url);
         fill(box, h('img', { class: 'media-img', src: url, alt: 'The reported image' }));
       } catch (e) {
-        fill(box, h('span', { class: 'muted' }, e instanceof WireFailure ? 'The image is gone.' : problem(e)));
+        fill(box, h('span', { class: 'muted', role: 'alert' }, e instanceof WireFailure ? 'The image is gone.' : problem(e)));
       }
     };
     box.append(show);
@@ -316,9 +348,22 @@ export class ModerationView {
   private actions(r: Report): HTMLElement[] {
     const out: HTMLElement[] = [];
     const act = (label: string, fn: () => Promise<string | null>, danger = false) => {
-      const b = h('button', { class: `ghost small${danger ? ' danger' : ''}`, type: 'button' }, label);
+      const key = `${r.id}:${label}`;
+      const b = h(
+        'button',
+        {
+          class: `ghost small${danger ? ' danger' : ''}`,
+          type: 'button',
+          ariaDisabled: this.busy.has(key) ? 'true' : null,
+          dataset: { key },
+        },
+        label,
+      );
+      // Busy, not disabled: a disabled button would drop the focus.
       b.onclick = async () => {
-        b.disabled = true;
+        if (this.busy.has(key)) return;
+        this.busy.add(key);
+        b.ariaDisabled = 'true';
         try {
           const said = await fn();
           if (said) {
@@ -330,7 +375,8 @@ export class ModerationView {
           this.error = problem(e);
           this.render();
         } finally {
-          b.disabled = false;
+          this.busy.delete(key);
+          this.el.querySelector(`[data-key="${CSS.escape(key)}"]`)?.removeAttribute('aria-disabled');
         }
       };
       out.push(b);

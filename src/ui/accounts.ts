@@ -15,17 +15,11 @@ import { errorText, WireFailure, type AccountInfo } from '@hotline-ng/client';
 import { ACCESS_GROUPS, draftOf, editParams, grantable, powers, toggle, unknownNames, type Draft } from '../accounts';
 import type { Session } from '../session';
 import { ask } from './ask';
-import { fill, h } from './dom';
+import { h } from './dom';
 import { Sight } from './sight';
 
 function problem(e: unknown): string {
   return e instanceof WireFailure ? errorText(e.wire) : e instanceof Error ? e.message : String(e);
-}
-
-/** Said to a screen reader as it appears. */
-function announced(el: HTMLElement, role: 'alert' | 'status'): HTMLElement {
-  el.setAttribute('role', role);
-  return el;
 }
 
 const isOutranked = (e: unknown) => e instanceof WireFailure && e.wire.code === 'outranked';
@@ -38,6 +32,11 @@ export class AccountsView {
   private draft: Draft | null = null;
   private error: string | null = null;
   private notice: string | null = null;
+  /** Kept from one draw to the next rather than drawn with the rest, so
+   *  each is said once, when what it says changes, and not again with
+   *  every box ticked. */
+  private errorEl = h('p', { class: 'mod-error', role: 'alert' });
+  private noticeEl = h('p', { class: 'mod-notice muted', role: 'status' });
   /** Logins the server refused as `outranked` though no bit said so. */
   private above = new Set<string>();
   /** A write under way: one at a time. Its own count rather than
@@ -215,19 +214,29 @@ export class AccountsView {
       b.onclick = () => void this.pick(a.login);
       return b;
     });
-    fill(
-      this.el,
-      h('div', { class: 'mod-head' }, h('h2', {}, 'Accounts'), add),
-      this.error ? announced(h('p', { class: 'mod-error' }, this.error), 'alert') : null,
-      this.notice ? announced(h('p', { class: 'mod-notice muted' }, this.notice), 'status') : null,
-      h(
-        'div',
-        { class: 'accounts-body' },
-        may.read ? h('nav', { class: 'accounts-list' }, ...rows) : null,
-        this.draft ? this.editor(this.draft) : null,
-      ),
+    const head = h('div', { class: 'mod-head' }, h('h2', {}, 'Accounts'), add);
+    const body = h(
+      'div',
+      { class: 'accounts-body' },
+      may.read ? h('div', { class: 'accounts-list' }, ...rows) : null,
+      this.draft ? this.editor(this.draft) : null,
     );
-    if (focused) this.el.querySelector<HTMLElement>(`[data-key="${CSS.escape(focused)}"]`)?.focus();
+    if (!this.el.firstChild) this.el.append(head, this.errorEl, this.noticeEl, body);
+    else {
+      this.el.firstElementChild!.replaceWith(head);
+      this.el.lastElementChild!.replaceWith(body);
+    }
+    // Only when it changed: a text node replaced by the same words can be
+    // said again.
+    if (this.errorEl.textContent !== (this.error ?? '')) this.errorEl.textContent = this.error ?? '';
+    if (this.noticeEl.textContent !== (this.notice ?? '')) this.noticeEl.textContent = this.notice ?? '';
+    if (focused) {
+      this.el.querySelector<HTMLElement>(`[data-key="${CSS.escape(focused)}"]`)?.focus();
+      // Its button went with what it acted on, as Delete does.
+      if (document.activeElement === document.body) {
+        this.el.querySelector<HTMLElement>('[data-key="new"]:not(:disabled), .accounts-row')?.focus();
+      }
+    }
   }
 
   private editor(draft: Draft): HTMLElement {

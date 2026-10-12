@@ -130,6 +130,9 @@ input, textarea {
   padding: 0.4rem 0.55rem;
 }
 
+/* Busy: still focusable, so the focus is not dropped while it waits. */
+button[aria-disabled='true'] { opacity: 0.55; cursor: progress; }
+
 input:focus-visible, textarea:focus-visible, select:focus-visible, button:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 1px;
@@ -832,8 +835,13 @@ button.call:disabled { opacity: 0.45; cursor: default; }
 
 .connect {
   flex: 1;
+  min-height: 0;
+  overflow-y: auto;
   display: grid;
   place-items: center;
+  /* `safe`: a card taller than a short window starts at its top, where
+     the scroll can reach it, rather than being centered off both ends. */
+  place-items: safe center;
   padding: 2rem 1rem;
 }
 
@@ -1004,6 +1012,10 @@ dialog.picker header input { width: 9rem; }
 
 .identity-panel {
   flex: none;
+  /* Over the panes, which a short window squeezes until the composer
+     spills out of them onto this. */
+  position: relative;
+  z-index: 1;
   height: min(28rem, 55dvh);
   display: flex;
   flex-direction: column;
@@ -1321,10 +1333,10 @@ button.ghost.danger:hover { color: var(--admin); border-color: var(--admin); }
 .news-text.md > :last-child { margin-bottom: 0; }
 .news-text .md-p { margin: 0 0 0.65em; }
 .news-text .md-h { margin: 0.9em 0 0.4em; line-height: 1.25; font-weight: 650; }
-.news-text h1.md-h { font-size: 1.35em; }
-.news-text h2.md-h { font-size: 1.2em; }
-.news-text h3.md-h { font-size: 1.08em; }
-.news-text h4.md-h, .news-text h5.md-h, .news-text h6.md-h { font-size: 1em; }
+.news-text .md-h1 { font-size: 1.35em; }
+.news-text .md-h2 { font-size: 1.2em; }
+.news-text .md-h3 { font-size: 1.08em; }
+.news-text .md-h4, .news-text .md-h5, .news-text .md-h6 { font-size: 1em; }
 .news-text .md-list { margin: 0 0 0.65em; padding-left: 1.6em; }
 .news-text .md-list .md-list { margin-bottom: 0; }
 .news-text li > .md-p:last-child { margin-bottom: 0.3em; }
@@ -1441,11 +1453,14 @@ button.ghost.danger:hover { color: var(--admin); border-color: var(--admin); }
     z-index: 20;
     box-shadow: var(--shadow);
     transform: translateX(100%);
-    transition: transform 0.18s ease;
+    /* Hidden, as the drawer is, once off screen: still focusable there,
+       its buttons drew the panes sideways to show themselves. */
+    visibility: hidden;
+    transition: transform 0.18s ease, visibility 0s linear 0.18s;
     padding-right: max(0.5rem, env(safe-area-inset-right));
     padding-bottom: max(0.5rem, env(safe-area-inset-bottom));
   }
-  body.show-roster .roster { transform: none; }
+  body.show-roster .roster { transform: none; visibility: visible; transition: transform 0.18s ease; }
   .roster-close { display: inline-flex; }
   .scrim {
     display: block;
@@ -1611,7 +1626,8 @@ button.ghost.danger:hover { color: var(--admin); border-color: var(--admin); }
 @media (pointer: coarse) {
   .topbar button, .rail-item, .roster-close, .crumb,
   .news-bar button, .news-search, .files-bar button, .identity-bar button, .composer-input,
-  .line-actions button, .person-more, .file-more, dialog.ask button, .mod-head button, .mod-actions button {
+  .line-actions button, .person-more, .file-more, dialog.ask button, .mod-head button, .mod-actions button,
+  .news-actions button {
     min-height: 44px;
   }
   .rail-foot button, dialog.settings button, .setting-choice, .setting-toggle { min-height: 44px; }
@@ -1659,6 +1675,7 @@ button.ghost.danger { color: var(--admin); }
 .mod-head h2 { margin: 0 0.5rem 0 0; font-size: 1rem; }
 .mod-head button.on { border-color: var(--accent); color: var(--accent); }
 .mod-error, .mod-notice { margin: 0.5rem 0.75rem 0; }
+.mod-error:empty, .mod-notice:empty { margin: 0; }
 .mod-error { color: var(--admin); }
 .mod-list { flex: 1; min-height: 0; overflow-y: auto; padding: 0.5rem 0.75rem 1rem; display: flex; flex-direction: column; gap: 0.6rem; }
 .mod-list > button { align-self: center; }
@@ -1672,7 +1689,7 @@ button.ghost.danger { color: var(--admin); }
   gap: 0.4rem;
   min-width: 0;
 }
-.mod-report.closed { opacity: 0.75; }
+.mod-report.closed { background: var(--surface-2); }
 .mod-report-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.5rem; }
 .mod-report-head .muted { font-size: 0.75rem; margin-left: auto; }
 .mod-id { color: var(--muted); font-variant-numeric: tabular-nums; }

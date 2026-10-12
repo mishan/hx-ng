@@ -86,7 +86,9 @@ function blockNode(b: MdBlock, hooks: MarkdownHooks, tight: boolean): HTMLElemen
     case 'paragraph':
       return h(tight ? 'div' : 'p', { class: tight ? 'md-line' : 'md-p' }, ...inlineNodes(b.content, hooks));
     case 'heading':
-      return h(`h${b.level}`, { class: 'md-h' }, ...inlineNodes(b.content, hooks));
+      // Two below the page's own: an article's `#` sits under the app's
+      // heading and the view's, and is styled by its markdown level.
+      return h(`h${Math.min(6, b.level + 2) as 3 | 4 | 5 | 6}`, { class: `md-h md-h${b.level}` }, ...inlineNodes(b.content, hooks));
     case 'code':
       return h('pre', { class: 'md-pre', dataset: b.language ? { lang: b.language } : undefined }, h('code', {}, b.text));
     case 'quote':

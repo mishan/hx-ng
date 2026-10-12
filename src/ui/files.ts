@@ -34,6 +34,10 @@ export class FilesView {
    *  `reset`, which ends the session its token is bound to anyway,
    *  cancels it. */
   private transfer = h('div', { class: 'files-transfer', hidden: true });
+  /** How the last transfer ended, for a screen reader; the strip itself
+   *  changes with every chunk, too often to be a live region. Outside
+   *  the view, which is hidden while a download goes on behind chat. */
+  private outcome = h('span', { class: 'sr-only files-outcome', role: 'status' });
   private path = '';
   /** The listing on screen, for a redraw that asks the server nothing;
    *  `null` while something else is. */
@@ -53,6 +57,7 @@ export class FilesView {
 
   constructor(private connection: () => Session | null) {
     this.el.append(this.page, this.transfer);
+    document.body.append(this.outcome);
     // The whole view, so a file dropped a little wide of the listing is
     // not opened by the browser in place of the app; taken only while a
     // listing that takes uploads is on screen and nothing else is moving.
@@ -107,6 +112,7 @@ export class FilesView {
     this.page.replaceChildren();
     this.transfer.replaceChildren();
     this.transfer.hidden = true;
+    this.outcome.textContent = '';
   }
 
   /** Resolves with the generation it drew, for a caller that adds to it. */
@@ -346,10 +352,9 @@ export class FilesView {
     this.abort = abort;
     // A download `reset` has let go of says nothing more: the strip it
     // would write to now belongs to whatever comes next.
-    const status = (...children: (Node | string)[]) => {
+    const status = (text: Node | string, cancel?: HTMLElement) => {
       if (this.abort !== abort) return;
-      this.transfer.hidden = false;
-      fill(this.transfer, ...children);
+      this.say(text, cancel);
     };
     const picker = (globalThis as { showSaveFilePicker?: SavePicker }).showSaveFilePicker;
     try {
@@ -405,6 +410,7 @@ export class FilesView {
     } finally {
       if (this.abort === abort) {
         this.abort = null;
+        this.outcome.textContent = this.transfer.textContent;
         // The button that started it may have been redrawn since; any
         // Download on screen now waited on this one.
         for (const b of this.page.querySelectorAll<HTMLButtonElement>('.file-download, .files-upload')) {
@@ -412,6 +418,15 @@ export class FilesView {
         }
       }
     }
+  }
+
+  /** Say `text` in the strip, with `cancel` after it while there is
+   *  one. A Cancel already there stays put: taken out and put back, it
+   *  would drop the focus with every chunk. */
+  private say(text: Node | string, cancel?: HTMLElement): void {
+    this.transfer.hidden = false;
+    if (cancel && cancel.parentNode === this.transfer) this.transfer.firstChild!.replaceWith(text);
+    else fill(this.transfer, text, cancel);
   }
 
   private may(act: FilesAct): boolean {
@@ -480,13 +495,15 @@ export class FilesView {
     const abort = new AbortController();
     this.abort = abort;
     const folder = this.path;
-    const status = (...children: (Node | string)[]) => {
+    const status = (text: Node | string, cancel?: HTMLElement) => {
       if (this.abort !== abort) return;
-      this.transfer.hidden = false;
-      fill(this.transfer, ...children);
+      this.say(text, cancel);
     };
     const cancel = h('button', { class: 'ghost danger' }, 'Cancel');
     cancel.onclick = () => abort.abort();
+    // Disabling Upload takes the focus from it, to be given to Cancel;
+    // a file dropped from elsewhere leaves the focus where it was.
+    const held = document.activeElement?.classList.contains('files-upload') === true;
     for (const b of this.page.querySelectorAll<HTMLButtonElement>('.file-download, .files-upload')) {
       b.disabled = true;
     }
@@ -496,6 +513,7 @@ export class FilesView {
         const size = BigInt(file.size);
         const path = folder ? `${folder}/${file.name}` : file.name;
         status(`${file.name}: starting ${formatFileSize(size)}… `, cancel);
+        if (!done && held) cancel.focus();
         await connection.uploadFile(path, file, {
           signal: abort.signal,
           onProgress: (sent) =>
@@ -513,9 +531,17 @@ export class FilesView {
     } finally {
       if (this.abort === abort) {
         this.abort = null;
+        this.outcome.textContent = this.transfer.textContent;
         // What arrived is in the folder; show it if that is still where
-        // this view is, and let the buttons go either way.
-        if (this.entries && this.path === folder) void this.load(folder);
+        // this view is, and let the buttons go either way. Focus went
+        // with Cancel, so it goes back to Upload.
+        if (this.entries && this.path === folder) {
+          void this.load(folder).then((drawn) => {
+            if (held && drawn === this.generation && document.activeElement === document.body) {
+              this.page.querySelector<HTMLButtonElement>('.files-upload')?.focus();
+            }
+          });
+        }
         for (const b of this.page.querySelectorAll<HTMLButtonElement>('.file-download, .files-upload')) {
           b.disabled = false;
         }

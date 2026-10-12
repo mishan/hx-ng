@@ -328,17 +328,26 @@ export class ModerationView {
     show.onclick = async () => {
       const conn = this.hooks.conn();
       if (!conn) return;
-      show.disabled = true;
+      if (show.ariaDisabled === 'true') return;
+      show.ariaDisabled = 'true';
+      let had = false;
       try {
         const blob = await conn.fetchMedia(handle);
         // The type decides what a blob URL does when it is opened, and
         // here nothing else is known about it: only what paints.
         if (!INERT.includes(blob.type)) throw new Error('That is not an image this client will show.');
+        // The button goes with what replaces it; the box takes the focus.
+        had = document.activeElement === show;
         const url = URL.createObjectURL(blob);
         this.urls.push(url);
         fill(box, h('img', { class: 'media-img', src: url, alt: 'The reported image' }));
       } catch (e) {
+        had = document.activeElement === show;
         fill(box, h('span', { class: 'muted', role: 'alert' }, e instanceof WireFailure ? 'The image is gone.' : problem(e)));
+      }
+      if (had) {
+        box.tabIndex = -1;
+        box.focus();
       }
     };
     box.append(show);

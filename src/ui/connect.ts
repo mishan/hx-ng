@@ -177,6 +177,8 @@ export function connectScreen(
   const login = field('Account', 'text', saved.login, { placeholder: 'guest', autocomplete: 'username' });
   const password = field('Password', 'password', '', { autocomplete: 'current-password' });
   const nick = field('Nickname', 'text', saved.nick, { placeholder: 'as the account is named' });
+  // An attribute: the DOM's types do not list `nickname` among the tokens.
+  nick.input.setAttribute('autocomplete', 'nickname');
 
   const iconArt = h('span', { class: 'icon-cell-fixed' }, icon(chosenIcon, 2));
   const iconBtn = h(

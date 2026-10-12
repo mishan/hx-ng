@@ -255,7 +255,7 @@ export class FilesView {
     download.onclick = () => void this.download(info.path, info.name, size, download);
     const back = h('button', { class: 'ghost' }, 'Back');
     back.onclick = () => void this.load(this.path);
-    const preview = h('div', { class: 'file-preview', hidden: true });
+    const preview = h('div', { class: 'file-preview', role: 'region', ariaLabel: 'Preview', hidden: true });
     void this.preview(info, preview, generation);
     this.draw(
       true,

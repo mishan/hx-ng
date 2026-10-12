@@ -90,7 +90,10 @@ function blockNode(b: MdBlock, hooks: MarkdownHooks, tight: boolean): HTMLElemen
       // heading and the view's, and is styled by its markdown level.
       return h(`h${Math.min(6, b.level + 2) as 3 | 4 | 5 | 6}`, { class: `md-h md-h${b.level}` }, ...inlineNodes(b.content, hooks));
     case 'code':
-      return h('pre', { class: 'md-pre', dataset: b.language ? { lang: b.language } : undefined }, h('code', {}, b.text));
+      return scrollable(
+        h('pre', { class: 'md-pre', dataset: b.language ? { lang: b.language } : undefined }, h('code', {}, b.text)),
+        'Code',
+      );
     case 'quote':
       return h('blockquote', { class: 'md-quote' }, ...blockNodes(b.children, hooks, tight));
     case 'list': {
@@ -116,15 +119,18 @@ function blockNode(b: MdBlock, hooks: MarkdownHooks, tight: boolean): HTMLElemen
         if (missing > 0) tds.push(h('td', { colSpan: missing }));
         return h('tr', {}, ...tds);
       };
-      return h(
-        'div',
-        { class: 'md-table-wrap' },
+      return scrollable(
         h(
-          'table',
-          { class: 'md-table' },
-          h('thead', {}, h('tr', {}, ...b.head.map((c, k) => cell('th', c, k)))),
-          h('tbody', {}, ...b.rows.map(row)),
+          'div',
+          { class: 'md-table-wrap' },
+          h(
+            'table',
+            { class: 'md-table' },
+            h('thead', {}, h('tr', {}, ...b.head.map((c, k) => cell('th', c, k)))),
+            h('tbody', {}, ...b.rows.map(row)),
+          ),
         ),
+        'Table',
       );
     }
   }
@@ -162,4 +168,18 @@ export function wrapSelection(
     start: start + delim.length,
     end: end + delim.length,
   };
+}
+
+/** A block that scrolls sideways when it is wider than its column, and
+ *  then takes the focus, so a keyboard can scroll it too. Measured as it
+ *  is drawn and whenever its column changes width, so a block that fits
+ *  adds nothing to the tab order. */
+function scrollable(el: HTMLElement, label: string): HTMLElement {
+  new ResizeObserver((_, observer) => {
+    // Taken out of the page, it is the size of nothing and done with.
+    if (!el.isConnected) return observer.disconnect();
+    if (el.scrollWidth > el.clientWidth) Object.assign(el, { tabIndex: 0, role: 'region', ariaLabel: label });
+    else for (const name of ['tabindex', 'role', 'aria-label']) el.removeAttribute(name);
+  }).observe(el);
+  return el;
 }

@@ -23,6 +23,8 @@ export class BannerStrip {
   private blob: string | null = null;
   /** Bumped by `clear`, so a fetch that lands after it stores nothing. */
   private generation = 0;
+  /** Where the focus goes when Hide, which had it, takes the strip away. */
+  onHidden: (() => void) | null = null;
 
   /** Draw the banner `conn`'s server has, or nothing. */
   show(conn: Session): void {
@@ -82,7 +84,11 @@ export class BannerStrip {
       { class: 'ghost banner-hide', type: 'button', title: 'Hide the banner', ariaLabel: 'Hide the banner' },
       '×',
     );
-    hide.onclick = () => this.clear();
+    hide.onclick = () => {
+      const had = document.activeElement === hide;
+      this.clear();
+      if (had) this.onHidden?.();
+    };
     this.el.replaceChildren(art, hide);
     this.el.hidden = false;
   }

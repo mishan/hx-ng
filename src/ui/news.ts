@@ -212,7 +212,17 @@ export class NewsView {
    *  that can only answer "access denied" is noise. */
   private managing = false;
   private busy = false;
-  private error: string | null = null;
+  private errorText: string | null = null;
+  /** Whether `error` was set since it was last drawn: an alert says each
+   *  failure, even one in the same words as the last, and not a redraw. */
+  private errorNew = false;
+  private get error(): string | null {
+    return this.errorText;
+  }
+  private set error(text: string | null) {
+    this.errorText = text;
+    this.errorNew = true;
+  }
   /** Where to scroll once the next draw lands. */
   private scrollTo: 'top' | number | null = null;
   private focusDraft = false;
@@ -1127,7 +1137,9 @@ export class NewsView {
     if (this.hitsNext !== null) {
       const more = h('button', { class: 'news-more' }, 'More results');
       more.onclick = () => {
-        more.onclick = null;
+        // Busy, not disabled, so it keeps the focus until what it adds arrives.
+        if (more.ariaDisabled === 'true') return;
+        more.ariaDisabled = 'true';
         void this.loadMoreHits();
       };
       out.push(more);
@@ -1159,7 +1171,7 @@ export class NewsView {
             : s.at === 'following'
               ? this.followingView()
               : this.threadView();
-    fill(this.body, this.error ? h('p', { class: 'news-error', role: 'alert' }, this.error) : null, ...content);
+    fill(this.body, this.errorEl(), ...content);
     if (this.notice) this.body.prepend(h('p', { class: 'news-notice' }, this.notice));
     if (this.loading) this.body.append(h('p', { class: 'news-loading' }, 'Loading…'));
 
@@ -1200,11 +1212,19 @@ export class NewsView {
    *  redrawing the form someone is typing in. */
   private paintError(): void {
     this.body.querySelector(':scope > .news-error')?.remove();
-    if (!this.error) return;
-    const p = h('p', { class: 'news-error', role: 'alert' }, this.error);
+    const p = this.errorEl();
+    if (!p) return;
     const notice = this.body.querySelector(':scope > .news-notice');
     if (notice) notice.after(p);
     else this.body.prepend(p);
+  }
+
+  /** The error, as an alert only the first time it is drawn: `render`
+   *  draws it again with everything else, and it is not news again. */
+  private errorEl(): HTMLElement | null {
+    const fresh = this.errorNew;
+    this.errorNew = false;
+    return this.error ? h('p', { class: 'news-error', role: fresh ? 'alert' : null }, this.error) : null;
   }
 
   private renderBar(): void {
@@ -1449,7 +1469,9 @@ export class NewsView {
     if (this.threadsMore) {
       const more = h('button', { class: 'news-more' }, 'Older threads');
       more.onclick = () => {
-        more.onclick = null;
+        // Busy, not disabled, so it keeps the focus until what it adds arrives.
+        if (more.ariaDisabled === 'true') return;
+        more.ariaDisabled = 'true';
         void this.loadOlderThreads();
       };
       out.push(more);
@@ -1496,7 +1518,9 @@ export class NewsView {
     if (this.articlesMore) {
       const more = h('button', { class: 'news-more' }, 'More of this thread');
       more.onclick = () => {
-        more.onclick = null;
+        // Busy, not disabled, so it keeps the focus until what it adds arrives.
+        if (more.ariaDisabled === 'true') return;
+        more.ariaDisabled = 'true';
         void this.loadMoreArticles();
       };
       out.push(more);

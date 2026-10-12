@@ -71,4 +71,33 @@ upload_files = true
     await expect(view.locator('.file-row', { hasText: 'hello.txt' })).toBeVisible();
     expect(readFileSync(join(server.hlidDir, 'files/Uploads/hello.txt'), 'utf8')).toBe('hello from the browser');
   });
+
+  test('Cancel keeps the focus through the progress of a long upload', async ({ browser }) => {
+    const page = await (await browser.newContext()).newPage();
+    // Each piece held back a moment, so the strip says how far it has got
+    // a few times before the upload is done.
+    await page.route('**/files/upload/**', async (route) => {
+      await new Promise((r) => setTimeout(r, 400));
+      await route.continue();
+    });
+    await page.goto(`/?server=${encodeURIComponent(server.wsUrl.replace('127.0.0.1', 'localhost'))}`);
+    await page.getByLabel('Account').fill('uploader');
+    await page.getByLabel('Password').fill('pw');
+    await page.getByRole('button', { name: 'Connect', exact: true }).click();
+    await page.locator('.rail-item', { hasText: 'Files' }).click();
+    const view = page.locator('.files-view');
+    await view.locator('.file-row', { hasText: 'Uploads' }).click();
+    await view.getByRole('button', { name: 'Upload', exact: true }).focus();
+    await view.locator('.files-bar input[type=file]').setInputFiles({
+      name: 'big.bin',
+      mimeType: 'application/octet-stream',
+      buffer: Buffer.alloc(3 * 1024 * 1024 + 1),
+    });
+    const strip = page.locator('.files-transfer');
+    for (const sent of ['1.0 MiB of', '2.0 MiB of']) {
+      await expect(strip).toContainText(sent);
+      await expect(strip.getByRole('button', { name: 'Cancel' })).toBeFocused();
+    }
+    await expect(strip).toHaveText('Uploaded big.bin.', { timeout: 20_000 });
+  });
 });

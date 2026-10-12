@@ -176,7 +176,12 @@ export class App {
    *  which on this page has meant the voice session since before there
    *  were any. */
   private images = new MediaCache();
-  private banner = new BannerStrip();
+  // The composer, or with the chat covered, the rail's way back to what
+  // covers it.
+  private banner = Object.assign(new BannerStrip(), {
+    onHidden: () =>
+      (this.composer.offsetParent ? this.composer : this.rail.querySelector<HTMLElement>('[aria-current="page"]'))?.focus(),
+  });
   /** An image uploaded and waiting for the line that will carry it, and
    *  the file name the chip shows it under. Attaching uploads
    *  immediately — the server has to see the bytes to say whether it

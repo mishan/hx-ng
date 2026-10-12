@@ -307,6 +307,7 @@ export class AccountsView {
             { class: 'ask-check', title: yours ? name : `${name}: you do not hold this, so you cannot give it` },
             box,
             ` ${label}`,
+            yours ? null : h('span', { class: 'sr-only' }, ': you do not hold this, so you cannot give it'),
           );
         }),
       );

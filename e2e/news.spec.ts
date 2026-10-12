@@ -287,7 +287,9 @@ ng_requests = 0
     await expect(toggle).toBeChecked();
 
     await editor.locator('.news-subject-input').fill('Formatting');
-    await editor.locator('.news-body-input').fill('# Heading\n\nSome **bold**, and `#1` in code.\n\n- one\n- two');
+    await editor
+      .locator('.news-body-input')
+      .fill(`# Heading\n\nSome **bold**, and \`#1\` in code.\n\n- one\n- two\n\n\`\`\`\n${'wide '.repeat(80)}\n\`\`\``);
     await editor.getByRole('button', { name: 'Preview', exact: true }).click();
     await expect(editor.locator('.news-preview').getByRole('heading', { name: 'Heading', level: 3 })).toBeVisible();
     await editor.getByRole('button', { name: 'Edit', exact: true }).click();
@@ -297,7 +299,9 @@ ng_requests = 0
     await expect(body.getByRole('heading', { name: 'Heading', level: 3 })).toBeVisible();
     await expect(body.locator('strong')).toHaveText('bold');
     await expect(body.locator('li')).toHaveText(['one', 'two']);
-    await expect(body.locator('code')).toHaveText('#1');
+    await expect(body.locator('p code')).toHaveText('#1');
+    // Wider than the column, the block scrolls, and a keyboard can reach it.
+    await expect(body.getByRole('region', { name: 'Code' })).toHaveAttribute('tabindex', '0');
 
     // --- a hostile answer, drawn -----------------------------------------
     // The library's tests say what the runs are; only a page shows what

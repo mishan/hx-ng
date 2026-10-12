@@ -133,7 +133,8 @@ input, textarea {
 /* Busy: still focusable, so the focus is not dropped while it waits. */
 button[aria-disabled='true'] { opacity: 0.55; cursor: progress; }
 
-input:focus-visible, textarea:focus-visible, select:focus-visible, button:focus-visible {
+input:focus-visible, textarea:focus-visible, select:focus-visible, button:focus-visible,
+.md-pre:focus-visible, .md-table-wrap:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 1px;
 }

@@ -59,12 +59,15 @@ upload_files = true
 
     await view.locator('.file-row', { hasText: 'Uploads' }).click();
     await expect(view.getByRole('button', { name: 'Upload', exact: true })).toBeVisible();
+    await view.getByRole('button', { name: 'Upload', exact: true }).focus();
     await view.locator('.files-bar input[type=file]').setInputFiles({
       name: 'hello.txt',
       mimeType: 'text/plain',
       buffer: Buffer.from('hello from the browser'),
     });
     await expect(page.locator('.files-transfer')).toHaveText('Uploaded hello.txt.');
+    await expect(page.locator('.files-outcome')).toHaveText('Uploaded hello.txt.');
+    await expect(view.getByRole('button', { name: 'Upload', exact: true })).toBeFocused();
     await expect(view.locator('.file-row', { hasText: 'hello.txt' })).toBeVisible();
     expect(readFileSync(join(server.hlidDir, 'files/Uploads/hello.txt'), 'utf8')).toBe('hello from the browser');
   });

@@ -22,6 +22,11 @@ body.tiled .panesroot {
   --pane-held: var(--accent);
 }
 
+/* A divider is a control, and wants 3:1 where a border is decoration. */
+body.tiled .panesplit {
+  --pane-line: var(--muted);
+}
+
 /* The shell's own grid is the layout the tiler is replacing; while it is
    on, the container is a column with the call bar and the video strip
    above it. */
@@ -78,8 +83,3 @@ body.tiled .panebody > .mod-view[hidden],
 body.tiled .panebody > .accounts-view[hidden] {
   display: flex !important;
 }
-
-/* mullion's close cross is narrower than the 24px a pointer target
-   needs, and sits against its tab, so neither has room to spare. */
-body.tiled .paneshut { min-width: 24px; }
-body.tiled .panetab, body.tiled .paneshut { min-height: 24px; }

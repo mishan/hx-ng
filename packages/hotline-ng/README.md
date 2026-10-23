@@ -27,7 +27,7 @@ writing a bot or a bridge rather than a page:
 | | Needs | Notes |
 |---|---|---|
 | `protocol` | nothing | Plain data and pure functions. Runs anywhere. |
-| `Connection` | `WebSocket`, `window` | `window.setTimeout` for the reconnect backoff is the only hard browser tie. `sessionStorage` is reached for behind a try/catch, so resume-across-reloads switches itself off where there is none rather than failing. |
+| `Connection` | `WebSocket` | A global `WebSocket` is the only tie, so Node 22 and later run it as is. `sessionStorage` is reached for behind a try/catch, so resume-across-reloads switches itself off where there is none rather than failing. |
 | `VoiceSession` | WebRTC, `getUserMedia`, `document` | `RTCPeerConnection`, `navigator.mediaDevices`, `window.isSecureContext`, and **one hidden `<audio>` element per inbound audio mid, appended to `document.body`**. |
 
 That last one is the only DOM this package touches, and it is worth

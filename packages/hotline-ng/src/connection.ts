@@ -12,7 +12,7 @@
  * afterwards — it is this hook, and it sees exactly what the socket saw.
  */
 
-import { wsToHttp } from './identity.js';
+import { AuthError, SERVER_CHALLENGE_REFUSED, WRONG_HOST, wsToHttp } from './identity.js';
 import {
   decimalU64,
   parseDecimalU64,
@@ -752,6 +752,13 @@ export class Connection {
       this.retryTimer = null;
       this.attach().catch((e) => {
         if (this.closing) return;
+        // Not the server a proof would be for, however often it is asked.
+        if (
+          e instanceof AuthError &&
+          (e.status === 421 || e.code === WRONG_HOST || e.code === SERVER_CHALLENGE_REFUSED)
+        ) {
+          return this.end(e.message);
+        }
         if (!(e instanceof WireFailure)) return this.scheduleRetry();
         // Pacing is never fatal, and a session refused a resume for its
         // account's other connections lives on until its grace lapses.

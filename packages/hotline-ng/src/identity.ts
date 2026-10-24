@@ -48,13 +48,20 @@ export class IdentityError extends Error {
   }
 }
 
-/** A refusal reported by `/identity/auth` itself — `{ error, text }` —
- *  as opposed to an `IdentityError`, which is this client finding
- *  something wrong before or after that call. */
+/** A refusal reported by `/identity/auth` itself — `{ error, text }`,
+ *  with the HTTP status — or this client's own: of a challenge the
+ *  server did not vouch for (`SERVER_CHALLENGE_REFUSED`), or of an
+ *  `auth` endpoint on another host than the challenge's (`WRONG_HOST`,
+ *  with no status). As opposed to an `IdentityError`, which is this
+ *  client finding something wrong with an object it was handed. A
+ *  `421`, `wrong_host` or a refused challenge means this is not the
+ *  server the proof would be for, and proving it again will not change
+ *  that. */
 export class AuthError extends Error {
   constructor(
     readonly code: string,
     message: string,
+    readonly status?: number,
   ) {
     super(message);
     this.name = 'AuthError';
@@ -351,25 +358,71 @@ export function decodeCard(bytes: Uint8Array): Card {
 // --- login proof (docs/hotline-ng-identity.md §3.6, table in
 // docs/hotline-ng-auth.md §6.2) ------------------------------------------
 
+// Both versions of the proof sign under this one domain; `v`, which the
+// signature covers, tells them apart.
 export const LOGIN_PROOF_DOMAIN = 'hl-identity/login/v1';
+export const SERVER_CHALLENGE_DOMAIN = 'hl-identity/server-challenge/v1';
+/** How far past its `expires` a server challenge is still taken, as a
+ *  server's default `[identity] clock_skew` allows a proof's `time`. */
+export const SERVER_CHALLENGE_SKEW_SECONDS = 300;
+export const SERVER_CHALLENGE_REFUSED = 'bad_server_challenge';
+export const WRONG_HOST = 'wrong_host';
+
+/**
+ * The form a host is signed and compared in (§6.2): `host[:port]` as the
+ * WHATWG URL Standard serializes it — lowercase, an IDN as its A-label,
+ * IPv6 compressed in brackets, a trailing dot kept — with port 80 or 443
+ * dropped whatever the scheme, because a server behind a TLS proxy
+ * cannot tell which of the two the client used. `null` for anything
+ * that is not an authority alone. Mirrors `proof.rs`'s `canonical_host`,
+ * byte for byte, since the server compares the bytes.
+ */
+export function canonicalHost(authority: string): string | null {
+  if (authority === '' || /[/\\?#@]/.test(authority)) return null;
+  let url: URL;
+  try {
+    url = new URL(`http://${authority}/`);
+  } catch {
+    return null;
+  }
+  if (url.hostname === '') return null;
+  // `http:` already leaves 80 out.
+  return url.port === '' || url.port === '443' ? url.hostname : `${url.hostname}:${url.port}`;
+}
+
+/** The host a request to `endpoint` goes to — what its `Host` header
+ *  says. A page-relative endpoint (`wsToHttp`'s `''`) resolves against
+ *  the page, as `fetch` resolves it. */
+function addressedHost(endpoint: string): string {
+  const base = typeof location !== 'undefined' ? location.href : undefined;
+  const host = canonicalHost(new URL(endpoint, base).host);
+  if (host === null) throw new IdentityError('bad-field', `${endpoint} names no host`);
+  return host;
+}
 
 export interface LoginProofFields {
   challenge: Uint8Array;
   serverKey: Uint8Array;
+  /** The host `challenge` and `auth` are sent to: `Challenge.host`. */
+  host: string;
   device: Uint8Array;
   /** Unix seconds. */
   time: number;
 }
 
-/** Build and sign a login proof with the device's non-extractable
- *  signing key. The only signature a Phase B client ever produces. */
+/** Build and sign a `v = 2` login proof with the device's
+ *  non-extractable signing key. The only signature a Phase B client
+ *  ever produces. */
 export async function signLoginProof(deviceSignKey: CryptoKey, fields: LoginProofFields): Promise<Uint8Array> {
+  const host = canonicalHost(fields.host);
+  if (host === null) throw new IdentityError('bad-field', 'host');
   const unsigned: [string, CborValue][] = [
     ['challenge', cBytes(fields.challenge)],
     ['server_key', cBytes(fields.serverKey)],
+    ['host', cText(host)],
     ['device', cBytes(fields.device)],
     ['time', cUint(fields.time)],
-    ['v', cUint(1)],
+    ['v', cUint(2)],
   ];
   const body = encode(cMap(unsigned));
   const message = concatBytes(textEncoder.encode(LOGIN_PROOF_DOMAIN), Uint8Array.of(0), body);
@@ -618,24 +671,96 @@ export async function fetchDiscovery(httpBase: string): Promise<Discovery> {
 export interface Challenge {
   challenge: Uint8Array;
   serverKey: Uint8Array;
+  /** The host the challenge was fetched from and vouched for, which the
+   *  proof names and `auth` must be sent to. */
+  host: string;
   expiresIn: number;
 }
 
+export interface ServerChallenge {
+  challenge: Uint8Array;
+  serverKey: Uint8Array;
+  host: string;
+  /** Unix seconds. */
+  expires: number;
+}
+
+/** Shape only, `host` in canonical form included; the signature is
+ *  `verifyServerChallenge`'s. */
+export function decodeServerChallenge(bytes: Uint8Array): ServerChallenge {
+  const { value } = openEnvelope(bytes);
+  const host = reqText(value, 'host');
+  if (canonicalHost(host) !== host) throw new IdentityError('bad-field', 'host');
+  return {
+    challenge: reqBytesN(value, 'challenge', 32),
+    serverKey: reqBytesN(value, 'server_key', 32),
+    host,
+    expires: reqUint(value, 'expires'),
+  };
+}
+
+/**
+ * The client's half of §6.2 step 1, before anything is signed, given
+ * the reply's `server_challenge` as it arrived: the server key's
+ * signature over the challenge, that key and the challenge
+ * the reply carried, the host this client addressed, and not expired.
+ * Without it a server that publishes another's key could hand on that
+ * server's challenge and spend the proof there (hxd-ng's
+ * `docs/hotline-ng-auth-rationale.md` §5). Every failure, a missing
+ * `server_challenge` included, is the same refusal: there is no `v = 1`
+ * to fall back to, or a relaying server need only strip it.
+ */
+export async function verifyServerChallenge(
+  serverChallenge: unknown,
+  given: { challenge: Uint8Array; serverKey: Uint8Array; host: string },
+  now: number,
+): Promise<void> {
+  const refuse = (why: string) =>
+    new AuthError(SERVER_CHALLENGE_REFUSED, `The server at ${given.host} did not vouch for its challenge (${why}).`);
+  if (serverChallenge === undefined || serverChallenge === null) {
+    throw refuse(`none in the reply: ${given.host} is not among its [identity] hosts, or it predates them`);
+  }
+  let sc: ServerChallenge;
+  try {
+    if (typeof serverChallenge !== 'string') throw new IdentityError('bad-field', 'server_challenge');
+    const bytes = base64urlToBytes(serverChallenge);
+    sc = decodeServerChallenge(bytes);
+    await verifyEnvelope(bytes, sc.serverKey, SERVER_CHALLENGE_DOMAIN);
+  } catch (e) {
+    throw refuse(e instanceof Error ? e.message : String(e));
+  }
+  if (bytesToHex(sc.challenge) !== bytesToHex(given.challenge) || bytesToHex(sc.serverKey) !== bytesToHex(given.serverKey)) {
+    throw refuse('signed for another challenge or key than the reply gave');
+  }
+  if (sc.host !== given.host) throw refuse(`signed for ${sc.host}`);
+  if (sc.expires + SERVER_CHALLENGE_SKEW_SECONDS < now) throw refuse('expired');
+}
+
 export async function fetchChallenge(endpoint: string): Promise<Challenge> {
+  const host = addressedHost(endpoint);
   const res = await fetch(endpoint, { method: 'POST' });
   if (!res.ok) throw new IdentityError('server-error', `challenge: HTTP ${res.status}`);
-  const raw = (await res.json()) as { challenge: string; server_key: string; expires_in: number };
-  return {
+  const raw = (await res.json()) as { challenge: string; server_key: string; expires_in: number; server_challenge?: unknown };
+  const challenge = {
     challenge: base64urlToBytes(raw.challenge),
     serverKey: base64urlToBytes(raw.server_key),
+    host,
     expiresIn: raw.expires_in,
   };
+  await verifyServerChallenge(raw.server_challenge, challenge, Math.floor(Date.now() / 1000));
+  return challenge;
 }
 
 export interface AuthRequest {
   card: Uint8Array;
   deviceCert: Uint8Array;
   proof: Uint8Array;
+  /** The host the proof names, `Challenge.host`. `auth` must go where
+   *  `challenge` went (§6.2), so an endpoint elsewhere is refused before
+   *  the proof is sent: discovery's endpoints are not checked to be
+   *  paths, and one that sent `challenge` to another server would have
+   *  this client hand it a proof for this one. */
+  host: string;
   /** The hop *behind* this client, per hxd-ng's `docs/hotline-ng-auth.md`
    *  §6.2 — absent means the default, `local`. Only a tunnel forwarding
    *  over a non-loopback hop should ever say `cleartext`; hx-ng is
@@ -661,6 +786,10 @@ export interface AuthSuccess {
 }
 
 export async function postAuth(endpoint: string, req: AuthRequest): Promise<AuthSuccess> {
+  const host = addressedHost(endpoint);
+  if (host !== req.host) {
+    throw new AuthError(WRONG_HOST, `The challenge came from ${req.host}, and auth would go to ${host}.`);
+  }
   const body: Record<string, unknown> = {
     card: bytesToBase64url(req.card),
     device_cert: bytesToBase64url(req.deviceCert),
@@ -685,10 +814,10 @@ export async function postAuth(endpoint: string, req: AuthRequest): Promise<Auth
   try {
     raw = text ? JSON.parse(text) : {};
   } catch {
-    throw new AuthError('server_error', `HTTP ${res.status}: ${text.slice(0, 200) || '(empty body)'}`);
+    throw new AuthError('server_error', `HTTP ${res.status}: ${text.slice(0, 200) || '(empty body)'}`, res.status);
   }
   if (!res.ok || raw.error) {
-    throw new AuthError(raw.error ?? 'server_error', raw.text || raw.error || `HTTP ${res.status}`);
+    throw new AuthError(raw.error ?? 'server_error', raw.text || raw.error || `HTTP ${res.status}`, res.status);
   }
   return {
     token: raw.token,

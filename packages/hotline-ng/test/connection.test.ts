@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { Connection, type ConnectionHooks, type Credentials } from '../src/connection';
+import { AuthError, SERVER_CHALLENGE_REFUSED } from '../src/identity';
 import type { HistoryLine, InboxOk, LoginOk, SelfUser, User } from '../src/protocol';
 
 import { installFakeWire, settle, uninstallFakeWire, type FakeServer } from './fake-wire';
@@ -682,5 +683,26 @@ describe('identity login', () => {
     expect(server.sockets[2]?.url).toContain('?token=tok-2');
     expect(server.sent('resume')).toHaveLength(1);
     expect(server.sent('login')).toHaveLength(2);
+  });
+
+  it.each([
+    ['answered wrong_host', new AuthError('wrong_host', 'not here', 421)],
+    ['whose challenge was not vouched for', new AuthError(SERVER_CHALLENGE_REFUSED, 'not vouched')],
+  ])('ends a reconnect %s instead of proving it again', async (_, refusal) => {
+    let calls = 0;
+    server.on('login', () => ({ ok: loginOk({ detach: null }) }));
+    const conn = new Connection(
+      identityCreds(async () => {
+        if (++calls > 1) throw refusal;
+        return 'tok-1';
+      }),
+      {},
+    );
+    await conn.start();
+    conn.drop();
+    // The first backoff, and past where a second try would have been.
+    await new Promise((resolve) => setTimeout(resolve, 1700));
+    expect(calls).toBe(2);
+    expect(conn.state).toBe('offline');
   });
 });

@@ -74,10 +74,17 @@ export function planIdentityLogin(
     const proof = await signLoginProof(device.deviceSign, {
       challenge: challenge.challenge,
       serverKey: challenge.serverKey,
+      host: challenge.host,
       device: devicePub,
       time: Math.floor(Date.now() / 1000),
     });
-    const success = await postAuth(`${httpBase}${di.endpoints.auth}`, { card, deviceCert: cert, proof, create });
+    const success = await postAuth(`${httpBase}${di.endpoints.auth}`, {
+      card,
+      deviceCert: cert,
+      proof,
+      host: challenge.host,
+      create,
+    });
     last = success;
     return success.token;
   };

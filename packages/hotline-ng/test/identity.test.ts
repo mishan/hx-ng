@@ -8,22 +8,29 @@ import {
   base64urlToBytes,
   bytesToBase64url,
   bytesToHex,
+  canonicalHost,
   decodeCard,
   decodeDeviceCert,
   fingerprintOf,
   hexToBytes,
   postAuth,
   decodeBundle,
+  decodeServerChallenge,
+  fetchChallenge,
   fetchDiscovery,
   openBundle,
   pairTag,
   signEnrollRequest,
   signLoginProof,
   verifyEnvelope,
+  verifyServerChallenge,
   wsToHttp,
+  SERVER_CHALLENGE_SKEW_SECONDS,
   DEVICE_CERT_DOMAIN,
   CARD_DOMAIN,
   PAIRING_SECRET_BYTES,
+  SERVER_CHALLENGE_REFUSED,
+  WRONG_HOST,
 } from '../src/identity';
 
 import vectors from './identity-vectors.json';
@@ -110,14 +117,130 @@ describe('decodeCard', () => {
 describe('signLoginProof', () => {
   it('produces the exact bytes hxd-ng does, Ed25519 being deterministic', async () => {
     const deviceKey = await importSeed(vectors.keys.device.seed_hex);
-    const f = vectors.login_proof.object.fields;
-    const sealed = await signLoginProof(deviceKey, {
-      challenge: hexToBytes(f.challenge),
-      serverKey: hexToBytes(f.server_key),
-      device: hexToBytes(f.device),
-      time: f.time,
+    const f = vectors.login_proof_v2.object.fields;
+    const fields = { challenge: hexToBytes(f.challenge), serverKey: hexToBytes(f.server_key), device: hexToBytes(f.device), time: f.time };
+    // Signed in canonical form whatever form it was handed in.
+    for (const host of [f.host, 'HL.Example:5700']) {
+      expect(bytesToHex(await signLoginProof(deviceKey, { ...fields, host }))).toBe(vectors.login_proof_v2.object.signed_hex);
+    }
+    await expect(signLoginProof(deviceKey, { ...fields, host: 'https://hl.example' })).rejects.toThrow(IdentityError);
+  });
+});
+
+describe('canonicalHost', () => {
+  // `proof.rs`'s own table: the server compares these bytes.
+  it.each([
+    ['HL.Example', 'hl.example'],
+    ['hl.example:443', 'hl.example'],
+    ['hl.example:80', 'hl.example'],
+    ['hl.example:080', 'hl.example'],
+    ['hl.example:5700', 'hl.example:5700'],
+    ['hl.example.', 'hl.example.'],
+    ['[2001:DB8:0:0:0:0:0:1]:443', '[2001:db8::1]'],
+    ['[::1]:5700', '[::1]:5700'],
+    ['[fe80::1%25eth0]', null],
+    ['127.0.0.1:80', '127.0.0.1'],
+    ['b\u00fccher.example', 'xn--bcher-kva.example'],
+    ['', null],
+    ['hl.example/path', null],
+    ['user@hl.example', null],
+    ['hl example', null],
+    ['hl.example:99999', null],
+  ])('%j is %j', (given, want) => {
+    expect(canonicalHost(given)).toBe(want);
+  });
+});
+
+describe('verifyServerChallenge', () => {
+  const sc = vectors.server_challenge.object;
+  const given = { challenge: hexToBytes(sc.fields.challenge), serverKey: hexToBytes(sc.fields.server_key), host: sc.fields.host };
+  const signedBytes = hexToBytes(sc.signed_hex);
+  const signed = bytesToBase64url(signedBytes);
+  // One bit of the signature, which starts after `{ v: 1, sig: bstr(64)` heads.
+  const flippedBytes = signedBytes.slice();
+  flippedBytes[10]! ^= 1;
+  const flipped = bytesToBase64url(flippedBytes);
+  const notCanonicalBytes = hexToBytes(vectors.rejects.find((r) => r.object === 'server_challenge')!.hex);
+  const notCanonical = bytesToBase64url(notCanonicalBytes);
+
+  it('decodes the reject vector to a refusal of its host', () => {
+    expect(() => decodeServerChallenge(notCanonicalBytes)).toThrow(new IdentityError('bad-field', 'host'));
+  });
+
+  it.each([
+    ['at its expiry', signed, given, sc.fields.expires],
+    ['inside the skew past it', signed, given, sc.fields.expires + SERVER_CHALLENGE_SKEW_SECONDS],
+  ])('accepts the vector %s', async (_, bytes, g, now) => {
+    await expect(verifyServerChallenge(bytes, g, now)).resolves.toBeUndefined();
+  });
+
+  it.each([
+    ['missing', undefined, given, sc.fields.expires],
+    ['null', null, given, sc.fields.expires],
+    ['not a string', 7, given, sc.fields.expires],
+    ['not base64url', 'not base64url!', given, sc.fields.expires],
+    ['another challenge', signed, { ...given, challenge: new Uint8Array(32) }, sc.fields.expires],
+    ['another key than the reply named', signed, { ...given, serverKey: hexToBytes(vectors.keys.device.public_hex) }, sc.fields.expires],
+    ['addressed as another host', signed, { ...given, host: 'b.example:5700' }, sc.fields.expires],
+    ['addressed on another port', signed, { ...given, host: 'hl.example' }, sc.fields.expires],
+    ['expired', signed, given, sc.fields.expires + SERVER_CHALLENGE_SKEW_SECONDS + 1],
+    ['a bit flipped in its signature', flipped, given, sc.fields.expires],
+    ['a host not in canonical form', notCanonical, given, sc.fields.expires],
+  ])('refuses one %s', async (_, bytes, g, now) => {
+    await expect(verifyServerChallenge(bytes, g, now)).rejects.toMatchObject({
+      name: 'AuthError',
+      code: SERVER_CHALLENGE_REFUSED,
     });
-    expect(bytesToHex(sealed)).toBe(vectors.login_proof.object.signed_hex);
+  });
+});
+
+describe('fetchChallenge', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
+
+  const sc = vectors.server_challenge.object;
+  const reply = (over: Record<string, unknown> = {}) => {
+    const fetched = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            challenge: bytesToBase64url(hexToBytes(sc.fields.challenge)),
+            server_key: bytesToBase64url(hexToBytes(sc.fields.server_key)),
+            expires_in: 60,
+            server_challenge: bytesToBase64url(hexToBytes(sc.signed_hex)),
+            ...over,
+          }),
+        ),
+    );
+    vi.stubGlobal('fetch', fetched);
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(sc.fields.expires * 1000);
+    return fetched;
+  };
+
+  it.each([
+    ['an absolute endpoint, outside a browser', 'http://HL.example:5700/identity/challenge', undefined],
+    ['a page-relative one, from the page', '/identity/challenge', { href: 'http://hl.example:5700/app/' }],
+  ])('takes the host it was vouched for from %s', async (_, endpoint, page) => {
+    if (page) vi.stubGlobal('location', page);
+    reply();
+    expect((await fetchChallenge(endpoint)).host).toBe(sc.fields.host);
+  });
+
+  it('refuses a reply that carries no server_challenge, rather than fall back to v = 1', async () => {
+    reply({ server_challenge: undefined });
+    await expect(fetchChallenge('http://hl.example:5700/identity/challenge')).rejects.toMatchObject({
+      code: SERVER_CHALLENGE_REFUSED,
+    });
+  });
+
+  it('refuses one vouched for under another name than this client addressed', async () => {
+    reply();
+    await expect(fetchChallenge('http://127.0.0.1:5700/identity/challenge')).rejects.toMatchObject({
+      code: SERVER_CHALLENGE_REFUSED,
+    });
   });
 });
 
@@ -337,7 +460,7 @@ describe('postAuth', () => {
     vi.unstubAllGlobals();
   });
 
-  const req = { card: Uint8Array.of(1), deviceCert: Uint8Array.of(2), proof: Uint8Array.of(3) };
+  const req = { card: Uint8Array.of(1), deviceCert: Uint8Array.of(2), proof: Uint8Array.of(3), host: 'host' };
 
   it('parses a successful response', async () => {
     vi.stubGlobal(
@@ -354,15 +477,26 @@ describe('postAuth', () => {
     expect(success).toMatchObject({ token: 'tok', outcome: 'guest', handle: null, account: null });
   });
 
-  it('reports the server error code and text on a well-formed refusal', async () => {
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(async () => new Response(JSON.stringify({ error: 'bad_cert', text: 'nope' }), { status: 401 })),
-    );
-    await expect(postAuth('https://host/identity/auth', req)).rejects.toMatchObject({
-      code: 'bad_cert',
-      message: 'nope',
-    });
+  it.each([
+    ['https://a.example/identity/auth'],
+    ['//a.example/identity/auth'],
+    ['/\\a.example/identity/auth'],
+  ])('sends no proof to %j, which is not where the page-relative challenge went', async (endpoint) => {
+    const fetched = vi.fn(async () => new Response(JSON.stringify({ token: 'tok' })));
+    vi.stubGlobal('fetch', fetched);
+    vi.stubGlobal('location', { href: 'http://hl.example:5700/app/' });
+    await expect(postAuth(endpoint, { ...req, host: 'hl.example:5700' })).rejects.toMatchObject({ code: WRONG_HOST });
+    expect(fetched).not.toHaveBeenCalled();
+    await expect(postAuth('/identity/auth', { ...req, host: 'hl.example:5700' })).resolves.toMatchObject({ token: 'tok' });
+  });
+
+  it.each([
+    ['bad_cert', 401],
+    ['unsupported_proof', 401],
+    ['wrong_host', 421],
+  ])('reports the server error code, text and status of a well-formed %s refusal', async (code, status) => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ error: code, text: 'nope' }), { status })));
+    await expect(postAuth('https://host/identity/auth', req)).rejects.toMatchObject({ code, message: 'nope', status });
   });
 
   it('reports a non-JSON error body as an AuthError naming the status, not a bare SyntaxError', async () => {

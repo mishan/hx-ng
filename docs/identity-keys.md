@@ -498,6 +498,24 @@ Worth writing down because it bounds how often any of this runs.
 A **fresh login** needs `POST /identity/challenge`, then a login proof
 signed by the device key, then `POST /identity/auth`, then the upgrade
 with `?token=…` inside 60 seconds. Two round trips and one signature.
+
+Nothing is signed until the server has vouched for the challenge
+(hxd-ng's `hotline-ng-auth.md` §6.2): the reply's `server_challenge`,
+under the key the reply names, for the challenge it gave, for the host
+this client addressed, and not expired. The proof is `v = 2` and names
+that host too, so a server that publishes another's key cannot hand on
+that server's challenge and spend the answer there. The host is the
+authority `fetch` sends the request to — the page's own when the
+endpoint is page-relative, the given base's under Node — lowercase,
+with port 80 or 443 left off (`canonicalHost`). A reply without
+`server_challenge`, or one that fails a check, ends the login with
+`bad_server_challenge`; there is no falling back to `v = 1`, which a
+relaying server need only strip the signature to bring about. That
+refusal and a `421 wrong_host` from `auth` are the two a reconnect
+does not retry: it is the wrong server, however often it is asked.
+Pinning a server's key per host on that signature is the signed
+messages' business, not done here.
+
 On that socket the `login` frame omits `login` and `password` — the
 server ignores them on an identity socket (spec §6.2) and there is no
 reason to send a password it will not read.
@@ -560,7 +578,14 @@ other than the one that served the page.
 The Vite proxy in `vite.config.ts` stays regardless: it forwards
 `/identity`, `/.well-known` and `/ng` to :5700 so that `npm run dev` on
 :5701 is same-origin, which is still the right shape for the dev loop and
-does not depend on the server being a recent build.
+does not depend on the server being a recent build. It passes `/identity`
+on with the `Host` the browser sent, the page's, since that is the host
+the proof names (§8) when the ws URL has the page's hostname and the
+calls are page-relative; so the server's `[identity] hosts` lists
+`localhost:5701`, or whichever name the page is opened by. For a server
+on another hostname the proof names that server's own address instead.
+A reverse proxy in production must pass `Host` on the same way, and it
+is the server that lists the public name in its `[identity] hosts`.
 
 **A CBOR codec in the client.** hx-ng has no runtime dependencies and
 this should not be the reason it grows one. The login proof (§3.6) is

@@ -5,7 +5,7 @@ Who holds which key, where it is kept, and what a page can do with it.
 > Every `*.md` named here without a path is a **hxd-ng** document —
 > `hotline-ng-identity.md`, `hotline-ng-auth.md`, `identity-enrollment.md`
 > and the identity threat model all live in that repository's `docs/`,
-> not this one. This is the only file in hx-ng's `docs/`.
+> not this one.
 
 `hotline-ng-identity.md` defines two keys per person — a long-lived
 *identity key* that certifies devices and signs the user card, and a

@@ -231,6 +231,9 @@ unattested = "guest"
 # client only on the server's own origin: the fragment carries the
 # pairing secret, and a mailbox free to name any origin could collect it.
 web = "http://localhost:5701/"
+# The host the page's login proofs name: its own, which the dev proxy
+# passes through as Host.
+hosts = ["127.0.0.1:5701"]
 # The default is 4, and it is right for a deployment. This suite is not
 # one: every test here is a different holder on 127.0.0.1 against one
 # server, and a holder that is killed rather than closed leaves its

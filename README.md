@@ -47,6 +47,13 @@ cargo run --bin hxd     # in the hxd-ng checkout; [ng] bind = "127.0.0.1:5700"
 `npm run dev` serves on <http://localhost:5701> with hot reload, bound to
 every interface so a phone on the LAN can reach it.
 
+Logging in with an identity there also wants the server's `[identity]
+hosts` to list the host the login proof names. That is the page's,
+`localhost:5701` or whichever name it is opened by, when the server's ws
+URL has the page's hostname, since the identity calls then go through
+the dev proxy, which passes `Host` on as the browser sent it. Otherwise
+it is the server's own address, `elsewhere.example:5700` say.
+
 A production build lands in `dist/` and is a directory of static files —
 no server-side anything:
 

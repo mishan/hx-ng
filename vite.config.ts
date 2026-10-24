@@ -57,7 +57,12 @@ export default defineConfig({
     // on the same machine. A custom server elsewhere still needs its own
     // CORS; this proxy only covers the default.
     proxy: {
-      '/identity': 'http://127.0.0.1:5700',
+      // `Host` as the browser sent it, which the string form would
+      // rewrite to the target's: a login proof names the host the page
+      // addressed, and the server checks it against `Host` and against
+      // its `[identity] hosts` — which therefore list this dev server,
+      // `localhost:5701`.
+      '/identity': { target: 'http://127.0.0.1:5700', changeOrigin: false },
       '/media': 'http://127.0.0.1:5700',
       // Exactly `/banner`, not everything that starts with it.
       '^/banner(\\?|$)': 'http://127.0.0.1:5700',

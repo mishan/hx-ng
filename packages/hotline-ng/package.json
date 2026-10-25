@@ -2,7 +2,7 @@
   "name": "@hotline-ng/client",
   "version": "0.1.0",
   "description": "A TypeScript client for the Hotline-ng wire: one session across however many WebSockets it takes, plus the voice and video the SFU serves.",
-  "license": "GPL-2.0-or-later",
+  "license": "Apache-2.0",
   "type": "module",
   "sideEffects": false,
   "keywords": [

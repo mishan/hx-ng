@@ -275,3 +275,8 @@ protocol it implements is itself a draft; expect the shapes to follow
 the spec rather than semver until both settle.
 
 GPL-2.0-or-later.
+
+## License
+
+Apache-2.0 (`LICENSE`), so a program under any license can use it. The rest of
+hx-ng is GPL-2.0-or-later.

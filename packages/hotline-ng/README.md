@@ -274,8 +274,6 @@ Version 0.1.0, extracted from the `hx-ng` web client and used by it. The
 protocol it implements is itself a draft; expect the shapes to follow
 the spec rather than semver until both settle.
 
-GPL-2.0-or-later.
-
 ## License
 
 Apache-2.0 (`LICENSE`), so a program under any license can use it. The rest of

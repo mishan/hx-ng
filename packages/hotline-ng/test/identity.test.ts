@@ -546,8 +546,86 @@ describe('rejects', () => {
     );
   });
 
+  it('card: small-order identity key decodes, but the key is refused', async () => {
+    const bytes = hexToBytes(byName('small-order identity key').hex);
+    await expect(verifyEnvelope(bytes, decodeCard(bytes).identity, CARD_DOMAIN)).rejects.toMatchObject({
+      kind: 'invalid-key',
+    });
+  });
+
   it.each(['non-shortest integer head', 'trailing byte'])('login_proof: %s', (name) => {
     const bytes = hexToBytes(byName(name).hex);
     expect(() => decodeCanonical(bytes)).toThrow(CborError);
+  });
+});
+
+describe('weak Ed25519 encodings', () => {
+  const P = 2n ** 255n - 19n;
+  const L = 2n ** 252n + 27742317777372353535851937790883648493n;
+  const le = (n: bigint) => Uint8Array.from({ length: 32 }, (_, i) => Number((n >> BigInt(8 * i)) & 0xffn));
+  const leUint = (b: Uint8Array) => b.reduceRight((n, x) => (n << 8n) | BigInt(x), 0n);
+  const order8 = 2707385501144840649318225287225658788936804267575313519463743609750303402022n;
+  // Each y either sign, and y + p wherever it fits in 255 bits.
+  const smallOrder = [0n, 1n, P - 1n, order8, P - order8, P, P + 1n].flatMap((y) => [le(y), le(y | (1n << 255n))]);
+  // A point of large order, y = 3, in its second encoding.
+  const alias = le(3n + P);
+  // R = the neutral element, S = 0: a signature on anything for an
+  // engine that takes a small-order key.
+  const anything = Uint8Array.of(1, ...new Uint8Array(63));
+  const sc = vectors.server_challenge.object;
+
+  function replaced(signedHex: string, fields: Record<string, Uint8Array>): Uint8Array {
+    const v = decodeCanonical(hexToBytes(signedHex));
+    if (v.t !== 'map') throw new Error('not a map');
+    return encode(
+      cMap(v.v.map(([k, x]) => {
+        const name = (k as { v: string }).v;
+        return [name, name in fields ? cBytes(fields[name]!) : x] as const;
+      })),
+    );
+  }
+
+  it.each([...smallOrder, alias].map((k) => [bytesToHex(k), k] as const))(
+    'refuses %s as the key of a device certificate, a card and a server challenge',
+    async (_, key) => {
+      const cert = hexToBytes(vectors.device_cert.signed_hex);
+      const card = hexToBytes(vectors.card.signed_hex);
+      const weak = (hex: string, field: string) => replaced(hex, { [field]: key, sig: anything });
+      await expect(openBundle(encodeBundle(weak(vectors.device_cert.signed_hex, 'identity'), card))).rejects.toMatchObject({
+        kind: 'invalid-key',
+      });
+      await expect(openBundle(encodeBundle(cert, weak(vectors.card.signed_hex, 'identity')))).rejects.toMatchObject({
+        kind: 'invalid-key',
+      });
+      const challenge = bytesToBase64url(weak(sc.signed_hex, 'server_key'));
+      const given = { challenge: hexToBytes(sc.fields.challenge), serverKey: key, host: sc.fields.host };
+      await expect(verifyServerChallenge(challenge, given, sc.fields.expires)).rejects.toMatchObject({
+        code: SERVER_CHALLENGE_REFUSED,
+        message: expect.stringContaining('invalid-key'),
+      });
+    },
+  );
+
+  it('refuses the key in its second encoding as invalid, and verifies the first only against its signature', async () => {
+    const bytes = hexToBytes(vectors.card.signed_hex);
+    await expect(verifyEnvelope(bytes, alias, CARD_DOMAIN)).rejects.toMatchObject({ kind: 'invalid-key' });
+    await expect(verifyEnvelope(bytes, le(3n), CARD_DOMAIN)).rejects.toMatchObject({ kind: 'bad-signature' });
+  });
+
+  it('refuses a small-order R even from the key it verifies under', async () => {
+    // S = k·a makes [S]B - [k]A the neutral element, so this holds under
+    // the equation, and Chromium's and Firefox's WebCrypto accept it.
+    const sha512 = async (b: Uint8Array) => new Uint8Array(await crypto.subtle.digest('SHA-512', b as BufferSource));
+    const h = await sha512(hexToBytes(vectors.keys.identity.seed_hex));
+    const a = (leUint(h.subarray(0, 32)) & ((1n << 254n) - 8n)) | (1n << 254n);
+    const R = le(1n);
+    const A = hexToBytes(vectors.keys.identity.public_hex);
+    const k = leUint(await sha512(new Uint8Array([...R, ...A, ...hexToBytes(vectors.card.signature_input_hex)]))) % L;
+    const sig = new Uint8Array([...R, ...le((k * a) % L)]);
+    const bytes = replaced(vectors.card.signed_hex, { sig });
+    const verify = vi.spyOn(crypto.subtle, 'verify');
+    await expect(verifyEnvelope(bytes, A, CARD_DOMAIN)).rejects.toMatchObject({ kind: 'bad-signature' });
+    expect(verify).not.toHaveBeenCalled();
+    verify.mockRestore();
   });
 });

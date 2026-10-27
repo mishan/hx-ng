@@ -17,17 +17,22 @@
  * certificate arrives later, pasted in from `hlid` (§7.1).
  */
 
-import { bytesToHex, type ServerPin, type ServerPinStore } from '@hotline-ng/client';
+import { bytesToHex, type SealedReplay, type ServerPin, type ServerPinStore } from '@hotline-ng/client';
 
 import type { GuidMemory } from '../signing';
 
 const DB_NAME = 'hxd-ng.identity';
-const DB_VERSION = 3;
+const DB_VERSION = 4;
 const DEVICES_STORE = 'devices';
 const META_STORE = 'meta';
 const SERVER_PINS_STORE = 'serverPins';
 const NEWS_GUIDS_STORE = 'newsGuids';
+const SEALED_STORE = 'sealedReplay';
+const SEALED_UNTIL_INDEX = 'until';
+const PEERS_STORE = 'peers';
 const ACTIVE_KEY = 'active';
+/** The latest time the clock has shown a sealed message's reader. */
+const SEALED_LATEST_KEY = 'sealedLatest';
 /** The identity this browser has enrolled with before, in `meta` rather
  *  than on the device record: it has to outlive "forget this device", or
  *  the check it exists for is one a user can clear by accident. See
@@ -84,6 +89,14 @@ function openDb(): Promise<IDBDatabase> {
       }
       if (!db.objectStoreNames.contains(NEWS_GUIDS_STORE)) {
         db.createObjectStore(NEWS_GUIDS_STORE); // keyed by `<server key hex>:<guid>`
+      }
+      // Keyed by `<signer>/<id hex>`, valued by `{ until }` and indexed
+      // by it, so a prune reads only what it lets go.
+      if (!db.objectStoreNames.contains(SEALED_STORE)) {
+        db.createObjectStore(SEALED_STORE).createIndex(SEALED_UNTIL_INDEX, 'until');
+      }
+      if (!db.objectStoreNames.contains(PEERS_STORE)) {
+        db.createObjectStore(PEERS_STORE); // keyed by `peerKey`
       }
     };
     req.onsuccess = () => resolve(req.result);
@@ -279,5 +292,99 @@ export const newsGuids: GuidMemory = {
     withDb(NEWS_GUIDS_STORE, 'readwrite', (tx) => {
       // ';' sorts just after ':', so this is every key under the server's.
       tx.objectStore(NEWS_GUIDS_STORE).delete(IDBKeyRange.bound(`${bytesToHex(server)}:`, `${bytesToHex(server)};`));
+    }),
+};
+
+const sealedKey = (signer: string, id: Uint8Array) => `${signer}/${bytesToHex(id)}`;
+
+/** The sealed messages this browser accepted (hxd-ng's
+ *  `docs/e2e-messages.md` §3.10), beside the device keys that opened
+ *  them: kept across restarts and shared by every tab, each accept one
+ *  transaction, so two tabs handed one box show it once; and `forget`
+ *  for one accepted that was then never shown, so it can be again. */
+export const sealedReplay: SealedReplay & { forget(signer: string, id: Uint8Array): Promise<void> } = {
+  latest: (now) =>
+    withDb([SEALED_STORE, META_STORE], 'readwrite', async (tx) => {
+      const meta = tx.objectStore(META_STORE);
+      const latest = Math.max(now, (await requestResult<number | undefined>(meta.get(SEALED_LATEST_KEY))) ?? 0);
+      meta.put(latest, SEALED_LATEST_KEY);
+      const store = tx.objectStore(SEALED_STORE);
+      const past = await requestResult(store.index(SEALED_UNTIL_INDEX).getAllKeys(IDBKeyRange.upperBound(latest, true)));
+      for (const key of past) store.delete(key);
+      return latest;
+    }),
+  accepted: (signer, id) =>
+    withDb(SEALED_STORE, 'readonly', async (tx) => {
+      return (await requestResult(tx.objectStore(SEALED_STORE).get(sealedKey(signer, id)))) !== undefined;
+    }),
+  accept: (signer, id, until) =>
+    withDb(SEALED_STORE, 'readwrite', async (tx) => {
+      const store = tx.objectStore(SEALED_STORE);
+      const key = sealedKey(signer, id);
+      if ((await requestResult(store.get(key))) !== undefined) return false;
+      store.put({ until }, key);
+      return true;
+    }),
+  forget: (signer, id) =>
+    withDb(SEALED_STORE, 'readwrite', (tx) => {
+      tx.objectStore(SEALED_STORE).delete(sealedKey(signer, id));
+    }),
+};
+
+/** Someone this browser has had private messages verified, sealed or
+ *  deniable from or to on one server, by the fingerprint they were
+ *  under (hxd-ng's `docs/e2e-messages.md` §4.4, §8), with the logins and
+ *  last nick they were seen as there. Kept here rather than synced: it
+ *  is what tells a server that swapped someone's identity, or dropped
+ *  it, from the person. */
+export interface PeerRecord {
+  fingerprint: string;
+  /** The server address they were seen on. */
+  server: string;
+  logins: string[];
+  nick: string;
+  /** When they were last seen, in milliseconds. */
+  at: number;
+  /** When the user last accepted this identity in place of another,
+   *  which outranks any sighting of one not accepted since. */
+  accepted?: number;
+  /** A sealed message went to them or came from them. */
+  sealed?: true;
+  /** Sealed messages to them go deniably, or signed, by the user's
+   *  choice for them; absent, as the settings say. */
+  deniable?: boolean;
+}
+
+/** One record per server and fingerprint. */
+export const peerKey = (server: string, fingerprint: string) => `${server} ${fingerprint}`;
+
+/** Two records of one peer as one, so no tab's write loses another's:
+ *  the later sighting's nick and deniable choice, every login, the later
+ *  times, and sealed once either says so. */
+export function mergePeer(was: PeerRecord | undefined, r: PeerRecord): PeerRecord {
+  if (!was) return r;
+  const [older, newer] = r.at >= was.at ? [was, r] : [r, was];
+  const logins = [...was.logins, ...r.logins.filter((l) => !was.logins.some((w) => w.toLowerCase() === l.toLowerCase()))];
+  const accepted = Math.max(was.accepted ?? 0, r.accepted ?? 0);
+  return {
+    ...older,
+    ...newer,
+    logins,
+    ...(was.sealed || r.sealed ? { sealed: true } : {}),
+    ...(accepted ? { accepted } : {}),
+  };
+}
+
+export const peers = {
+  all: () => withDb(PEERS_STORE, 'readonly', (tx) => requestResult<PeerRecord[]>(tx.objectStore(PEERS_STORE).getAll())),
+  /** `record` merged into the one stored, in one transaction; the
+   *  record as it now stands. */
+  merge: (record: PeerRecord) =>
+    withDb(PEERS_STORE, 'readwrite', async (tx) => {
+      const store = tx.objectStore(PEERS_STORE);
+      const key = peerKey(record.server, record.fingerprint);
+      const merged = mergePeer(await requestResult<PeerRecord | undefined>(store.get(key)), record);
+      store.put(merged, key);
+      return merged;
     }),
 };

@@ -859,6 +859,7 @@ export class ClassicConnection implements Session {
   async msg(params: Parameters<Session['msg']>[0]): Promise<{ queued: boolean }> {
     const to = 'to' in params ? params.to : undefined;
     if (to === undefined) throw unavailable('writing to someone who is not here');
+    if ('sealed' in params) throw unavailable('sealed messages');
     if (params.media) throw unavailable('sending images');
     // A classic server answers a message only when it refuses one, and
     // that refusal arrives as a notice.

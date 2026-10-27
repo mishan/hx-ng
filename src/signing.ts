@@ -1,10 +1,12 @@
-/** Signed lines, private messages and articles (hxd-ng's
- * `docs/e2e-messages.md` §4.6 to §4.10, §8): whether this session can
- * sign, and the state each one it reads is shown in. No DOM: the
- * transcript and the news view draw what this decides. */
+/** Signed lines, private messages and articles, and sealed private
+ * messages (hxd-ng's `docs/e2e-messages.md` §4.1 to §4.10, §8): whether
+ * this session can sign and seal, and the state each one it reads is
+ * shown in. No DOM: the transcript and the news view draw what this
+ * decides. */
 
 import {
   CAPS,
+  MemorySealedReplay,
   SIGNED_CERT_MAX_BYTES,
   aliasCovers,
   base64urlToBytes,
@@ -13,6 +15,7 @@ import {
   decodeDeviceCert,
   fingerprintFromString,
   fingerprintToString,
+  openSealed,
   readSignedArticle,
   readSignedChat,
   readSignedMessage,
@@ -25,6 +28,7 @@ import {
   type HistoryLine,
   type NewsArticle,
   type NewsNode,
+  type SealedReplay,
   type ServerAlias,
   type SignatureDisplay,
   type SignedArticle,
@@ -61,11 +65,51 @@ export function readSigning(scope: SignScope): boolean {
 }
 
 export function writeSigning(scope: SignScope, on: boolean): void {
+  store(SIGN_KEYS[scope], on ? 'on' : 'off');
+}
+
+function store(key: string, value: string): void {
   try {
-    localStorage.setItem(SIGN_KEYS[scope], on ? 'on' : 'off');
+    localStorage.setItem(key, value);
   } catch {
     /* storage disabled; the preference lasts this page load */
   }
+}
+
+/** How private messages are signed: a sealed one signed and one in the
+ *  clear not, by default, as §8 asks; or every one signed; or none, a
+ *  sealed one then sealed deniably (§3.11). Kept under the key that
+ *  said whether one in the clear is signed, whose `on` and `off` still
+ *  mean what they did there. */
+export type PmSigning = 'sealed' | 'always' | 'never';
+
+export function readPmSigning(): PmSigning {
+  try {
+    const v = localStorage.getItem(SIGN_KEYS.pm);
+    return v === 'on' ? 'always' : v === 'never' ? 'never' : 'sealed';
+  } catch {
+    return 'sealed';
+  }
+}
+
+export function writePmSigning(choice: PmSigning): void {
+  store(SIGN_KEYS.pm, choice === 'always' ? 'on' : choice === 'never' ? 'never' : 'off');
+}
+
+const SEAL_KEY = 'hxd-ng.seal.pm';
+
+/** Private messages are sealed wherever they can be unless the user
+ *  turned it off (§8). */
+export function readSealing(): boolean {
+  try {
+    return localStorage.getItem(SEAL_KEY) !== 'off';
+  } catch {
+    return true;
+  }
+}
+
+export function writeSealing(on: boolean): void {
+  store(SEAL_KEY, on ? 'on' : 'off');
 }
 
 /** What a session proving this certificate says at login (§4.6), or
@@ -81,6 +125,12 @@ export function signsFor(cert: Uint8Array | undefined, lobby: boolean): Signs | 
   return lobby ? 'default' : 'able';
 }
 
+/** Whether a session proving this certificate says `sealed` (§4.1): it
+ *  can open them exactly where it can sign. */
+export function sealedFor(cert: Uint8Array | undefined): boolean {
+  return signsFor(cert, false) !== undefined;
+}
+
 /** The key this host is pinned to, and the handovers it followed, whose
  *  old keys stay in scope for what was signed before them. */
 export interface PinnedKey {
@@ -89,8 +139,10 @@ export interface PinnedKey {
 }
 
 /** How a line, a message or an article is shown, and by whose key when
- *  it has one. */
-export interface LineSignature extends SignatureDisplay {
+ *  it has one: a state of §8's, the two only a sealed box has among
+ *  them. */
+export interface LineSignature extends Omit<SignatureDisplay, 'state'> {
+  state: SignatureDisplay['state'] | 'deniable' | 'unopened';
   /** The certificate's fingerprint, which a signed one is named by
    *  (§8); `null` for a link form whose certificate is not held. */
   signer: string | null;
@@ -108,13 +160,26 @@ export interface LineSignature extends SignatureDisplay {
   why?: string;
   /** Who a message this client sent signed was signed to. */
   to?: string;
+  /** The start of the `device_enc` key a deniable box opened under. */
+  senderKey?: string;
 }
 
 export interface LineRead {
   signature: LineSignature | null;
   /** Another copy of a signed one already read here, the same or
-   *  another under its id (§3.6): not to be shown. */
+   *  another under its id (§3.6), or a sealed one stale or accepted
+   *  already: not to be shown. */
   duplicate: boolean;
+  /** What a sealed one said, in place of the server's placeholder. */
+  text?: string;
+  /** A sealed one invalid or unverified: its text is shown only once
+   *  the user asks (§8). */
+  hidden?: boolean;
+  /** A signed box's whole map, base64url, which a report pastes. */
+  whole?: string;
+  /** A sealed one recorded in the replay memory as accepted, which
+   *  `MessageReader.unshown` gives back if it is not shown after all. */
+  accepted?: { signer: string; id: Uint8Array };
 }
 
 /** What one that could not be read at all is shown as: a signed one as
@@ -273,21 +338,99 @@ export class LineReader extends SignedMemory {
 
 const SIGNER_CHARS = 16;
 
+/** A sealed one this session could not open, and why. */
+function unopened(why: string): LineRead {
+  return {
+    signature: { state: 'unopened', signer: null, why, sentAtAnotherTime: false, signatureExpected: false },
+    duplicate: false,
+    text: 'A sealed message that could not be opened.',
+  };
+}
+
 /**
  * Reads private messages, live and stored, against the fingerprint this
  * session proved (§3.2, §4.9): `to` must be it, and a session that
  * proved none has nothing to check `to` against, so every signed
- * message it reads is unverified.
+ * message it reads is unverified. A sealed one is opened with the
+ * device's `device_enc` key, its replay memory the device's (§3.10).
  */
 export class MessageReader extends SignedMemory {
-  constructor(private proved: string | null) {
+  private enc: CryptoKey | null = null;
+
+  constructor(
+    private proved: string | null,
+    private replay: SealedReplay & { forget?(signer: string, id: Uint8Array): unknown } = new MemorySealedReplay(),
+  ) {
     super();
   }
 
-  /** The fingerprint the session proved, for what is read from now on:
-   *  a login after a resume failed may prove another, or none. */
-  prove(proved: string | null): void {
+  /** A box this reader accepted that is not to be shown after all, its
+   *  session replaced while it was opened: forgotten, so that if it comes
+   *  again it is shown then. */
+  async unshown(read: LineRead): Promise<void> {
+    if (read.accepted) await this.replay.forget?.(read.accepted.signer, read.accepted.id);
+  }
+
+  /** The fingerprint the session proved and the key it opens sealed
+   *  ones with, for what is read from now on: a login after a resume
+   *  failed may prove another, or none. */
+  prove(proved: string | null, enc: CryptoKey | null = null): void {
     this.proved = proved;
+    this.enc = enc;
+  }
+
+  /** A `msg` event carrying a box (§4.4), its sender shown as §3.9 has
+   *  it: by the fingerprint the roster shows for their uid, or with no
+   *  row there by the event's; with a row that shows none, or an event
+   *  that names none, unknown. Anything that goes wrong opening it
+   *  leaves it unopened, never unshown. */
+  sealed(m: Events['msg'], row: User | undefined): Promise<LineRead> {
+    const fingerprint = m.from.fingerprint;
+    const shown = row ? row.identity?.fingerprint : fingerprint;
+    const sender: SignedSender = fingerprint && shown ? { named: shown } : 'unknown';
+    return this.serially(() => this.open(m, sender).catch(() => unopened('it could not be read here')));
+  }
+
+  private async open(m: Events['msg'], sender: SignedSender): Promise<LineRead> {
+    const [enc, reader] = [this.enc, this.proved];
+    if (m.sealed === undefined || !enc || !reader) return unopened('this session holds no key to open it');
+    const now = Math.floor(Date.now() / 1000);
+    const o = await openSealed(base64urlToBytes(m.sealed), enc, { now, at: m.at, reader, sender }, this.replay);
+    const shown = (state: 'verified' | 'deniable', signer: string, sent: number, sentApart: boolean): LineSignature => ({
+      state,
+      signer,
+      sent,
+      sentAtAnotherTime: sentApart,
+      signatureExpected: false,
+    });
+    switch (o.state) {
+      case 'verified': {
+        const message = o.message.message;
+        this.signing.add(o.signer);
+        const duplicate = this.seen(memoryKey(o.signer, message.id)!, undefined, `${bytesToHex(message.to)} ${message.auto} ${message.text}`);
+        const whole = bytesToBase64url(o.message.whole());
+        const accepted = { signer: o.signer, id: message.id };
+        return { signature: shown('verified', o.signer, message.sent, o.sentApart), duplicate, text: message.text, whole, accepted };
+      }
+      case 'deniable': {
+        const signature = shown('deniable', o.signer, o.message.sent, o.sentApart);
+        signature.senderKey = bytesToBase64url(o.senderEnc).slice(0, SIGNER_CHARS);
+        return { signature, duplicate: false, text: o.message.text, accepted: { signer: o.signer, id: o.message.id } };
+      }
+      case 'unverified': {
+        const signature: LineSignature = { state: 'unverified', signer: o.signer, sentAtAnotherTime: false, signatureExpected: false };
+        signature.why = 'the server shows this user with no identity to check it against';
+        return { signature, duplicate: false, text: o.message.text, hidden: true, ...(o.whole ? { whole: bytesToBase64url(o.whole) } : {}) };
+      }
+      case 'invalid': {
+        const signature: LineSignature = { state: 'invalid', signer: null, sentAtAnotherTime: false, signatureExpected: false };
+        return { signature, duplicate: false, text: o.message.text, hidden: true };
+      }
+      case 'dropped':
+        return { signature: null, duplicate: true };
+      case 'unopened':
+        return unopened('it was not sealed to this device, or was damaged on the way');
+    }
   }
 
   /** A `msg` event, with the sender's roster row as it stood: a local

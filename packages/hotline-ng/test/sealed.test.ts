@@ -6,6 +6,8 @@ import {
   CAPS,
   DEVICE_CERT_DOMAIN,
   IdentityError,
+  base64urlToBytes,
+  bytesToBase64url,
   bytesToHex,
   fingerprintFromString,
   hexToBytes,
@@ -24,6 +26,7 @@ import {
   pad,
   sealMessage,
   sealMessageTo,
+  sealMsgRequest,
   sealPadded,
   sealWithIkm,
   unpad,
@@ -252,6 +255,22 @@ describe('sealing and opening', () => {
         whole: deniable ? null : signed,
       });
     }
+  });
+
+  it("makes a msg's box and the hash of the key it was sealed to, to the identity it names", async () => {
+    const w = await world();
+    const recipient = await certFor({ identity: V.keys.other, deviceEnc: w.readerEnc });
+    const key = bytesToBase64url(new Uint8Array(await crypto.subtle.digest('SHA-256', w.readerEnc as BufferSource)));
+    for (const deniable of [false, true]) {
+      const req = await sealMsgRequest(w.dev, { cert: w.cert, to: w.pm.to, text: 'one\r\ntwo' }, recipient, deniable, SENT);
+      expect(req.cert).toBe(key);
+      const opened = await open(w, base64urlToBytes(req.sealed));
+      expect(opened.state).toBe(deniable ? 'deniable' : 'verified');
+      const text = opened.state === 'verified' ? opened.message.message.text : opened.state === 'deniable' ? opened.message.text : null;
+      expect(text).toBe('one\ntwo');
+    }
+    const elsewhere = sealMsgRequest(w.dev, { cert: w.cert, to: fingerprintFromString(SIGNER)!, text: 'hi' }, recipient, false, SENT);
+    await expect(elsewhere).rejects.toMatchObject({ kind: 'key-mismatch' });
   });
 
   it('fills the largest box with the largest message, in either form', async () => {

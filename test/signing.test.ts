@@ -12,6 +12,8 @@ import {
   signChatRequest,
   signMsgRequest,
   signNewsPost,
+  MemorySealedReplay,
+  sealMsgRequest,
   type Events,
   type FollowedHandover,
   type HistoryLine,
@@ -23,7 +25,9 @@ import {
 } from '@hotline-ng/client';
 
 import { cBytes, cOptMap, cUint, encode, type CborValue } from '../packages/hotline-ng/src/cbor';
+import { sealedReplay } from '../src/identity/storage';
 import { ArticleReader, LineReader, MessageReader, heldGuids, signsFor, type PinnedKey } from '../src/signing';
+import { installFakeIndexedDB } from './fake-idb';
 import vectors from '../packages/hotline-ng/test/identity-vectors.json';
 
 const V: Record<string, any> = vectors;
@@ -39,20 +43,26 @@ async function importSeed(seedHex: string): Promise<CryptoKey> {
   return crypto.subtle.importKey('pkcs8', pkcs8, { name: 'Ed25519' }, false, ['sign']);
 }
 
-/** A certificate the vectors' identity signs, for a device key made as
- *  a browser makes one. */
-async function certFor(device: Uint8Array, caps: number): Promise<Uint8Array> {
+/** A certificate the vectors' identity signs, or another of theirs, for
+ *  a device key made as a browser makes one, valid around `at`. */
+async function certFor(
+  device: Uint8Array,
+  caps: number,
+  o: { enc?: Uint8Array; identity?: { seed_hex: string; public_hex: string }; at?: number } = {},
+): Promise<Uint8Array> {
+  const identity = o.identity ?? V.keys.identity;
+  const at = o.at ?? SENT;
   const entries: [string, CborValue][] = [
     ['v', cUint(1)],
-    ['identity', cBytes(hexToBytes(V.keys.identity.public_hex))],
+    ['identity', cBytes(hexToBytes(identity.public_hex))],
     ['device', cBytes(device)],
-    ['device_enc', cBytes(hexToBytes(V.keys.device.public_enc_hex))],
-    ['issued', cUint(SENT - 100)],
-    ['expires', cUint(SENT + 900)],
+    ['device_enc', cBytes(o.enc ?? hexToBytes(V.keys.device.public_enc_hex))],
+    ['issued', cUint(at - 100)],
+    ['expires', cUint(at + 900)],
     ['caps', cUint(caps)],
   ];
   const input = new Uint8Array([...new TextEncoder().encode(DEVICE_CERT_DOMAIN), 0, ...encode(cOptMap(entries))]);
-  const key = await importSeed(V.keys.identity.seed_hex);
+  const key = await importSeed(identity.seed_hex);
   const sig = new Uint8Array(await crypto.subtle.sign({ name: 'Ed25519' }, key, input));
   return encode(cOptMap([...entries, ['sig', cBytes(sig)]]));
 }
@@ -453,5 +463,101 @@ describe('ArticleReader', () => {
       ['other words under its id', article(5, null, reworded), true],
     ];
     for (const [name, a, duplicate] of cases) expect((await reader.read(a, node(1))).duplicate, name).toBe(duplicate);
+  });
+});
+
+/** Both of a device's keys made as a browser makes them, and a
+ *  certificate for them from `identity`, valid now. */
+async function sealingDevice(identity: { seed_hex: string; public_hex: string }) {
+  const sign = (await crypto.subtle.generateKey({ name: 'Ed25519' }, false, ['sign', 'verify'])) as CryptoKeyPair;
+  const enc = (await crypto.subtle.generateKey({ name: 'X25519' }, false, ['deriveBits'])) as CryptoKeyPair;
+  const raw = async (k: CryptoKey) => new Uint8Array(await crypto.subtle.exportKey('raw', k));
+  const now = Math.floor(Date.now() / 1000);
+  const cert = await certFor(await raw(sign.publicKey), CAPS.WEB, { enc: await raw(enc.publicKey), identity, at: now });
+  return { keys: { sign: sign.privateKey, enc: enc.privateKey }, cert };
+}
+
+describe('MessageReader, sealed', () => {
+  it("opens a box with this device's key, in §8's states, naming its sender as §3.9 does", async () => {
+    const [from, me, stranger] = [await sealingDevice(V.keys.identity), await sealingDevice(V.keys.other), await sealingDevice(V.keys.other)];
+    const seal = (text: string, deniable = false) =>
+      sealMsgRequest(from.keys, { cert: from.cert, to: fingerprintFromString(ME)!, text }, me.cert, deniable);
+    const at = Math.floor(Date.now() / 1000);
+    const event = (sealed: string, fingerprint?: string): Events['msg'] => ({
+      from: { uid: 7, nick: 'Alice', ...(fingerprint ? { fingerprint } : {}) },
+      text: '[Encrypted message]',
+      at,
+      queued: false,
+      sealed,
+    });
+    const signer = row({ identity: { fingerprint: SIGNER, handle: null } });
+    const cases: [string, Promise<{ sealed: string }>, string | undefined, User | undefined, CryptoKey | null, object][] = [
+      ['a signed box from a row naming its signer', seal('hi'), SIGNER, signer, me.keys.enc, { state: 'verified', signer: SIGNER }],
+      ['a deniable box', seal('hi', true), SIGNER, signer, me.keys.enc, { state: 'deniable', signer: SIGNER }],
+      ['from a uid nobody holds now, by the fingerprint the event names', seal('hi'), SIGNER, undefined, me.keys.enc, { state: 'verified' }],
+      ['from a row naming another', seal('hi'), SIGNER, row({ identity: { fingerprint: OTHER, handle: null } }), me.keys.enc, { state: 'invalid' }],
+      ['from a row with no identity', seal('hi'), SIGNER, row(), me.keys.enc, { state: 'unverified', signer: SIGNER }],
+      ['an event naming no fingerprint', seal('hi'), undefined, undefined, me.keys.enc, { state: 'unverified' }],
+      ['sealed to another device', seal('hi'), SIGNER, signer, stranger.keys.enc, { state: 'unopened' }],
+      ['to a session holding no key', seal('hi'), SIGNER, signer, null, { state: 'unopened' }],
+      ['not a box at all', Promise.resolve({ sealed: '!!' }), SIGNER, signer, me.keys.enc, { state: 'unopened' }],
+    ];
+    for (const [name, req, fingerprint, sender, enc, want] of cases) {
+      const reader = new MessageReader(ME, new MemorySealedReplay());
+      reader.prove(ME, enc);
+      const read = await reader.sealed(event((await req).sealed, fingerprint), sender);
+      expect(read.signature, name).toMatchObject(want);
+      const shown = read.signature?.state === 'verified' || read.signature?.state === 'deniable';
+      expect(read.hidden ?? false, name).toBe(['invalid', 'unverified'].includes(read.signature!.state));
+      if (shown || read.hidden) expect(read.text, name).toBe('hi');
+      expect(read.whole !== undefined, name).toBe(read.signature?.state === 'verified' || read.signature?.state === 'unverified');
+    }
+  });
+
+  it('shows a box once, whichever reader is handed it again', async () => {
+    const [from, me] = [await sealingDevice(V.keys.identity), await sealingDevice(V.keys.other)];
+    const req = await sealMsgRequest(from.keys, { cert: from.cert, to: fingerprintFromString(ME)!, text: 'once' }, me.cert);
+    const event: Events['msg'] = {
+      from: { uid: 7, nick: 'Alice', fingerprint: SIGNER },
+      text: '[Encrypted message]',
+      at: Math.floor(Date.now() / 1000),
+      queued: false,
+      sealed: req.sealed,
+    };
+    const replay = new MemorySealedReplay();
+    const reader = () => {
+      const r = new MessageReader(ME, replay);
+      r.prove(ME, me.keys.enc);
+      return r;
+    };
+    const first = reader();
+    expect((await first.sealed(event, undefined)).duplicate).toBe(false);
+    expect((await first.sealed(event, undefined)).duplicate).toBe(true);
+    expect((await reader().sealed(event, undefined)).duplicate, 'another tab, the same memory').toBe(true);
+  });
+
+  it('opens a box again that was accepted and then not shown, its session replaced while it opened', async () => {
+    installFakeIndexedDB();
+    const [from, me] = [await sealingDevice(V.keys.identity), await sealingDevice(V.keys.other)];
+    const event = async (text: string): Promise<Events['msg']> => ({
+      from: { uid: 7, nick: 'Alice', fingerprint: SIGNER },
+      text: '[Encrypted message]',
+      at: Math.floor(Date.now() / 1000),
+      queued: false,
+      sealed: (await sealMsgRequest(from.keys, { cert: from.cert, to: fingerprintFromString(ME)!, text }, me.cert, text === 'deniably')).sealed,
+    });
+    const reader = () => {
+      const r = new MessageReader(ME, sealedReplay);
+      r.prove(ME, me.keys.enc);
+      return r;
+    };
+    for (const text of ['signed', 'deniably']) {
+      const box = await event(text);
+      const replaced = reader();
+      await replaced.unshown(await replaced.sealed(box, undefined));
+      const read = await reader().sealed(box, undefined);
+      expect([read.duplicate, read.text], text).toEqual([false, text]);
+      expect((await reader().sealed(box, undefined)).duplicate, `${text}, once shown`).toBe(true);
+    }
   });
 });

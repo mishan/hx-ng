@@ -9,6 +9,7 @@
  * platform's.
  */
 
+import type { PmSigning } from '../signing';
 import { h } from './dom';
 
 export type Theme = 'auto' | 'dark' | 'light';
@@ -24,12 +25,20 @@ export interface Settings {
   setSelfView(on: boolean): void;
   signLobby: boolean;
   setSignLobby(on: boolean): void;
-  signPms: boolean;
-  setSignPms(on: boolean): void;
+  sealPms: boolean;
+  setSealPms(on: boolean): void;
+  signPms: PmSigning;
+  setSignPms(choice: PmSigning): void;
   signNews: boolean;
   setSignNews(on: boolean): void;
   openDebug(): void;
 }
+
+const PM_SIGNING: [PmSigning, string, string][] = [
+  ['sealed', 'When sealed', 'A sealed message is signed, so whoever you write to can show anyone that you sent it. One in the clear is not.'],
+  ['always', 'Always', 'In the clear too, so the server cannot change one or write one in your name, and anyone it reaches can show what you said.'],
+  ['never', 'Never', 'A sealed message is sealed deniably: whoever you write to knows it is from you and can prove it to nobody.'],
+];
 
 const THEMES: [Theme, string][] = [
   ['auto', 'System'],
@@ -41,6 +50,17 @@ export function openSettings(s: Settings): void {
   const themes = THEMES.map(([value, label]) => {
     const input = h('input', { type: 'radio', name: 'theme', value, checked: value === s.theme });
     input.onchange = () => s.setTheme(value);
+    return h('label', { class: 'setting-choice' }, input, h('span', {}, label));
+  });
+
+  const pmDetail = (choice: PmSigning) => PM_SIGNING.find(([value]) => value === choice)![2];
+  const pmSaid = h('span', { class: 'setting-detail' }, pmDetail(s.signPms));
+  const pmSigning = PM_SIGNING.map(([value, label]) => {
+    const input = h('input', { type: 'radio', name: 'sign-pm', value, checked: value === s.signPms });
+    input.onchange = () => {
+      s.setSignPms(value);
+      pmSaid.textContent = pmDetail(value);
+    };
     return h('label', { class: 'setting-choice' }, input, h('span', {}, label));
   });
 
@@ -89,12 +109,19 @@ export function openSettings(s: Settings): void {
           s.signLobby,
           (on) => s.setSignLobby(on),
         ),
+      ),
+      h(
+        'fieldset',
+        {},
+        h('legend', {}, 'Private messages'),
         toggle(
-          'Sign my private messages',
-          'With an identity login, sign each private message to someone who logged in with an identity, so the server cannot change it or write one in your name. Whoever you write to can show anyone what you said. An image is not covered.',
-          s.signPms,
-          (on) => s.setSignPms(on),
+          'Seal my private messages',
+          'With an identity login, seal each one to the device of someone who can open it, so no server can read it. A message with an image, or to someone who cannot open one, goes in the clear, and you are asked first if they could before.',
+          s.sealPms,
+          (on) => s.setSealPms(on),
         ),
+        h('div', { class: 'setting-toggle' }, h('span', {}, h('span', { class: 'setting-label' }, 'Sign my private messages'), pmSaid)),
+        h('div', { class: 'setting-choices', role: 'radiogroup', ariaLabel: 'Sign my private messages' }, ...pmSigning),
       ),
       h(
         'fieldset',

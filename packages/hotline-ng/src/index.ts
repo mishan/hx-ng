@@ -76,6 +76,7 @@ export {
   openSealed,
   sealMessage,
   sealMessageTo,
+  sealMsgRequest,
   type DeviceKeys,
   type SealedForm,
   type SealedOpening,

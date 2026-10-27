@@ -301,6 +301,17 @@ const keys = { sign: deviceSignKey, enc: deviceEncKey };
 const box = await sealMessageTo({ id, sent, to, cert, text }, keys, recipientCert, deniable);
 ```
 
+On the wire, a login or resume whose credentials say `sealed` asks to
+carry them, and `conn.sealing` is the server's echo: false, nothing
+sealed goes to or from the session. `deviceCert` fetches the
+certificate a session proves now, and `sealMsgRequest` seals to it and
+names the key it sealed to, which is what `msg` carries:
+
+```ts
+const { cert } = await conn.deviceCert(uid);
+await conn.msg({ to: uid, ...(await sealMsgRequest(keys, { cert: myCert, to, text }, base64urlToBytes(cert))) });
+```
+
 `openSealed` opens one with the reader's `device_enc` key in §3.9's
 order and answers §8's states: `verified` (a signed box, its `message`
 the signed map), `deniable` (with `senderEnc`, the key it opened

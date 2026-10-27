@@ -61,6 +61,8 @@ import {
   type ModerationLogOk,
   type ModerationLogParams,
   type MsgParams,
+  type SealedMsgParams,
+  type DeviceCertOk,
   type NewsArticle,
   type StagedNewsAttachment,
   type NewsConfig,
@@ -175,12 +177,17 @@ export interface Credentials {
     /** What a login with this token says of signing, for a device whose
      *  certificate allows messages; asked as each login goes out. */
     signs?: () => Signs | undefined;
+    /** Whether a login with this token says `sealed`, for a device that
+     *  can open sealed messages; asked as each login goes out. */
+    sealed?: () => boolean;
   };
   /** What a resume says of signing, for a session that proved a device
    *  whose certificate allows messages; absent, it says nothing and
    *  signs nothing. `Connection.signs` starts here, and a login sets it
    *  to what `identity.signs` gives. */
   signs?: Signs;
+  /** Whether a resume says `sealed`, as `signs` above. */
+  sealed?: boolean;
 }
 
 /** What a resumed session is allowed to remember between page loads. The
@@ -387,12 +394,19 @@ export class Connection {
    *  means it will not carry this session's signed lines, so none may be
    *  sent. */
   signing: Signs | null = null;
+  /** Whether the next login or resume says `sealed` (hxd-ng's
+   *  `docs/e2e-messages.md` §4.1). */
+  sealed: boolean;
+  /** The server's echo of `sealed` on the latest login or resume: false
+   *  means nothing sealed goes to or from this session. */
+  sealing = false;
 
   constructor(
     private creds: Credentials,
     private hooks: ConnectionHooks = {},
   ) {
     this.signs = creds.signs ?? null;
+    this.sealed = creds.sealed ?? false;
   }
 
   // --- lifecycle --------------------------------------------------------
@@ -549,9 +563,12 @@ export class Connection {
     // one the token is for, whatever a session resumed before proved.
     this.signs = this.creds.identity?.signs?.() ?? null;
     if (this.signs) params.signs = this.signs;
+    this.sealed = this.creds.identity?.sealed?.() ?? false;
+    if (this.sealed) params.sealed = true;
 
     const ok = await this.request<LoginOk>('login', params);
     this.signing = ok.signs ?? null;
+    this.sealing = ok.sealed === true;
     this.session = ok.session;
     this.token = ok.token;
     this.self = ok.self;
@@ -595,9 +612,11 @@ export class Connection {
         token: this.token,
         last_seq: this.seq,
         ...(this.signs ? { signs: this.signs } : {}),
+        ...(this.sealed ? { sealed: true } : {}),
       });
       this.self = ok.self;
       this.signing = ok.signs ?? null;
+      this.sealing = ok.sealed === true;
       this.retry = 0;
       this.setState('online');
       this.hooks.onResumed?.(ok.replay);
@@ -855,8 +874,15 @@ export class Connection {
    *  second one. The answer describes the message as it stands *now*, so
    *  a retry saying `queued: false` where the original said `true` is the
    *  message being delivered, not an error. */
-  msg(params: MsgParams): Promise<MsgOk> {
+  msg(params: MsgParams | SealedMsgParams): Promise<MsgOk> {
     return this.request<MsgOk>('msg', params);
+  }
+
+  /** The certificate `uid`'s session proves now, to seal a message to
+   *  once it is checked (`sealMsgRequest` checks it). Only a session
+   *  that is itself `sealing` may ask, and the server rations it. */
+  deviceCert(uid: number): Promise<DeviceCertOk> {
+    return this.request<DeviceCertOk>('device_cert', { uid });
   }
 
   /** Stored mail, newest first, paging backwards with `before`. */

@@ -171,7 +171,11 @@ function chatLine(
   // private message's local echo included, so they look as they do to
   // whoever reads them; what stays literal is this client's own notices
   // and status lines, which are drawn in `eventLine`.
-  const body = opts.markdown ? chatNodes(line.text) : { nodes: linkify(line.text), block: false };
+  const body = line.hidden
+    ? { nodes: hiddenNodes(line), block: false }
+    : opts.markdown
+      ? chatNodes(line.text)
+      : { nodes: linkify(line.text), block: false };
   const who = speaker(line);
 
   return h(
@@ -209,6 +213,7 @@ function chatLine(
       // beside the text and the timestamp is already the line's own, in
       // the reader's timezone rather than in UTC.
       line.queued ? h('span', { class: 'tag', title: 'Held by the server until you came back' }, 'queued') : null,
+      sealedTag(line),
       ...signatureTag(line.signature),
       sameSpeaker ? null : who.aside,
       ...body.nodes,
@@ -221,9 +226,32 @@ function chatLine(
   );
 }
 
-/** Whether a line carries a signature that parsed, which names it. */
+/** Whether a line carries a signature that parsed, or a deniable box
+ *  that opened, which names it. */
 export function signedBy(sig: LineSignature | undefined): sig is LineSignature {
-  return sig !== undefined && (sig.state === 'verified' || sig.state === 'elsewhere' || sig.state === 'unverified');
+  return sig !== undefined && ['verified', 'elsewhere', 'unverified', 'deniable'].includes(sig.state);
+}
+
+/** In place of a sealed one's text the server could have written: a
+ *  way to see it anyway, for this one message. */
+function hiddenNodes(line: Line): HTMLElement[] {
+  const why =
+    line.signature?.state === 'invalid'
+      ? 'Its signature does not check, so it is not from the user named.'
+      : 'There is nothing to check who sealed it against.';
+  return [
+    h('span', { class: 'sig-note' }, `Text hidden. ${why} `),
+    h('button', { type: 'button', class: 'ghost small', dataset: { act: 'reveal' } }, 'Show anyway'),
+  ];
+}
+
+/** Whether a private message was sealed, said for each one where it
+ *  could have been. */
+function sealedTag(line: Line): HTMLElement | null {
+  if (line.sealed === undefined) return null;
+  return line.sealed
+    ? h('span', { class: 'sig sig-sealed', title: 'Sealed to one device: no server on its way could read it' }, 'sealed')
+    : h('span', { class: 'sig sig-clear', title: 'Sent in the clear: the servers on its way could read it' }, 'not sealed');
 }
 
 /** How much of a fingerprint names a signed line: enough that nobody
@@ -244,9 +272,12 @@ export function signedName(
   nick: string,
 ): { name: string; title: string; signed: boolean; aside: HTMLElement | null } {
   if (!signedBy(sig)) return { name: nick, title: '', signed: false, aside: null };
-  const title = sig.signer
-    ? `Signed by ${sig.signer}${sig.home ? `, a user of ${sig.home}` : ''}${sig.to ? `, to ${sig.to}` : ''}`
-    : 'Signed by a key that could not be checked';
+  const title =
+    sig.state === 'deniable'
+      ? `Sealed deniably by ${sig.signer}${sig.senderKey ? `, under the device key beginning ${sig.senderKey}` : ''}${sig.to ? `, to ${sig.to}` : ''}`
+      : sig.signer
+        ? `Signed by ${sig.signer}${sig.home ? `, a user of ${sig.home}` : ''}${sig.to ? `, to ${sig.to}` : ''}`
+        : 'Signed by a key that could not be checked';
   const aside = nick
     ? h('span', { class: 'sig-nick', title: "The server's name for them, which the signature does not cover" }, `as ${nick}`)
     : null;
@@ -258,16 +289,22 @@ const STATE_WORDS = {
   elsewhere: 'signed elsewhere',
   unverified: 'unverified',
   unsigned: 'signature expected',
+  deniable: 'deniable',
+  unopened: 'could not be opened',
 } as const;
 
 /** A line as the live region says it: by the name the transcript shows
  *  and with its signature's state, and a bad signature's by no name. */
 export function spoken(line: Line): string {
   const sig = line.signature;
-  if (sig?.state === 'invalid') return `Bad signature: ${line.text}`;
+  const text = line.hidden ? 'text hidden' : line.text;
+  if (sig?.state === 'invalid') return `Bad signature: ${text}`;
   const name = speaker(line).name;
-  const state = sig ? `, ${STATE_WORDS[sig.state]}` : '';
-  return name ? `${name}${state}: ${line.text}` : line.text;
+  const state = [line.sealed ? 'sealed' : line.sealed === false ? 'not sealed' : '', sig ? STATE_WORDS[sig.state] : '']
+    .filter(Boolean)
+    .map((w) => `, ${w}`)
+    .join('');
+  return name ? `${name}${state}: ${text}` : text;
 }
 
 /** A signed time, with its date unless it is today's. */
@@ -302,6 +339,11 @@ export function signatureTag(sig: LineSignature | undefined): HTMLElement[] {
     ],
     invalid: ['bad signature', 'The signature does not check: this is not from the user named.'],
     unsigned: ['signature expected', 'Unsigned, from someone seen to sign here: a signature may have been removed.'],
+    deniable: [
+      `deniable${at}`,
+      `Sealed deniably${by}: from them, but nobody can be shown that it was, so a report of it cannot be checked.`,
+    ],
+    unopened: ['could not be opened', `A sealed message this device could not open${sig.why ? `: ${sig.why}` : ''}.`],
   }[sig.state];
   const tags = [h('span', { class: `sig sig-${sig.state}`, title }, label)];
   if (sig.foreignKey && sig.state !== 'invalid') {

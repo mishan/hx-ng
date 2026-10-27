@@ -1,0 +1,52 @@
+name: Publish
+
+# @hotline-ng/client to npm, from a `client-vX.Y.Z` tag on main.
+#
+# npm trusts this workflow by its OIDC token (trusted publishing), so no
+# npm token is stored anywhere, and each version carries a provenance
+# attestation naming the commit and the workflow that built it. The
+# `npm` environment holds the run for approval: a version, once
+# published, can never be published again, even after an unpublish.
+
+on:
+  push:
+    tags: ['client-v*']
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: npm
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+      # Trusted publishing needs npm 11.5.1 or later; Node 22 ships 10.
+      - run: npm install -g npm@11.6.2
+      # CI has already built and tested main, so a tag anywhere else, or
+      # one that disagrees with the version it would publish, stops here.
+      - name: tag
+        run: |
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+          version=$(node -p "require('./packages/hotline-ng/package.json').version")
+          test "client-v$version" = "$GITHUB_REF_NAME"
+      - run: npm ci
+      - run: npm run check:package
+      # Only the built output, the sources its maps point into, the README
+      # and the license. npm's JSON is a list or a map by name, by version.
+      - name: contents
+        run: |
+          npm pack -w @hotline-ng/client --dry-run --json \
+            | node -e "const j = JSON.parse(require('fs').readFileSync(0)); const p = Array.isArray(j) ? j[0] : Object.values(j)[0]; const bad = p.files.map(f => f.path).filter(f => !/^(dist\/|src\/|README\.md$|package\.json$|LICENSE)/.test(f)); if (bad.length) { console.error(bad); process.exit(1); }"
+      - run: npm publish -w @hotline-ng/client --provenance

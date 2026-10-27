@@ -72,6 +72,7 @@ export {
   decodeCanonical as decodeCanonicalCbor,
   encode as encodeCbor,
   mapGet,
+  mapWithout,
   type CborErrorKind,
   type CborValue,
 } from './cbor.js';

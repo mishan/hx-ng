@@ -49,13 +49,38 @@ import type {
 
 export interface FakeAccount {
   login: string;
-  /** Empty for an account with none, which, like a guest, never
-   *  detaches, and has an inbox only while a session proved its linked
-   *  identity (hxd-ng's `docs/private-messages.md` §2). */
+  /** Empty for an account with none, which detaches only when an
+   *  identity logged it in. */
   password: string;
+  /** Linked to an identity, which `identityToken(login)` proves. A
+   *  password-less linked account is not reachable by password (hxd-ng's
+   *  `docs/hotline-ng-identity.md` §8.3). An account with a password or
+   *  a link has an inbox (`docs/private-messages.md` §2). */
+  identity?: boolean;
   nick?: string;
   icon?: number;
 }
+
+/** Who sent a request, once its connection holds a session. */
+export interface FakeSender {
+  uid: number;
+  login: string | null;
+}
+
+export interface FakeRequest extends ReqFrame {
+  /** `null` for a handshake, which comes before the session. */
+  from: FakeSender | null;
+}
+
+/** A reply as a handler gives it. */
+export type FakeReply = { ok: unknown } | { error: WireError };
+
+/** Answers a request in place of the server, or leaves it to the
+ *  server by returning `undefined`. */
+export type FakeHandler = (
+  params: Record<string, unknown>,
+  from: FakeSender,
+) => FakeReply | undefined | Promise<FakeReply | undefined>;
 
 export interface FakeServerOptions {
   name?: string;
@@ -66,17 +91,22 @@ export interface FakeServerOptions {
   rooms?: { name: string; topic?: string; position?: number }[];
   /** What the login reply's `detach` says; nothing here times it. */
   grace?: number;
+  /** The families served, as the login reply's `caps` lists them: of
+   *  these, `history`, `inbox`, `rooms` and `chat_guid` change what the
+   *  server does. `identity` says the identity endpoints exist, which
+   *  this server does not serve: `identityToken` stands in for them. */
+  caps?: string[];
 }
 
-const CAPS = ['history', 'inbox', 'rooms', 'chat_guid'];
+const CAPS = ['history', 'inbox', 'rooms', 'chat_guid', 'identity'];
+const GUID = /^(?:[0-9a-f]{32}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i;
 const MAX_JOINED = 32;
 
 interface Session {
   uid: number;
   user: User;
   account: FakeAccount | null;
-  /** The account's login where it has an inbox: one with a password or
-   *  a linked identity. */
+  /** The account's login where it has an inbox. */
   mailbox: string | null;
   identity: SelfUser['identity'];
   id: string;
@@ -106,6 +136,7 @@ interface FakeRoom {
 
 interface Mail extends StoredMessage {
   to: string;
+  guid?: string;
   fromUid: number;
   /** Stored while its recipient had no attached session (§6.4). */
   pending: boolean;
@@ -133,7 +164,7 @@ class FakeSocket implements SocketLike {
   session: Session | null = null;
 
   constructor(
-    private readonly server: { received(sock: FakeSocket, raw: string): void; lost(sock: FakeSocket): void },
+    private readonly server: { received(sock: FakeSocket, raw: string): Promise<void>; lost(sock: FakeSocket): void },
     readonly url: string,
     /** The account an identity token chose, `null` for a guest, absent
      *  for a socket opened without one. */
@@ -154,9 +185,16 @@ class FakeSocket implements SocketLike {
     });
   }
 
+  /** One request at a time, so a handler that takes its time still
+   *  answers in order (§5). */
+  private queue: Promise<void> = Promise.resolve();
+
   send(raw: string): void {
     if (this.readyState !== FakeSocket.OPEN) throw new Error('send on a socket that is not open');
-    queueMicrotask(() => this.server.received(this, raw));
+    // A handler that throws fails the test as an unhandled rejection,
+    // and the requests after it are still answered.
+    const next = this.queue.then(() => this.server.received(this, raw));
+    this.queue = next.catch(() => {});
   }
 
   close(): void {
@@ -195,17 +233,20 @@ export class FakeServer {
   readonly url = `ws://fake-${++servers}.invalid/ng`;
   private clients = 0;
   /** Every request any client sent, in the order they arrived. */
-  readonly requests: ReqFrame[] = [];
+  readonly requests: FakeRequest[] = [];
   subject: string;
   private readonly name: string;
   private readonly accounts: Map<string, FakeAccount>;
   private readonly guests: boolean;
   private readonly grace: number;
+  private readonly caps: Set<string>;
   private readonly sessions = new Map<number, Session>();
   private readonly rooms = new Map<number, FakeRoom>();
   private readonly lines = new Map<number, HistoryLine[]>([[0, []]]);
   private readonly mail: Mail[] = [];
   private readonly guids = new Map<string, number>();
+  private readonly mailGuids = new Map<string, Mail>();
+  private readonly handlers = new Map<string, FakeHandler>();
   private readonly refusals = new Map<string, WireError[]>();
   private readonly tokens = new Map<string, string | null>();
   private nextUid = 1;
@@ -220,6 +261,7 @@ export class FakeServer {
     this.accounts = new Map((opts.accounts ?? []).map((a) => [a.login, a]));
     this.guests = opts.guests ?? true;
     this.grace = opts.grace ?? 300;
+    this.caps = new Set(opts.caps ?? CAPS);
     for (const r of opts.rooms ?? []) this.addRoom(r);
   }
 
@@ -245,9 +287,12 @@ export class FakeServer {
   }
 
   /** A single-use token for `Credentials.identity.getToken`: a socket
-   *  opened with it logs in as `login`, or as a guest without one. A
-   *  socket opened with any other token is refused. */
+   *  opened with it logs in as `login`, an account linked to an
+   *  identity, or as an identity's guest without one. A socket opened
+   *  with any other token is refused. `@hotline-ng/client/node`'s
+   *  `identityToken` talks to endpoints this server does not have. */
   identityToken(login?: string): string {
+    if (login !== undefined && !this.accounts.get(login)?.identity) throw new Error(`${login} is not linked to an identity`);
     const token = `id${++this.serial}`;
     this.tokens.set(token, login ?? null);
     return token;
@@ -265,19 +310,37 @@ export class FakeServer {
     this.refusals.set(req, queue);
   }
 
+  /** Answer `req`, after the handshake, with `fn` before the server
+   *  does; the latest for a name wins. */
+  handle(req: string, fn: FakeHandler): void {
+    this.handlers.set(req, fn);
+  }
+
+  /** The newest session logged in as `login`. */
+  uidOf(login: string): number {
+    const s = this.everyone().filter((x) => x.account?.login === login).at(-1);
+    if (!s) throw new Error(`nobody is logged in as ${login}`);
+    return s.uid;
+  }
+
   /** Push an event to one session, taking its next seq. */
   event<K extends EventName>(uid: number, ev: K, data: Events[K]): void {
     this.emit(this.live(uid), ev, data);
   }
 
-  /** A user the test plays joins the roster. */
-  addUser(user: { nick: string; icon?: number }): number {
+  /** A user the test plays joins the roster: with a `login`, as an
+   *  account's with an inbox, and with a `fingerprint`, as one that
+   *  proved an identity. */
+  addUser(user: { nick: string; icon?: number; login?: string; fingerprint?: string }): number {
     const uid = this.nextUid++;
+    const account = user.login ? (this.accounts.get(user.login) ?? { login: user.login, password: '' }) : null;
     const s: Session = {
-      ...this.blank(uid, null),
+      ...this.blank(uid, account),
       user: { uid, nick: user.nick, icon: user.icon ?? 128, admin: false, status: 'active', transport: 'encrypted' },
       scripted: true,
     };
+    if (account && this.caps.has('inbox')) s.mailbox = account.login;
+    if (user.fingerprint) this.prove(s, user.fingerprint);
     this.join(s);
     return uid;
   }
@@ -358,21 +421,21 @@ export class FakeServer {
 
   // --- the wire ---------------------------------------------------------
 
-  private received(sock: FakeSocket, raw: string): void {
+  private async received(sock: FakeSocket, raw: string): Promise<void> {
     if (sock.readyState !== FakeSocket.OPEN) return;
     const frame = JSON.parse(raw) as ReqFrame;
-    this.requests.push(frame);
+    const s = sock.session;
+    this.requests.push({ ...frame, from: s && this.sender(s) });
     const { id, req } = frame;
     const params = (frame.params ?? {}) as Record<string, any>;
     const handshake = req === 'login' || req === 'resume';
-    const answer = (reply: { ok: unknown } | { error: WireError }): void => sock.deliver({ reply: id, ...reply });
+    const answer = (reply: FakeReply): void => sock.deliver({ reply: id, ...reply });
     const refused = this.refusals.get(req)?.shift();
     if (refused) {
       answer({ error: refused });
-      if (handshake && !sock.session) sock.shut(1000, '');
+      if (handshake && !s) sock.shut(1000, '');
       return;
     }
-    const s = sock.session;
     try {
       if (!s) {
         if (req === 'login') return this.login(sock, params as LoginParams, answer);
@@ -381,6 +444,8 @@ export class FakeServer {
         return sock.shut(1000, '');
       }
       if (handshake) throw refuse('bad_request', 'Already logged in.');
+      const custom = await this.handlers.get(req)?.(params, this.sender(s));
+      if (custom) return answer(custom);
       if (req === 'logout') {
         answer({ ok: {} });
         this.end(s);
@@ -410,7 +475,11 @@ export class FakeServer {
   private dispatch(s: Session, req: string, p: Record<string, any>): unknown {
     // What makes a session rooms-aware, before the request is acted on
     // (chat-rooms.md §7): the lobby's `room_topic` alone does not.
-    if ((req.startsWith('room') && req !== 'room_topic') || Number(p.room)) s.aware = true;
+    if ((req.startsWith('room') && req !== 'room_topic') || Number(p.room)) {
+      if (!this.caps.has('rooms')) throw refuse('not_available', 'This server has no rooms.');
+      s.aware = true;
+    }
+    if (req === 'history' && !this.caps.has('history')) throw refuse('not_available', 'This server keeps no history.');
     switch (req) {
       case 'ping':
         return {};
@@ -447,7 +516,11 @@ export class FakeServer {
       account = proved.login === null ? null : (this.accounts.get(proved.login) ?? null);
     } else if (p.login) {
       account = this.accounts.get(p.login) ?? null;
-      if (!account || account.password !== (p.password ?? '')) throw refuse('login_failed', 'Wrong login or password.');
+      // A linked account's only credential is its identity (§8.3).
+      const linkedOnly = !!account && !account.password && !!account.identity;
+      if (!account || linkedOnly || account.password !== (p.password ?? '')) {
+        throw refuse('login_failed', 'Wrong login or password.');
+      }
     } else if (!this.guests) {
       throw refuse('login_failed', 'Wrong login or password.');
     }
@@ -455,18 +528,7 @@ export class FakeServer {
     const s = this.blank(uid, account);
     const nick = Array.from(p.nick || account?.nick || account?.login || 'guest').slice(0, 31).join('');
     s.user = { uid, nick, icon: p.icon ?? account?.icon ?? 128, admin: false, status: 'active', transport: 'encrypted' };
-    if (proved) {
-      const fingerprint = String(uid).padStart(52, '0');
-      s.user.identity = { fingerprint, handle: null };
-      s.identity = {
-        fingerprint,
-        handle: null,
-        age: 0,
-        outcome: account ? 'linked' : 'guest',
-        account: account?.login ?? null,
-      };
-      s.mailbox = account?.login ?? null;
-    }
+    if (proved) this.prove(s, String(uid).padStart(52, '0'));
     s.detachable = !!proved || !!account?.password;
     s.socket = sock;
     sock.session = s;
@@ -479,15 +541,19 @@ export class FakeServer {
         server: { name: this.name, subject: this.subject },
         users: this.roster(),
         detach: s.detachable ? { grace: this.grace } : null,
-        caps: [...CAPS],
+        caps: [...this.caps],
         seq: 0,
-        history: { max_lines: 10_000, max_days: 30 },
-        inbox: this.counts(s),
-        rooms: {
-          lobby: { id: 0, name: 'lobby', ...this.lastId(0) },
-          list: this.visible().map((r) => this.view(r)),
-          max_joined: MAX_JOINED,
-        },
+        ...(this.caps.has('history') ? { history: { max_lines: 10_000, max_days: 30 } } : {}),
+        ...(this.caps.has('inbox') ? { inbox: this.counts(s) } : {}),
+        ...(this.caps.has('rooms')
+          ? {
+              rooms: {
+                lobby: { id: 0 as const, name: 'lobby', ...this.lastId(0) },
+                list: this.visible().map((r) => this.view(r)),
+                max_joined: MAX_JOINED,
+              },
+            }
+          : {}),
       },
     });
     this.flushMail(s);
@@ -520,13 +586,17 @@ export class FakeServer {
       server: { name: this.name, subject: this.subject },
       users: this.roster(),
       seq: s.seq,
-      rooms: {
-        list: this.visible().map((r) => this.view(r)),
-        joined: this.visible()
-          .filter((r) => r.members.has(s.uid))
-          .map((r) => ({ id: r.id, ...this.lastId(r.id) })),
-        max_joined: MAX_JOINED,
-      },
+      ...(this.caps.has('rooms')
+        ? {
+            rooms: {
+              list: this.visible().map((r) => this.view(r)),
+              joined: this.visible()
+                .filter((r) => r.members.has(s.uid))
+                .map((r) => ({ id: r.id, ...this.lastId(r.id) })),
+              max_joined: MAX_JOINED,
+            },
+          }
+        : {}),
     };
   }
 
@@ -534,21 +604,30 @@ export class FakeServer {
     if (typeof p.text !== 'string') throw refuse('bad_request', 'No text.');
     const room = p.room ?? 0;
     if (room) this.member(s, room);
+    const guid = this.caps.has('chat_guid') ? this.guid(p.guid) : undefined;
     // A guid is its account's where one person is behind it, else the
-    // session's (§7.3).
-    const key = p.guid && `${s.mailbox ? `a:${s.mailbox}` : `s:${s.id}`}|${room}|${p.guid}`;
+    // identity's, else the session's (§7.3).
+    const key = guid && `${this.durable(s) ?? `s:${s.id}`}|${room}|${guid}`;
     const prior = key ? this.guids.get(key) : undefined;
-    if (prior !== undefined) return { id: prior };
-    const id = this.relay(s, room, p.text, p.style ?? 'normal', p.guid);
+    if (prior !== undefined) return this.lineId(prior);
+    const id = this.relay(s, room, p.text, p.style ?? 'normal', guid && p.guid);
     if (key) this.guids.set(key, id);
-    return { id };
+    return this.lineId(id);
   }
 
   private relay(s: Session, room: number, text: string, style: 'normal' | 'action', guid?: string): number {
     const id = ++this.nextLine;
     const at = now();
-    this.lines.get(room)!.push({ id, at, from: { nick: s.user.nick, icon: s.user.icon }, text, style });
-    const data: Events['chat'] = { from: { uid: s.uid, nick: s.user.nick }, text, style, at, id, ...(room ? { room } : {}) };
+    // Without `history` nothing is kept, and a line has no id.
+    if (this.caps.has('history')) this.lines.get(room)!.push({ id, at, from: { nick: s.user.nick, icon: s.user.icon }, text, style });
+    const data: Events['chat'] = {
+      from: { uid: s.uid, nick: s.user.nick },
+      text,
+      style,
+      at,
+      ...this.lineId(id),
+      ...(room ? { room } : {}),
+    };
     const hearers = room ? [...this.room(room).members].map((uid) => this.live(uid)) : this.everyone();
     for (const h of hearers) this.emit(h, 'chat', h === s && guid ? { ...data, guid } : data);
     return id;
@@ -570,6 +649,7 @@ export class FakeServer {
   private sendMsg(s: Session, p: MsgParams): MsgOk {
     if ((p.to === undefined) === (p.to_login === undefined)) throw refuse('bad_request', 'Name exactly one of to and to_login.');
     if (!p.text) throw refuse('bad_request', 'No text.');
+    const guid = this.guid(p.guid);
     let targets: Session[];
     let box: string | null;
     if (p.to !== undefined) {
@@ -578,20 +658,33 @@ export class FakeServer {
       targets = [target];
       box = target.mailbox;
     } else {
-      const account = this.accounts.get(p.to_login!);
+      targets = this.everyone().filter((x) => x.account?.login === p.to_login);
+      const account = this.accounts.get(p.to_login!) ?? targets[0]?.account;
       if (!account) throw refuse('no_such_user', 'No such user.');
-      targets = this.everyone().filter((x) => x.account === account);
-      box = targets.find((x) => x.mailbox)?.mailbox ?? (account.password ? account.login : null);
+      box = targets.find((x) => x.mailbox)?.mailbox ?? (this.hasInbox(account) ? account.login : null);
     }
     const at = now();
-    const from: Sender = { uid: s.uid, nick: s.user.nick, ...(s.account ? { login: s.account.login } : {}) };
+    const from: Sender = { uid: s.uid, nick: s.user.nick, ...(s.mailbox ? { login: s.mailbox } : {}) };
+    const sender = this.durable(s);
     // Stored only for an inbox, from an account with one or an identity
     // (private-messages.md §7): a plain guest's goes through the outbox,
     // and to nobody when there is no session to hold it.
-    if (!box || !(s.mailbox || s.identity)) {
+    if (!box || !sender) {
       if (!targets.length) throw refuse('no_such_user', 'No such user.');
       for (const x of targets) this.emit(x, 'msg', { from, text: p.text, at, queued: false });
       return { queued: false };
+    }
+    const attached = targets.filter((x) => x.socket || x.scripted);
+    // A repeat is the message it repeats, answered as it stands now: one
+    // that waited reaches a recipient who has since come back (§7.1).
+    const key = guid && `${sender}|${box}|${guid}`;
+    const prior = key ? this.mailGuids.get(key) : undefined;
+    if (prior) {
+      if (prior.pending && attached.length) {
+        prior.pending = false;
+        for (const x of attached) this.emit(x, 'msg', this.waited(prior));
+      }
+      return this.msgOk(s, prior);
     }
     const m: Mail = {
       id: ++this.nextMail,
@@ -601,31 +694,35 @@ export class FakeServer {
       read: false,
       to: box,
       fromUid: s.uid,
-      pending: false,
+      pending: !attached.length,
     };
     this.mail.push(m);
-    const attached = targets.filter((x) => x.socket);
-    if (!attached.length) {
-      m.pending = true;
-      // The id is for a sender with an inbox to find it in (§7.1).
-      return { queued: true, ...(s.mailbox ? { id: m.id } : {}) };
-    }
+    if (key) this.mailGuids.set(key, m);
     for (const x of attached) this.emit(x, 'msg', { from, text: m.text, at, queued: false, id: m.id });
-    return { queued: false };
+    return this.msgOk(s, m);
+  }
+
+  /** The id is for a sender with an inbox to find it in (§7.1). */
+  private msgOk(s: Session, m: Mail): MsgOk {
+    return m.pending ? { queued: true, ...(s.mailbox ? { id: m.id } : {}) } : { queued: false };
+  }
+
+  private waited(m: Mail): Events['msg'] {
+    const sender = this.sessions.get(m.fromUid);
+    return {
+      from: { uid: sender ? sender.uid : 0, nick: m.from.nick, ...(m.from.login ? { login: m.from.login } : {}) },
+      text: m.text,
+      at: m.at,
+      queued: true,
+      id: m.id,
+    };
   }
 
   private flushMail(s: Session): void {
     for (const m of this.mailOf(s)) {
       if (!m.pending) continue;
       m.pending = false;
-      const sender = this.sessions.get(m.fromUid);
-      this.emit(s, 'msg', {
-        from: { uid: sender ? sender.uid : 0, nick: m.from.nick, ...(m.from.login ? { login: m.from.login } : {}) },
-        text: m.text,
-        at: m.at,
-        queued: true,
-        id: m.id,
-      });
+      this.emit(s, 'msg', this.waited(m));
     }
   }
 
@@ -676,7 +773,7 @@ export class FakeServer {
       uid,
       user: { uid, nick: '', icon: 0, admin: false, status: 'active', transport: 'encrypted' },
       account,
-      mailbox: account?.password ? account.login : null,
+      mailbox: account && this.hasInbox(account) ? account.login : null,
       identity: undefined,
       id: `s_${serial}`,
       token: `t_${serial}`,
@@ -690,6 +787,43 @@ export class FakeServer {
       aware: false,
       ended: false,
     };
+  }
+
+  private hasInbox(account: FakeAccount): boolean {
+    return this.caps.has('inbox') && (!!account.password || !!account.identity);
+  }
+
+  private prove(s: Session, fingerprint: string): void {
+    s.user.identity = { fingerprint, handle: null };
+    s.identity = {
+      fingerprint,
+      handle: null,
+      age: 0,
+      outcome: s.account ? 'linked' : 'guest',
+      account: s.account?.login ?? null,
+    };
+  }
+
+  /** Who a durable message or line is held under: the inbox, else the
+   *  identity, else nobody (private-messages.md §7). */
+  private durable(s: Session): string | null {
+    if (s.mailbox) return `a:${s.mailbox}`;
+    return s.identity ? `i:${s.identity.fingerprint}` : null;
+  }
+
+  /** A guid as the wire allows it, any case and hyphens or none (§7.1). */
+  private guid(guid: string | undefined): string | undefined {
+    if (guid === undefined) return undefined;
+    if (!GUID.test(guid)) throw refuse('bad_request', 'A guid is a UUID.');
+    return guid.replaceAll('-', '').toLowerCase();
+  }
+
+  private lineId(id: number): { id?: number } {
+    return this.caps.has('history') ? { id } : {};
+  }
+
+  private sender(s: Session): FakeSender {
+    return { uid: s.uid, login: s.account?.login ?? null };
   }
 
   private join(s: Session): void {

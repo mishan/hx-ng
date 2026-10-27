@@ -53,18 +53,24 @@ describe('the fake server', () => {
     await expect(wrong.start()).rejects.toMatchObject({ wire: { code: 'login_failed' } });
   });
 
-  it('logs a guest in that may not detach, and an identity token as its account', async () => {
-    const server = new FakeServer({ accounts: ACCOUNTS });
+  it('logs a guest in that may not detach, and an identity token as its linked account and no other', async () => {
+    const server = new FakeServer({ accounts: [...ACCOUNTS, { login: 'carol', password: '', identity: true }] });
     const guest = new Connection(server.credentials());
     await guest.start();
     expect([guest.self?.nick, guest.grace]).toEqual(['guest', null]);
 
     const proved = new Connection(
-      server.credentials({ identity: { getToken: async () => server.identityToken('bob') } }),
+      server.credentials({ identity: { getToken: async () => server.identityToken('carol') } }),
     );
     await proved.start();
-    expect(proved.self?.identity).toMatchObject({ outcome: 'linked', account: 'bob' });
+    expect(proved.self?.identity).toMatchObject({ outcome: 'linked', account: 'carol' });
     expect(server.requests.at(-1)?.params).not.toHaveProperty('login');
+    expect(await proved.inbox()).toMatchObject({ total: 0 });
+    expect(() => server.identityToken('bob')).toThrow(/not linked/);
+
+    // Its only credential is the identity, and an empty password is not one.
+    const byPassword = new Connection(server.credentials({ login: 'carol', password: '' }));
+    await expect(byPassword.start()).rejects.toMatchObject({ wire: { code: 'login_failed' } });
   });
 
   it('tells the roster who joins and parts', async () => {
@@ -194,6 +200,82 @@ describe('the fake server', () => {
     expect(bobMail[0]).toMatchObject({ text: 'from a key', queued: true });
     expect(bobMail[0]?.from).not.toHaveProperty('login');
     expect((await bob.inbox()).messages[0]?.from).toEqual({ nick: 'guest' });
+  });
+
+  it('takes a retried message under its guid as the one it repeats, waiting or delivered', async () => {
+    const server = new FakeServer({ accounts: ACCOUNTS });
+    const alice = await connect(server, 'alice');
+    const waiting = { to_login: 'bob', text: 'once', guid: '0F8FAD5B-D9CB-469F-A165-70867728950E' };
+    const first = await alice.msg(waiting);
+    // Either case and without hyphens, the same guid.
+    expect(await alice.msg({ ...waiting, guid: '0f8fad5bd9cb469fa16570867728950e' })).toEqual(first);
+    expect(first).toMatchObject({ queued: true });
+
+    const bob = new Connection(server.credentials({ login: 'bob', password: 'pw' }));
+    const mail = heard(bob, 'msg');
+    await bob.start();
+    // Now it is delivered, and a retry says so.
+    expect(await alice.msg(waiting)).toEqual({ queued: false });
+    const live = { to_login: 'bob', text: 'live', guid: '6ba7b810-9dad-11d1-80b4-00c04fd430c8' };
+    await alice.msg(live);
+    await alice.msg(live);
+    await waitFor('the mail', () => mail.length === 2);
+    await new Promise((r) => setTimeout(r, 20));
+    expect(mail.map((m) => m.text)).toEqual(['once', 'live']);
+    expect((await bob.inbox()).total).toBe(2);
+    await expect(alice.msg({ to: bob.self!.uid, text: 'x', guid: 'nope' })).rejects.toMatchObject({ wire: { code: 'bad_request' } });
+    await expect(alice.chat({ text: 'x', guid: 'nope' })).rejects.toMatchObject({ wire: { code: 'bad_request' } });
+  });
+
+  it('records who sent each request, and lets a test answer some itself, in order', async () => {
+    const server = new FakeServer({ accounts: ACCOUNTS, rooms: [{ name: 'lounge' }] });
+    const alice = await connect(server, 'alice');
+    const lounge = alice.login!.rooms!.list[0]!.id;
+    await alice.roomJoin(lounge);
+    server.handle('chat', (p) => (p.room === lounge ? { error: { code: 'read_only', text: 'Read only.' } } : undefined));
+    server.handle('ping', async () => {
+      await new Promise((r) => setTimeout(r, 20));
+      return { ok: {} };
+    });
+
+    const order: string[] = [];
+    await Promise.all([
+      alice.request('ping').then(() => order.push('ping')),
+      alice.chat({ text: 'lobby' }).then(() => order.push('chat')),
+    ]);
+    expect(order).toEqual(['ping', 'chat']);
+    await expect(alice.chat({ text: 'room', room: lounge })).rejects.toMatchObject({ wire: { code: 'read_only' } });
+    expect(server.requests.find((f) => f.req === 'chat')?.from).toEqual({ uid: alice.self!.uid, login: 'alice' });
+    expect(server.requests.find((f) => f.req === 'login')?.from).toBeNull();
+    expect(server.uidOf('alice')).toBe(alice.self!.uid);
+  });
+
+  it('plays a user with a login and an identity, whose mail says who it is from', async () => {
+    const server = new FakeServer({ accounts: ACCOUNTS });
+    const fingerprint = 'F'.repeat(52);
+    const bot = server.addUser({ nick: 'Bot', login: 'bot', fingerprint });
+    const alice = await connect(server, 'alice');
+    const mail = heard(alice, 'msg');
+    expect(alice.login?.users.find((u) => u.uid === bot)?.identity).toEqual({ fingerprint, handle: null });
+    server.message(bot, { to: alice.self!.uid, text: 'beep' });
+    await waitFor('the mail', () => mail.length === 1);
+    expect(mail[0]?.from).toMatchObject({ uid: bot, login: 'bot' });
+    expect(server.uidOf('bot')).toBe(bot);
+    expect(await alice.msg({ to_login: 'bot', text: 'ack' })).toEqual({ queued: false });
+  });
+
+  it('serves only the families its caps say', async () => {
+    const server = new FakeServer({ accounts: ACCOUNTS, caps: ['rooms'] });
+    const alice = await connect(server, 'alice');
+    expect(alice.caps).toEqual(['rooms']);
+    expect([alice.login?.inbox, alice.login?.history]).toEqual([undefined, undefined]);
+    expect(await alice.chat({ text: 'gone', guid: 'not a guid, and not read' })).toEqual({});
+    await expect(alice.inbox()).rejects.toMatchObject({ wire: { code: 'no_inbox' } });
+    await expect(alice.history()).rejects.toMatchObject({ wire: { code: 'not_available' } });
+    await expect(alice.msg({ to_login: 'bob', text: 'later' })).rejects.toMatchObject({ wire: { code: 'no_such_user' } });
+
+    const defaults = await connect(new FakeServer({ accounts: ACCOUNTS }), 'alice');
+    expect(defaults.caps).toContain('identity');
   });
 
   it('refuses the next request as told, then serves again', async () => {

@@ -537,13 +537,19 @@ only between accounts with a password or an identity), and `rooms`,
 `room_join`, `room_part` and `room_topic` with their events. A dropped
 socket detaches a session with a password and a resume replays what it
 missed; `overflow(uid)` makes the next resume `resync_required`, for the
-catch-up. `event(uid, ev, data)` pushes any event, typed. It holds no
+catch-up. `event(uid, ev, data)` pushes any event, typed, to a session
+`uidOf(login)` finds; `addUser` plays someone else, with a login and an
+identity if wanted; `handle(req, fn)` answers a request before the
+server does, or leaves it to it; `requests` holds every frame with who
+sent it; and `caps` chooses which families it serves. It holds no
 privileges, rate limits or grace timer, and answers anything else
-`unknown_method`.
+`unknown_method`. It has no identity endpoints either, so
+`@hotline-ng/client/node`'s `identityToken` needs a fake of its own:
+`server.identityToken(login)` is the token one would mint.
 
 The CBOR codec the identity objects are made of is on the main entry,
-as `encodeCbor`, `decodeCanonicalCbor` and the `cMap`-style
-constructors, for a test that builds them itself.
+as `encodeCbor`, `decodeCanonicalCbor`, the `cMap`-style constructors,
+`mapGet` and `mapWithout`, for a test that builds them itself.
 
 ## Secure contexts
 

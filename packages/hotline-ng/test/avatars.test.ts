@@ -173,6 +173,28 @@ describe('fetching', () => {
     await expect(failed).rejects.toMatchObject({ wire: { code: expect.stringMatching(/^no_such_/) } });
   });
 
+  it('reads the HTTP throttle’s flat refusal as a WireFailure', async () => {
+    stubFetch(() => jsonResponse(429, { error: 'rate_limited', text: 'too many avatar fetches', retry_after: 3 }));
+    const conn = await connect();
+    await expect(conn.fetchAvatar(AVATAR.id)).rejects.toMatchObject({
+      wire: { code: 'rate_limited', text: 'too many avatar fetches', retry_after: 3 },
+    });
+  });
+
+  it.each([
+    [429, { 'Retry-After': '7' }, { code: 'rate_limited', retry_after: 7 }],
+    [429, {}, { code: 'rate_limited' }],
+    [413, {}, { code: 'media_too_large' }],
+    [502, {}, { code: 'server_error' }],
+    [403, {}, { code: 'bad_request' }],
+  ])('reads a bare %i from a proxy by its status', async (status, headers, wire) => {
+    stubFetch(() => new Response('<html>', { status, headers }));
+    const conn = await connect();
+    const failed = conn.fetchAvatar(AVATAR.id);
+    await expect(failed).rejects.toMatchObject({ wire });
+    if (!('retry_after' in wire)) await expect(failed).rejects.not.toHaveProperty('wire.retry_after');
+  });
+
   it('reads a 404 as no such avatar', async () => {
     stubFetch(() => jsonResponse(404, { error: { code: 'no_such_avatar', text: 'Avatar not found' } }));
     const conn = await connect();

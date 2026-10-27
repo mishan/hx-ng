@@ -5,11 +5,13 @@ import {
   isEvent,
   isFingerprint,
   isReply,
+  isWireCode,
   moderationErrorText,
   newGuid,
   parsePushPayload,
   parseRecvMid,
   pushSubscriptionParams,
+  retryClass,
   sendMid,
   type ServerFrame,
 } from '../src/protocol';
@@ -73,6 +75,33 @@ describe('errorText', () => {
     // docs/hotline-ng.md §7: the closed set for the msg/inbox family.
     for (const code of ['no_such_user', 'no_inbox', 'mailbox_full', 'blocked', 'server_error']) {
       expect(errorText({ code, text: '' })).not.toBe(code);
+    }
+  });
+});
+
+describe('retryClass', () => {
+  it.each([
+    ['rate_limited', 'soon'],
+    ['mailbox_full', 'later'],
+    ['no_such_user', 'never'],
+    ['something_new', 'never'],
+  ])('%s is %s', (code, retry) => {
+    expect(retryClass(code)).toBe(retry);
+  });
+});
+
+describe('isWireCode', () => {
+  it('knows no code from the object prototype', () => {
+    expect(isWireCode('constructor')).toBe(false);
+    expect(isWireCode('toString')).toBe(false);
+  });
+
+  it('makes comparing with a code that is not one a compile error', () => {
+    const code: string = 'no_such_user';
+    expect(isWireCode(code)).toBe(true);
+    if (isWireCode(code)) {
+      // @ts-expect-error a misspelling of no_such_user
+      expect(code === 'no_such_usr').toBe(false);
     }
   });
 });

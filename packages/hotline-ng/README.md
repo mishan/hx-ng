@@ -115,6 +115,37 @@ What it handles so a caller does not have to:
 `request()` rejects with a `WireFailure` carrying the server's
 `{ code, text }`; pass `err.wire` to `errorText()`.
 
+`code` stays a `string`, since a newer server may answer with one this
+version has never heard of. `WireCode` is the union of every code it
+does know, and `isWireCode(code)` narrows to it, so a misspelled or
+retired code fails to compile and a `switch` can be made exhaustive:
+
+```ts
+const { code } = err.wire;
+if (isWireCode(code)) {
+  switch (code) {
+    case 'rate_limited':
+      return later(err.wire.retry_after);
+    // ...every other WireCode...
+    default:
+      code satisfies never;
+  }
+}
+```
+
+`retryClass(code)` says when sending the same request again could
+succeed. `soon` may pass on a resend after a backoff: `rate_limited`,
+`server_error`, `busy`, a full server or voice chat. Only
+`rate_limited` carries `retry_after`, and a `server_error` is safe to
+resend only for an idempotent request or one with a `guid`. `later`
+may pass, unchanged, once something outside it does — a mailbox read,
+a day gone by, a ban lapsing, a fresh login — and whether to wait for
+that is the caller's decision. `never` needs the request changed, and
+is what a code it does not know gets, so a program that retries on
+`soon` never loops on a refusal it cannot read. `not_available` is
+`never`, though the file area and its uploads also answer it for a
+passing failure of their own.
+
 ### Files
 
 The read-only Files API keeps full `u64` values as decimal strings on the

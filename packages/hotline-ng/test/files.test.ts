@@ -300,5 +300,8 @@ describe('uploads', () => {
     await expect(connection.uploadFile('a.bin', file)).rejects.toMatchObject({
       wire: { code: 'already_exists' },
     });
+
+    stubPuts([new Response(null, { status: 413 })]);
+    await expect(connection.uploadFile('a.bin', file)).rejects.toMatchObject({ wire: { code: 'too_large' } });
   });
 });

@@ -114,24 +114,37 @@ import {
   type AvatarLimits,
   type User,
   type VideoConfig,
+  type WireCode,
   type WireError,
 } from './protocol.js';
 
-/** Turn a refused media request into the same `WireFailure` every other
+/** Turn a refused HTTP request into the same `WireFailure` every other
  *  call throws, so a caller has one thing to catch. The body is the ng
- *  error shape; a proxy's own error page is not, hence the fallback. */
-async function mediaFailure(res: Response): Promise<WireFailure> {
-  const fallback: WireError = {
-    code: res.status === 404 ? 'no_such_media' : 'server_error',
-    text: `The server answered ${res.status}.`,
-  };
-  try {
-    const body = (await res.json()) as { error?: WireError };
-    return new WireFailure(body.error ?? fallback);
-  } catch {
-    return new WireFailure(fallback);
+ *  error shape, or the HTTP throttle's flat `{ error: code, text,
+ *  retry_after }`. A proxy's own error page is neither, so its status
+ *  stands in, read the way the server's own would be: a 429 or a 5xx
+ *  is worth a retry, a 413 or another 4xx is not. */
+async function httpFailure(res: Response, notFound: WireCode, tooLarge: WireCode): Promise<WireFailure> {
+  const body = (await res.json().catch(() => null)) as {
+    error?: WireError | string;
+    text?: string;
+    retry_after?: number;
+  } | null;
+  const text = `The server answered ${res.status}.`;
+  if (typeof body?.error === 'string') {
+    const { error: code, text: given = text, retry_after } = body;
+    return new WireFailure(retry_after === undefined ? { code, text: given } : { code, text: given, retry_after });
   }
+  if (body?.error) return new WireFailure(body.error);
+  const s = res.status;
+  const code = s === 429 ? 'rate_limited' : s === 404 ? notFound : s === 413 ? tooLarge : s >= 500 ? 'server_error' : 'bad_request';
+  const failure: WireError = { code, text };
+  const after = Number(res.headers.get('Retry-After') ?? NaN);
+  if (code === 'rate_limited' && Number.isInteger(after) && after >= 0) failure.retry_after = after;
+  return new WireFailure(failure);
 }
+
+const mediaFailure = (res: Response) => httpFailure(res, 'no_such_media', 'media_too_large');
 
 /** A news attachment's file name as `X-Attachment-Name` carries it: well
  *  formed, at most 255 code points, then percent-encoded UTF-8. */
@@ -304,13 +317,7 @@ function delay(ms: number, signal?: AbortSignal): Promise<void> {
   });
 }
 
-/** A refused piece as the wire error its body carries, when it carries one. */
-async function uploadFailure(response: Response): Promise<WireFailure> {
-  const body = (await response.json().catch(() => null)) as { error?: WireError } | null;
-  return new WireFailure(
-    body?.error ?? { code: 'not_available', text: `The upload was refused (${response.status}).` },
-  );
-}
+const uploadFailure = (res: Response) => httpFailure(res, 'not_found', 'too_large');
 
 export class WireFailure extends Error {
   constructor(readonly wire: WireError) {

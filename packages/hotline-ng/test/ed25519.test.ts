@@ -64,7 +64,12 @@ describe('verifyStrict', () => {
     await expect(verifyStrict(bad.key, bad.message, bad.sig)).resolves.toBe(false);
   });
 
-  it.each(vectors.message_rejects.map((r) => [r.name, r] as const))('refuses %s', async (_, r) => {
+  // The rest of message_rejects are refused before any signature is checked.
+  const refusedBySignature = vectors.message_rejects.filter(
+    (r) => r.object === 'chat_line' && r.form === 'whole' && (r.error === 'InvalidKey' || r.error === 'BadSignature'),
+  );
+
+  it.each(refusedBySignature.map((r) => [r.name, r] as const))('refuses %s', async (_, r) => {
     const { key, message, sig } = chatLine(r.hex);
     expect(isStrongKey(key)).toBe(r.error !== 'InvalidKey');
     await expect(verifyStrict(key, message, sig)).resolves.toBe(false);

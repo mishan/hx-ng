@@ -7,6 +7,7 @@ import {
   ensureActiveDevice,
   forgetActiveDevice,
   getActiveDevice,
+  serverPins,
 } from '../src/identity/storage';
 import { installFakeIndexedDB } from './fake-idb';
 
@@ -69,5 +70,29 @@ describe('forgetActiveDevice', () => {
 
     const second = await ensureActiveDevice();
     expect(second.devicePub).not.toBe(first.devicePub);
+  });
+});
+
+describe('serverPins', () => {
+  it('keeps a pin per host, in a database a v1 browser upgrades with its device kept', async () => {
+    // The v1 schema, and a device in it, as a browser that predates the
+    // pins left them.
+    const db = await new Promise<IDBDatabase>((resolve) => {
+      const req = indexedDB.open('hxd-ng.identity', 1);
+      req.onupgradeneeded = () => {
+        req.result.createObjectStore('devices', { keyPath: 'devicePub' }).createIndex('fingerprint', 'fingerprint');
+        req.result.createObjectStore('meta');
+      };
+      req.onsuccess = () => resolve(req.result);
+    });
+    const tx = db.transaction(['devices', 'meta'], 'readwrite');
+    await new Promise((resolve) => (tx.objectStore('devices').put({ devicePub: 'ab' }).onsuccess = resolve));
+    await new Promise((resolve) => (tx.objectStore('meta').put('ab', 'active').onsuccess = resolve));
+
+    const pin = { key: new Uint8Array(32).fill(1), commitment: undefined, followed: [], dismissed: [] };
+    await serverPins.put('hl.example:5700', pin);
+    expect(await serverPins.get('hl.example:5700')).toEqual(pin);
+    expect(await serverPins.get('other.example')).toBeUndefined();
+    expect((await getActiveDevice())?.devicePub).toBe('ab');
   });
 });

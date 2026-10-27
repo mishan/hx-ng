@@ -56,6 +56,7 @@ export {
   type MdRun,
 } from './markdown.js';
 export * from './identity.js';
+export * from './handover.js';
 export {
   Connection,
   hasSavedSession,

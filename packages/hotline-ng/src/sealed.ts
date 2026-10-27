@@ -18,6 +18,7 @@ import { HpkeError, hpkeOpen, hpkeSeal, x25519PublicKey, type HpkeSender } from 
 import {
   DEVICE_CERT_DOMAIN,
   IdentityError,
+  bytesToBase64url,
   decodeDeviceCert,
   fingerprintFromString,
   fingerprintToString,
@@ -26,6 +27,7 @@ import {
 } from './identity.js';
 import privateMessageMaps, {
   SIGNED_SKEW_SECONDS,
+  canonicalText,
   checkMessageCert,
   signedPrivateMessages,
   type MessageScope,
@@ -135,6 +137,24 @@ export async function sealMessageTo(
     throw new IdentityError('key-mismatch', 'the certificate is not of the identity `to` names');
   }
   return sealMessage(message, sender, recipient.deviceEnc, deniable);
+}
+
+/** What a sealed `msg` carries besides `to` (§4.3): the box, sealed to
+ *  `recipientCert` as `sealMessageTo` seals, and the SHA-256 of the
+ *  `device_enc` key it was sealed to, both base64url. A retry passes the
+ *  same `id`, so the recipient keeps one. */
+export async function sealMsgRequest(
+  sender: DeviceKeys,
+  message: Omit<SignedPrivateMessage, 'id' | 'sent' | 'quote'> & { id?: Uint8Array },
+  recipientCert: Uint8Array,
+  deniable = false,
+  sent = Math.floor(Date.now() / 1000),
+): Promise<{ sealed: string; cert: string }> {
+  const id = message.id ?? crypto.getRandomValues(new Uint8Array(16));
+  const full = { ...message, id, sent, text: canonicalText(message.text) };
+  const box = await sealMessageTo(full, sender, recipientCert, deniable, sent);
+  const key = await sha256(decodeDeviceCert(recipientCert).deviceEnc);
+  return { sealed: bytesToBase64url(box), cert: bytesToBase64url(key) };
 }
 
 /** `sealMessage` with the ephemeral key derived from `ikm` (RFC 9180

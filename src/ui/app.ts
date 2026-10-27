@@ -27,11 +27,16 @@ import {
   CAP_INBOX,
   CAP_SIGNED,
   BAD_SIGNATURE,
+  CERT_CHANGED,
+  NOT_SEALED,
+  SIGNED_SKEW_SECONDS,
+  base64urlToBytes,
   canonicalText,
   fingerprintFromString,
   signChatRequest,
   signMsgRequest,
   signNewsPost,
+  sealMsgRequest,
   isFingerprint,
   mediaBlockedReason,
   type BlockParams,
@@ -81,17 +86,39 @@ import { type AvatarChoice, pickIcon } from './iconpicker';
 import { IdentityPanel } from './identity';
 import { installButton } from './install';
 import { takeScanFragment, type Scanned } from '../identity/scan';
-import { getActiveDevice, getDevice, newsGuids, type StoredDevice } from '../identity/storage';
+import { getActiveDevice, getDevice, newsGuids, peers, sealedReplay, type StoredDevice } from '../identity/storage';
+import {
+  PeerMemory,
+  adoption,
+  chooseDeniable,
+  conversationIdentity,
+  deniableChoice,
+  lineFingerprint,
+  neverSealedFallback,
+  neverSeals,
+  rememberIdentity,
+  sealTarget,
+  sealedBefore,
+  sighting,
+  signedTo,
+  splitUtf8,
+} from '../sealing';
 import { KeyWithdrawn, checkHostKey, type ServerKeyCheck } from '../identity/trust';
 import {
   ArticleReader,
   LineReader,
   MessageReader,
+  readPmSigning,
+  readSealing,
   readSigning,
   rememberSigningDevice,
+  sealedFor,
   signingDeviceFor,
   signsFor,
+  writePmSigning,
+  writeSealing,
   writeSigning,
+  type LineRead,
   type LineSignature,
   type PinnedKey,
   type SignScope,
@@ -107,7 +134,7 @@ import { closedForReporter, ModerationView, problem as moderationProblem } from 
 import { AccountsView } from './accounts';
 import { mayAdminister } from '../accounts';
 import { NewsView } from './news';
-import { appendLine, isAtBottom, keepingPlace, lineOf, renderTranscript, scrollToEnd, spoken } from './transcript';
+import { appendLine, isAtBottom, keepingPlace, lineOf, renderTranscript, scrollToEnd, signedName, spoken } from './transcript';
 import { wrapSelection } from './markdown';
 import { contentWords, disablePush, enablePush, pushEnabled, pushSupported, refreshPush } from '../push/client';
 import { awayCount, clearAway, showBadge } from '../push/badge';
@@ -207,8 +234,22 @@ const UNSIGNED_HERE: Record<SignScope, string> = {
   news: 'Signing articles is on, but this one goes unsigned',
 };
 
-/** The cleartext `msg` limit a signed text is held to (§3.2). */
-const SIGNED_MSG_MAX_BYTES = 4096;
+/** The cleartext `msg` limit (§4.3), which a signed text is held to
+ *  rather than cut (§3.2). */
+const CLEAR_MSG_MAX_BYTES = 4096;
+/** The text a sealed message may carry (§4.3). */
+const SEALED_MSG_MAX_BYTES = 8192;
+
+/** How long after a resume the events it replays may still arrive. */
+const RESUME_REPLAY_MS = 5000;
+
+/** One message a private message went as, for the sender's own copy. */
+interface SentPm {
+  ok: MsgOk;
+  text: string;
+  signature?: LineSignature;
+  sealed?: boolean;
+}
 
 const SIGNED_WHAT: Record<SignScope, string> = { lobby: 'lines', pm: 'private messages', news: 'articles' };
 
@@ -262,14 +303,34 @@ export class App {
    *  1997 client comes out in italics; this is for anybody who would
    *  rather see exactly what was typed. What is sent never changes. */
   private markdown = readMarkdown();
-  /** Whether this user signs the lobby's lines and private messages,
-   *  off by default, and articles, on by default, as hxd-ng's
-   *  `docs/e2e-messages.md` §8 asks. */
+  /** Whether this user signs the lobby's lines, off by default, private
+   *  messages sealed and not in the clear, and articles, as hxd-ng's
+   *  `docs/e2e-messages.md` §8 asks; and seals private messages, on by
+   *  default. */
   private signLobby = readSigning('lobby');
-  private signPms = readSigning('pm');
+  private pmSigning = readPmSigning();
+  private sealPms = readSealing();
   private signNews = readSigning('news');
-  /** This device's key and certificate, for a session that may sign. */
-  private signer: { key: CryptoKey; cert: Uint8Array } | null = null;
+  /** This device's keys and certificate, for a session that may sign
+   *  and seal. */
+  private signer: { key: CryptoKey; enc: CryptoKey; cert: Uint8Array } | null = null;
+  /** Each roster session's certificate as `device_cert` gave it, with
+   *  the fingerprint it was asked for under, until that uid's session
+   *  changes or the server says its key has. */
+  private certs = new Map<number, { fingerprint: string; cert: Uint8Array }>();
+  /** The uids whose rows said `sealed` this connection, and under which
+   *  fingerprint: a message to one that goes in the clear is asked about
+   *  first (§8), even once the row says nothing of an identity. */
+  private sealedRows = new Map<number, string>();
+  /** Who private messages were verified from, or sealed to, across
+   *  reloads (§4.4, §8). */
+  private peerMemory = new PeerMemory(peers);
+  /** The conversations told this session cannot seal. */
+  private cannotSealNoted = new Set<ConvId>();
+  /** When the last resume was answered, whose replay is older than it
+   *  looks; and whether the clock was warned of this connection. */
+  private resumedAt = 0;
+  private clockWarned = false;
   /** The fingerprint this session proved, which a private message to it
    *  is signed to. */
   private proved: string | null = null;
@@ -277,14 +338,17 @@ export class App {
    *  accepted, and then nothing is signed. */
   private pinned: PinnedKey | null = null;
   private lines = new LineReader(null);
-  private messages = new MessageReader(null);
+  private messages = new MessageReader(null, sealedReplay);
   private articles = new ArticleReader(null);
   /** Said once a connection, for each scope and reason: signing is on
    *  there, and this goes unsigned. */
   private unsignedNoted = new Set<string>();
-  /** For each conversation, the change of its recipient's identity it
-   *  was last told of. */
+  /** For each conversation, the other session it was last told its
+   *  sealed messages go to. */
   private recipientWarned = new Map<ConvId, string>();
+  /** Each identity a conversation was seen under besides its own, warned
+   *  of once a connection. */
+  private identityWarned = new Set<string>();
   /** The ng address the key was checked at, to check it again. */
   private keyUrl = '';
   private repinning: Promise<void> | null = null;
@@ -315,6 +379,8 @@ export class App {
     spellcheck: true,
   });
   private composerHint = h('span', { class: 'composer-hint' });
+  /** This conversation's sealed messages go deniably, or signed. */
+  private deniableBtn = h('button', { type: 'button', class: 'ghost deniable-switch', hidden: true }, 'deniable');
   private attachBtn = h(
     'button',
     { class: 'ghost attach', title: 'Attach an image', ariaLabel: 'Attach an image', hidden: true },
@@ -637,6 +703,9 @@ export class App {
         this.store.self = self;
         this.store.server = server;
         this.store.replaceRoster(users);
+        this.certs.clear();
+        this.sealedRows.clear();
+        for (const u of users) this.noteSealed(u);
         this.renderAll();
         // A snapshot after the first is a resync or a fresh login on the
         // same socket, and either way the news events in between are gone
@@ -650,6 +719,7 @@ export class App {
         this.onAccountChanged();
       },
       onResumed: (replay) => {
+        this.resumedAt = Date.now();
         this.say(
           replay > 0
             ? `Reconnected — ${replay} ${replay === 1 ? 'message' : 'messages'} replayed.`
@@ -722,10 +792,18 @@ export class App {
         : null;
     this.lines = new LineReader(this.pinned);
     this.articles = new ArticleReader(this.pinned, newsGuids);
-    this.messages = new MessageReader(null);
+    this.messages = new MessageReader(null, sealedReplay);
+    this.certs.clear();
+    this.sealedRows.clear();
+    this.cannotSealNoted.clear();
+    this.clockWarned = false;
     this.unsignedNoted.clear();
     this.recipientWarned.clear();
+    this.identityWarned.clear();
     this.redacted.clear();
+    // Merged under what this page noted already, so a record another tab
+    // wrote since is seen.
+    await this.peerMemory.load().catch(() => {});
     // The device the session proves: for a saved session it resumes, the
     // one that session logged in with, whichever is active now; for an
     // identity login, the active one.
@@ -741,10 +819,14 @@ export class App {
             {
               ...creds,
               url: way.url,
-              ...(signs ? { signs } : {}),
+              ...(signs ? { signs, sealed: true } : {}),
               // Asked as the login goes out, a fresh one after a failed
               // resume included: it proves the active device.
-              ...(d.identity ? { identity: { ...d.identity, signs: () => signsFor(active?.cert, this.signLobby) } } : {}),
+              ...(d.identity
+                ? {
+                    identity: { ...d.identity, signs: () => signsFor(active?.cert, this.signLobby), sealed: () => sealedFor(active?.cert) },
+                  }
+                : {}),
             },
             hooks,
           );
@@ -905,6 +987,8 @@ export class App {
   private bindEvents(conn: Session): void {
     conn.on('user_joined', (d) => {
       this.store.put(d.user);
+      this.certs.delete(d.user.uid);
+      this.noteSealed(d.user);
       this.inOrder(() => this.push(LOBBY, { t: Date.now(), kind: 'notice', text: `${d.user.nick} joined.` }));
       this.renderRoster();
     });
@@ -912,6 +996,7 @@ export class App {
     conn.on('user_changed', (d) => {
       const before = this.store.user(d.user.uid);
       this.store.put(d.user);
+      this.noteSealed(d.user);
       if (before && before.nick !== d.user.nick) {
         const text = `${before.nick} is now known as ${d.user.nick}.`;
         this.inOrder(() => this.push(LOBBY, { t: Date.now(), kind: 'notice', text }));
@@ -932,6 +1017,8 @@ export class App {
 
     conn.on('user_parted', (d) => {
       const gone = this.store.remove(d.uid);
+      this.certs.delete(d.uid);
+      this.sealedRows.delete(d.uid);
       const text = `${gone?.nick ?? `uid ${d.uid}`} left.`;
       this.inOrder(() => this.push(LOBBY, { t: Date.now(), kind: 'notice', text }));
       this.renderRoster();
@@ -943,6 +1030,7 @@ export class App {
       // did not send it. Keep those servers usable while deployments
       // roll forward.
       const at = Number.isFinite(d.at) ? d.at : Math.floor(Date.now() / 1000);
+      this.checkClock(at);
       // Read before it is shown: a copy of a signed line already here is
       // not shown at all, and one read for a session since replaced
       // belongs to none on screen.
@@ -1003,14 +1091,31 @@ export class App {
       // The login flush and an `inbox` page carry the same rows, and
       // which arrives first is a race. Whichever loses is dropped here.
       if (d.id !== undefined && this.store.hasMail(d.id)) return;
+      this.checkClock(d.at, d.queued);
       // Read before it is shown, in its place among the lines, as a chat
-      // line is.
+      // line is; a sealed one opened there too.
       const messages = this.messages;
-      const read = messages.live(d, d.from.uid > 0 ? this.store.user(d.from.uid) : undefined).catch(() => unreadable(d.signed));
+      const row = d.from.uid > 0 ? this.store.user(d.from.uid) : undefined;
+      const sealed = d.sealed !== undefined;
+      const read: Promise<LineRead | null> = d.sealed_lost
+        ? Promise.resolve(null)
+        : sealed
+          ? messages.sealed(d, row)
+          : messages.live(d, row).catch(() => unreadable(d.signed));
       this.inOrder(async () => {
-        const { signature, duplicate } = await read;
-        if (messages !== this.messages) return;
+        const opened = await read;
+        if (messages !== this.messages) return void (opened && messages.unshown(opened).catch(() => {}));
         if (d.id !== undefined && this.store.hasMail(d.id)) return;
+        if (!opened) {
+          const conv = this.store.openPm({ uid: d.from.uid, login: d.from.login, nick: d.from.nick });
+          this.push(conv.id, {
+            t: d.at * 1000,
+            kind: 'system',
+            text: `A sealed message to this device, from the one the server calls ${d.from.nick}, was lost: this session could not open sealed messages when it came back.`,
+          });
+          return this.renderRail();
+        }
+        const { signature, duplicate } = opened;
         if (duplicate) {
           if (d.id !== undefined) this.store.skipMail({ uid: d.from.uid, login: d.from.login }, d.id);
           return;
@@ -1020,17 +1125,22 @@ export class App {
         // only `unread` was enough to render "1 unread of 0 stored" until
         // the next reply corrected it.
         if (d.id !== undefined) this.store.noteStoredMessage();
+        const signed = sealed ? opened.whole : d.signed;
         this.push(conv.id, {
           t: d.at * 1000,
           kind: 'chat',
           from: d.from,
-          text: d.text,
+          text: opened.text ?? d.text,
           queued: d.queued,
           id: d.id,
           media: d.media,
           ...(signature ? { signature } : {}),
-          ...(d.signed !== undefined ? { signed: d.signed } : {}),
+          ...(signed !== undefined ? { signed } : {}),
+          ...(sealed ? { sealed: true } : this.clearMark()),
+          ...(opened.hidden ? { hidden: true } : {}),
         });
+        const seen = sighting(signature, this.verifiedUnder(conv), d.from);
+        if (seen) void rememberIdentity(conv, this.peerMemory, this.keyUrl, seen.fingerprint, seen.who, sealed ? { sealed: true } : {});
         this.renderRail();
         this.renderMail();
       });
@@ -1152,22 +1262,30 @@ export class App {
         'to_login' in to
           ? { to_login: to.to_login, text, guid, media }
           : { to: to.to, text, guid, media };
-      const { ok, signature } = await this.sendPm(conv, params).catch((e: unknown) => {
-        this.restoreAttachment(attached);
+      // PMs have no echo, so the sender's own half is local, a line for
+      // each message it went as.
+      const me = this.store.self;
+      let sent = 0;
+      let queued = false;
+      await this.sendPm(conv, params, ({ ok, text: part, signature, sealed }) => {
+        this.push(conv.id, {
+          t: Date.now(),
+          kind: 'chat',
+          from: { uid: me?.uid ?? 0, nick: me?.nick ?? 'you' },
+          text: part,
+          local: true,
+          media: sent ? undefined : attached?.media,
+          ...(signature ? { signature } : {}),
+          ...(sealed !== undefined ? { sealed } : {}),
+        });
+        sent += part.length;
+        queued ||= ok.queued;
+      }).catch((e: unknown) => {
+        if (!sent) this.restoreAttachment(attached);
+        this.restoreComposer(text.slice(sent), 'normal');
         throw e;
       });
-      // PMs have no echo, so the sender's own half is local.
-      const me = this.store.self;
-      this.push(conv.id, {
-        t: Date.now(),
-        kind: 'chat',
-        from: { uid: me?.uid ?? 0, nick: me?.nick ?? 'you' },
-        text,
-        local: true,
-        media: attached?.media,
-        ...(signature ? { signature } : {}),
-      });
-      if (ok.queued) {
+      if (queued) {
         this.say(`${conv.title} is not here. The server is holding that for them.`);
       }
       return;
@@ -1204,35 +1322,201 @@ export class App {
     });
   }
 
-  /** A private message, signed where this user signs them, the session
-   *  can, and the recipient has an identity to sign it to; never in a
-   *  private chat, which this client does not join. What it was sent
-   *  signed as is for the sender's own copy. */
-  private async sendPm(conv: Conversation, params: MsgParams): Promise<{ ok: MsgOk; signature?: LineSignature }> {
+  /** A private message, sealed where this user seals them and it can be
+   *  (`sendSealed`), and otherwise in the clear, asked about first if it
+   *  could have been sealed to them before, and in as many messages as
+   *  the server's limit takes; never in a private chat, which this
+   *  client does not join. Each message it went as is handed to `sent`
+   *  as it goes, for the sender's own copy. */
+  private async sendPm(conv: Conversation, params: MsgParams, sent: (part: SentPm) => void): Promise<void> {
     const conn = this.conn;
     if (!conn) throw new Error('Not connected.');
-    if (!(conn instanceof Connection) || !this.signPms || !params.text) return { ok: await conn.msg(params) };
-    let to = this.recipientOf(conv);
-    let id = crypto.getRandomValues(new Uint8Array(16));
+    if (!(conn instanceof Connection)) return sent({ ok: await conn.msg(params), text: params.text });
+    const parts = splitUtf8(params.text, CLEAR_MSG_MAX_BYTES);
+    if (this.sealPms) {
+      // Nothing is sealed or signed while a key check, or its warning,
+      // is open.
+      await this.repinning;
+      const never = neverSeals({ sealing: conn.sealing, device: this.signer !== null });
+      if (never === null) {
+        const sealed = await this.sendSealed(conn, conv, params);
+        if ('ok' in sealed) return sent({ ...sealed, text: params.text });
+        await this.unsealedAfter(conv, sealed.why, parts.length);
+      } else if (neverSealedFallback({ device: this.signer !== null }, this.wasSealed(conv)) === 'ask') {
+        await this.unsealedAfter(conv, never, parts.length);
+      } else if (!this.cannotSealNoted.has(conv.id)) {
+        this.cannotSealNoted.add(conv.id);
+        this.push(conv.id, { t: Date.now(), kind: 'system', local: true, text: `Private messages here go in the clear, not sealed: this session cannot seal them, as ${never}.` });
+      }
+    }
+    // Once one piece goes unsigned, so do the rest, rather than ask again.
+    let sign = true;
+    for (const [i, text] of parts.entries()) {
+      const part = i === 0 ? { ...params, text } : { ...params, text, guid: newGuid(), media: undefined };
+      const clear = await this.sendClear(conn, conv, part, sign);
+      sign = clear.signature !== undefined;
+      sent({ ...clear, text, ...this.clearMark() });
+    }
+  }
+
+  /** `sealed: false` on a private message in the clear, where this
+   *  session could have sealed it or the user would have, so that every
+   *  one says (§8). */
+  private clearMark(): { sealed?: false } {
+    return this.conn instanceof Connection && (this.conn.sealing || this.sealPms) ? { sealed: false } : {};
+  }
+
+  /** Seal to the device of a session holding the identity this
+   *  conversation was verified under, or with none known the one the
+   *  roster shows at its uid, as its certificate says once it is checked
+   *  against that identity, signed or deniably as this conversation goes;
+   *  or why it cannot be. A key the server says changed is fetched and
+   *  sealed to once more, and never a reason to send in the clear. */
+  private async sendSealed(
+    conn: Connection,
+    conv: Conversation,
+    params: MsgParams,
+  ): Promise<{ ok: MsgOk; signature: LineSignature; sealed: true } | { why: string }> {
+    const signer = this.signer!;
+    if (params.media) return { why: 'an image cannot be sealed' };
+    const text = canonicalText(params.text);
+    if (new TextEncoder().encode(text).length > SEALED_MSG_MAX_BYTES) {
+      return { why: `it is longer than the ${SEALED_MSG_MAX_BYTES} bytes a sealed message may be` };
+    }
+    const { known, hint } = conversationIdentity(conv, this.peerMemory, this.keyUrl);
+    let target = sealTarget(conv, known, this.store.roster(), hint);
+    if ('changed' in target) {
+      await this.acceptIdentity(conv, target.changed, target.was, 'sealed');
+      target = { uid: target.uid, fingerprint: target.changed };
+    }
+    if ('cannot' in target) return { why: target.cannot };
+    const { uid, fingerprint: to } = target;
+    if (uid !== conv.peer.uid && this.recipientWarned.get(conv.id) !== `sealed ${uid} ${to}`) {
+      this.recipientWarned.set(conv.id, `sealed ${uid} ${to}`);
+      const nick = this.store.user(uid)?.nick ?? `uid ${uid}`;
+      this.push(conv.id, { t: Date.now(), kind: 'system', local: true, text: `Sealed to ${nick}, the session holding the identity ${conv.title}'s messages here were under.` });
+    }
+    const deniable = this.deniable(conv);
+    const message = { id: crypto.getRandomValues(new Uint8Array(16)), cert: signer.cert, to: fingerprintFromString(to)!, text };
+    const sent = Math.floor(Date.now() / 1000);
+    let resealed = false;
+    for (;;) {
+      try {
+        const { cert, held } = await this.recipientCert(conn, uid, to);
+        let req: { sealed: string; cert: string };
+        try {
+          req = await sealMsgRequest({ sign: signer.key, enc: signer.enc }, message, cert, deniable, sent);
+        } catch (e) {
+          this.certs.delete(uid);
+          // One held from before may have expired since: the server's
+          // word now is asked for.
+          if (held) continue;
+          return { why: `the certificate the server gave for them did not pass: ${this.problem(e)}` };
+        }
+        const ok = await conn.msg({ to: uid, ...req });
+        void rememberIdentity(conv, this.peerMemory, this.keyUrl, to, { login: conv.peer.login, nick: conv.title }, { sealed: true });
+        const signature: LineSignature = {
+          state: deniable ? 'deniable' : 'verified',
+          signer: this.proved,
+          to,
+          sent,
+          sentAtAnotherTime: false,
+          signatureExpected: false,
+        };
+        return { ok, signature, sealed: true };
+      } catch (e) {
+        if (!(e instanceof WireFailure)) throw e;
+        if (e.wire.code === CERT_CHANGED && !resealed) {
+          resealed = true;
+          this.certs.delete(uid);
+          continue;
+        }
+        if (e.wire.code === NOT_SEALED || e.wire.code === 'not_delivered') return { why: (e.wire.text || errorText(e.wire)).replace(/\.$/, '') };
+        throw new Error(`Not sent: ${e.wire.text || errorText(e.wire)}`);
+      }
+    }
+  }
+
+  /** `uid`'s certificate as `device_cert` answers it, held while that
+   *  session is the one asked for; `held` when it was. */
+  private async recipientCert(conn: Connection, uid: number, fingerprint: string): Promise<{ cert: Uint8Array; held: boolean }> {
+    const held = this.certs.get(uid);
+    if (held?.fingerprint === fingerprint) return { cert: held.cert, held: true };
+    const cert = base64urlToBytes((await conn.deviceCert(uid)).cert);
+    this.certs.set(uid, { fingerprint, cert });
+    return { cert, held: false };
+  }
+
+  /** The identity this conversation's messages were verified under, or
+   *  sealed to: this page's, or the one last remembered for its login. */
+  private verifiedUnder(conv: Conversation): string | null {
+    return conversationIdentity(conv, this.peerMemory, this.keyUrl).known;
+  }
+
+  /** A conversation's sealed messages go deniably by its own switch, or
+   *  by the user's choice to sign none. */
+  private deniable(conv: Conversation): boolean {
+    return deniableChoice(conv, this.peerMemory, this.keyUrl) ?? this.pmSigning === 'never';
+  }
+
+  private noteSealed(u: User): void {
+    if (u.identity?.sealed) this.sealedRows.set(u.uid, u.identity.fingerprint);
+  }
+
+  private wasSealed(conv: Conversation): boolean {
+    const fps = [this.verifiedUnder(conv), this.peerMemory.byNick(this.keyUrl, conv.title), this.rosterFingerprint(conv)];
+    return sealedBefore(conv, fps, this.sealedRows, this.peerMemory, this.keyUrl);
+  }
+
+  /** Before one that could not be sealed goes in the clear: asked, each
+   *  time, to someone it could have been sealed to before, and not sent
+   *  if not; said once a connection otherwise. */
+  private async unsealedAfter(conv: Conversation, why: string, parts: number): Promise<void> {
+    if (this.wasSealed(conv)) {
+      const yes = await ask({
+        title: 'Send it unsealed?',
+        body:
+          `${conv.title} could open sealed messages before, but this one cannot be sealed: ${why}. Sent in the clear, the servers on its way can read it` +
+          (parts > 1 ? `, and it goes as ${parts} messages, the most the server carries in each.` : '.'),
+        fields: [],
+        ok: 'Send unsealed',
+      });
+      if (yes === null) throw new Error('Not sent: it could not be sealed.');
+      return;
+    }
+    const noted = `seal ${why}`;
+    if (!this.unsignedNoted.has(noted)) this.say(`Sealing private messages is on, but this one goes in the clear: ${why}.`);
+    this.unsignedNoted.add(noted);
+  }
+
+  /** A private message in the clear, signed where `sign` lets it, this
+   *  user signs every one, the session can, and the recipient has an
+   *  identity to sign it to. */
+  private async sendClear(
+    conn: Connection,
+    conv: Conversation,
+    params: MsgParams,
+    sign: boolean,
+  ): Promise<{ ok: MsgOk; signature?: LineSignature }> {
+    if (!sign || this.pmSigning !== 'always' || !params.text) return { ok: await conn.msg(params) };
+    let to: string | null = null;
+    const id = crypto.getRandomValues(new Uint8Array(16));
     let sent = 0;
-    let tries = 0;
     return this.sendSigned<SignedMsgRequest, { ok: MsgOk; signature?: LineSignature }>(conn, 'pm', {
       what: 'message',
-      cannot: () => (to ? null : `${conv.title} did not log in with an identity to sign them to.`),
+      // Asked only once this session can sign it, its key checked.
+      cannot: async () => {
+        to = await this.signedRecipient(conv);
+        return to ? null : `${conv.title} did not log in with an identity to sign them to.`;
+      },
       sign: () => {
         // The cleartext limit, which the server holds a signed text to
         // rather than cut it.
-        if (new TextEncoder().encode(canonicalText(params.text)).length > SIGNED_MSG_MAX_BYTES) {
-          throw new Error(`it is longer than the ${SIGNED_MSG_MAX_BYTES} bytes a signed message may be`);
+        if (new TextEncoder().encode(canonicalText(params.text)).length > CLEAR_MSG_MAX_BYTES) {
+          throw new Error(`it is longer than the ${CLEAR_MSG_MAX_BYTES} bytes a signed message may be`);
         }
-        // Signed again after a refusal, to who the roster says they are
-        // now rather than to the same identity again, and to another as
-        // another message, since one id is one message (§3.6).
-        if (tries++ > 0) {
-          const now = this.rosterFingerprint(conv) ?? to;
-          if (now !== to) id = crypto.getRandomValues(new Uint8Array(16));
-          to = now;
-        }
+        // Signed again after a refusal to the same identity, whatever
+        // the roster says now (§4.4).
         sent = Math.floor(Date.now() / 1000);
         return signMsgRequest(this.signer!.key, { id, cert: this.signer!.cert, to: fingerprintFromString(to!)!, text: params.text }, sent);
       },
@@ -1241,37 +1525,43 @@ export class App {
         signature: { state: 'verified', signer: this.proved, to: to!, sent, sentAtAnotherTime: false, signatureExpected: false },
       }),
       unsigned: async () => ({ ok: await conn.msg(params) }),
-      restore: () => this.restoreComposer(params.text, 'normal'),
+      // The sender puts back all that was not sent, this piece and after.
+      restore: () => {},
     });
   }
 
-  /** The identity a private message to this conversation is signed to:
-   *  the one the roster row gives, the server's current word on who they
-   *  are (§4.9), else the one their messages here were verified as
-   *  signed by. Where the two differ the conversation is told, once for
-   *  each change. */
-  private recipientOf(conv: Conversation): string | null {
-    let verified: string | null = null;
-    for (let i = conv.lines.length - 1; i >= 0 && verified === null; i--) {
-      const sig = conv.lines[i]!.signature;
-      if (!conv.lines[i]!.local && sig?.state === 'verified' && sig.signer) verified = sig.signer;
-    }
-    const roster = this.rosterFingerprint(conv);
-    if (roster && verified && roster !== verified) {
-      const change = `${verified} ${roster}`;
-      if (this.recipientWarned.get(conv.id) !== change) {
-        this.recipientWarned.set(conv.id, change);
-        this.push(conv.id, {
-          t: Date.now(),
-          kind: 'system',
-          local: true,
-          text:
-            `${conv.title}'s messages here were signed by ${verified.slice(0, 16)}, but the server now says they are ${roster.slice(0, 16)}. ` +
-            'Messages you sign are signed to the second. If you did not expect a new key, check it with them another way.',
-        });
-      }
-    }
-    return roster ?? verified;
+  /** The identity a private message in the clear is signed to (§4.9),
+   *  as `signedTo` has it, asked about first where the row shows another
+   *  than the one known, and not sent if not; `null` with none to sign
+   *  to. */
+  private async signedRecipient(conv: Conversation): Promise<string | null> {
+    const row = conv.peer.uid !== undefined ? this.store.user(conv.peer.uid) : undefined;
+    const to = signedTo(conversationIdentity(conv, this.peerMemory, this.keyUrl), row ? this.rosterFingerprint(conv) : undefined);
+    if (!('changed' in to)) return to.to;
+    await this.acceptIdentity(conv, to.changed, to.was, 'signed');
+    return to.changed;
+  }
+
+  /** The user asked whether a conversation goes to `changed`, an
+   *  identity other than `was`, the one it was last seen under, and
+   *  moved there on a yes, its choice of deniable with it; not sent on a
+   *  no. The user's word alone moves a conversation to another identity. */
+  private async acceptIdentity(conv: Conversation, changed: string, was: string, how: 'sealed' | 'signed'): Promise<void> {
+    const yes = await ask({
+      title: how === 'sealed' ? 'Seal to another identity?' : 'Sign to another identity?',
+      body:
+        `${conv.title} was last under the identity ${was.slice(0, 16)} here, but the server now shows ${changed.slice(0, 16)} for them, ` +
+        (how === 'sealed'
+          ? 'and no session with the first. Sealed to the second, only whoever holds it can read this. '
+          : 'Signed to the second, it is addressed to whoever holds it. ') +
+        'If you did not expect a new key, check it with them another way first.',
+      fields: [],
+      ok: how === 'sealed' ? 'Seal to the new one' : 'Sign to the new one',
+    });
+    if (yes === null) throw new Error('Not sent: the server shows them under another identity.');
+    const deniable = conv.deniable ?? this.peerMemory.get(this.keyUrl, was)?.deniable;
+    conv.verified = changed;
+    void this.peerMemory.note(changed, this.keyUrl, { login: conv.peer.login, nick: conv.title }, { accepted: true, ...(deniable === undefined ? {} : { deniable }) });
   }
 
   private rosterFingerprint(conv: Conversation): string | null {
@@ -1393,9 +1683,9 @@ export class App {
   private useDevice(url: string, device: StoredDevice | null): Signs | undefined {
     rememberSigningDevice(url, device?.devicePub ?? null);
     const signs = signsFor(device?.cert, this.signLobby);
-    this.signer = signs && device?.cert ? { key: device.deviceSign, cert: device.cert } : null;
+    this.signer = signs && device?.cert ? { key: device.deviceSign, enc: device.deviceEnc, cert: device.cert } : null;
     this.proved = device?.cert ? (device.fingerprint ?? null) : null;
-    this.messages.prove(this.proved);
+    this.messages.prove(this.proved, this.signer?.enc ?? null);
     return signs;
   }
 
@@ -1876,15 +2166,17 @@ export class App {
   private async reportLine(line: Line, conv: Conversation): Promise<void> {
     const target = lineReport(line, conv, this.store.self, (uid) => this.store.user(uid) !== undefined);
     if (!target) return;
-    const who = line.from?.nick || 'someone';
+    const who = signedName(line.signature, line.from?.nick ?? '').name || 'someone';
     const pasted = 'user' in target && target.user !== undefined;
     const reason = await this.reportReason(
       `Report ${who}’s ${conv.kind === 'lobby' ? 'line' : 'message'}`,
-      pasted
-        ? 'The server kept no copy of it, so the words go with your report as your account of them.'
-        : conv.kind === 'lobby'
-          ? 'The moderators are shown the line.'
-          : 'The moderators are shown the message: reporting it is you choosing to show them.',
+      line.sealed && line.signed === undefined
+        ? 'It was sealed deniably, so it carries no signature: the words go with your report as your account of them, and the moderators cannot check that they were sent.'
+        : pasted
+          ? 'The server kept no copy of it, so the words go with your report as your account of them.'
+          : conv.kind === 'lobby'
+            ? 'The moderators are shown the line.'
+            : 'The moderators are shown the message: reporting it is you choosing to show them.',
     );
     if (reason === null) return;
     await this.fileReport({ ...target, reason } as ReportParams);
@@ -2201,6 +2493,7 @@ export class App {
           media: m.media,
           ...(signature ? { signature } : {}),
           ...(m.signed !== undefined ? { signed: m.signed } : {}),
+          ...this.clearMark(),
         },
         !m.read,
       );
@@ -2317,6 +2610,8 @@ export class App {
   private push(id: ConvId, line: Line, fresh = true): void {
     const conv = this.store.add(id, line, fresh);
     if (!conv) return;
+    const fp = conv.kind === 'pm' ? lineFingerprint(line) : null;
+    if (fp) this.adoptIdentity(conv, fp);
     if (id === this.store.active) {
       // Appending one line assumes the DOM still matches the array it was
       // drawn from. A merge rewrites that array, so redraw instead.
@@ -2334,9 +2629,48 @@ export class App {
     this.renderUnreadTitle();
   }
 
+  /** A message in a conversation under `fp`, as `adoption` has it,
+   *  warned of once a connection; only the user's word moves the
+   *  conversation, when the next sealed one goes. */
+  private adoptIdentity(conv: Conversation, fp: string): void {
+    const ids = conversationIdentity(conv, this.peerMemory, this.keyUrl);
+    if (adoption(ids, fp) === 'adopt') return void (conv.verified = fp);
+    const was = (ids.known ?? ids.hint)!;
+    const warned = `${conv.id} ${was} ${fp}`;
+    if (this.identityWarned.has(warned)) return;
+    this.identityWarned.add(warned);
+    this.push(conv.id, {
+      t: Date.now(),
+      kind: 'system',
+      local: true,
+      text:
+        `${conv.title} was last seen here under the identity ${was.slice(0, 16)}, but that message is under ${fp.slice(0, 16)}. ` +
+        'Nothing is sealed or signed to the second unless you agree to it when you next send one. If you did not expect a new key, check it with them another way.',
+    });
+  }
+
   /** Something this client wants to say about itself. */
   private say(text: string): void {
     this.push(this.store.active, { t: Date.now(), kind: 'system', text, local: true });
+  }
+
+  /** This clock against the server's `at` on what it relays (§3.10),
+   *  warned of once a connection past the skew allowance: a sealed
+   *  message's freshness is judged by this clock alone, and is never set
+   *  from the server's. One that arrives just after a resume may have
+   *  waited, and one that is queued did, so only an `at` ahead of this
+   *  clock counts then. */
+  private checkClock(at: number, queued = false): void {
+    if (this.clockWarned) return;
+    const off = Date.now() / 1000 - at;
+    const waited = queued || Date.now() - this.resumedAt < RESUME_REPLAY_MS;
+    if (off > -SIGNED_SKEW_SECONDS && (off < SIGNED_SKEW_SECONDS || waited)) return;
+    this.clockWarned = true;
+    const minutes = Math.round(Math.abs(off) / 60);
+    this.say(
+      `This device's clock is about ${minutes} minutes ${off > 0 ? 'ahead of' : 'behind'} the server's. ` +
+        'Sealed messages are judged by this clock, so some may not be shown until it is set right.',
+    );
   }
 
   // --- rendering --------------------------------------------------------
@@ -2406,6 +2740,7 @@ export class App {
             ? face(peer, 1)
             : icon(128, 1),
         h('span', { class: 'rail-title' }, c.title),
+        c.kind === 'pm' && this.sealsDeniably(c) ? h('span', { class: 'rail-tag' }, 'deniable') : null,
         c.unread ? badge(c.unread) : null,
       );
       el.onclick = () => this.select(c.id);
@@ -2562,14 +2897,28 @@ export class App {
     // Unknown (a linked server's user) warns too, as what it is: it may be
     // in the clear, and nothing here can say it is not.
     const transport = peer?.transport;
+    const deniable = pm && this.sealsDeniably(conv);
     this.composerHint.textContent = !pm
       ? 'public chat'
       : transport === 'cleartext'
         ? `private message — ${peer?.nick} is on an unencrypted connection`
         : transport === 'unknown'
           ? `private message — whether ${peer?.nick}'s connection is encrypted is not known`
-          : 'private message';
+          : deniable
+            ? 'private message — sealed deniably'
+            : 'private message';
     this.composerHint.classList.toggle('warn', !!peer && transport !== 'encrypted');
+    this.deniableBtn.hidden = !pm || !(this.conn instanceof Connection && this.conn.sealing && this.sealPms);
+    this.deniableBtn.setAttribute('aria-pressed', String(deniable));
+    this.deniableBtn.title = deniable
+      ? 'Sealed messages here are deniable: they know it is from you, and can prove it to nobody. Click to sign them instead.'
+      : 'Sealed messages here are signed, so they can show anyone you sent them. Click to seal them deniably instead.';
+  }
+
+  /** Whether this conversation's sealed messages go deniably, where this
+   *  session seals them at all. */
+  private sealsDeniably(conv: Conversation): boolean {
+    return this.sealPms && this.conn instanceof Connection && this.conn.sealing && this.deniable(conv);
   }
 
   private renderUnreadTitle(): void {
@@ -2755,6 +3104,13 @@ export class App {
     // being told it exists — a screenshot in the clipboard and Ctrl-V —
     // and it costs six lines.
     this.attachBtn.onclick = () => this.filePicker.click();
+    this.deniableBtn.onclick = () => {
+      const conv = this.store.conversation(this.store.active);
+      if (conv?.kind !== 'pm') return;
+      void chooseDeniable(conv, this.peerMemory, this.keyUrl, !this.deniable(conv));
+      this.renderRail();
+      this.renderComposerHint();
+    };
     this.filePicker.onchange = () => {
       const file = this.filePicker.files?.[0];
       if (file) void this.attach(file);
@@ -2797,6 +3153,10 @@ export class App {
       if (act && line) {
         const conv = this.store.conversation(this.store.active);
         if (!conv) return;
+        if (act.dataset.act === 'reveal') {
+          line.hidden = false;
+          return keepingPlace(this.transcript, () => this.renderTranscript());
+        }
         const run = act.dataset.act === 'redact' ? this.redactLine(line) : this.reportLine(line, conv);
         run.catch((err: unknown) => this.say(moderationProblem(err)));
         return;
@@ -2824,7 +3184,7 @@ export class App {
       // composer is one row of controls, and an attachment is a thing
       // already sent to the server that the next line will carry.
       this.attachChip,
-      h('div', { class: 'composer' }, this.attachBtn, this.composer, this.composerHint, this.filePicker),
+      h('div', { class: 'composer' }, this.attachBtn, this.composer, this.deniableBtn, this.composerHint, this.filePicker),
     );
 
     this.shell.append(
@@ -2929,10 +3289,19 @@ export class App {
         writeSigning('lobby', on);
         if (this.conn instanceof Connection && this.conn.signs) this.conn.signs = on ? 'default' : 'able';
       },
-      signPms: this.signPms,
-      setSignPms: (on) => {
-        this.signPms = on;
-        writeSigning('pm', on);
+      sealPms: this.sealPms,
+      setSealPms: (on) => {
+        this.sealPms = on;
+        writeSealing(on);
+        this.renderRail();
+        this.renderComposerHint();
+      },
+      signPms: this.pmSigning,
+      setSignPms: (choice) => {
+        this.pmSigning = choice;
+        writePmSigning(choice);
+        this.renderRail();
+        this.renderComposerHint();
       },
       signNews: this.signNews,
       setSignNews: (on) => {

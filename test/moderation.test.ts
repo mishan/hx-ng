@@ -74,17 +74,22 @@ describe('what reporting a line names', () => {
     expect(lineReport(line({}), lobby, me)).toEqual({ user: { uid: 5 }, evidence: 'words' });
   });
 
-  it('pastes what a verified signature covers with it, naming nobody, and only that', () => {
-    const signature = (state: 'verified' | 'unverified' | 'invalid') => ({
+  it("pastes what a verified signature covers, naming nobody; a sealed one by its signature or its certificate's identity, an invalid one not at all", () => {
+    const signature = (state: 'verified' | 'unverified' | 'invalid' | 'deniable' | 'unopened') => ({
       state,
       signer: 'x',
       sentAtAnotherTime: false,
       signatureExpected: false,
     });
-    const cases: [string, Partial<Line>, object][] = [
+    const cases: [string, Partial<Line>, object | null][] = [
       ['verified', { signed: 'pmF2', signature: signature('verified') }, { evidence: 'words', signed: 'pmF2' }],
       ['unverified', { signed: 'pmF2', signature: signature('unverified') }, { user: { uid: 5 }, evidence: 'words' }],
       ['invalid', { signed: 'pmF2', signature: signature('invalid') }, { user: { uid: 5 }, evidence: 'words' }],
+      ['sealed and verified, its whole map', { signed: 'pmF2', sealed: true, signature: signature('verified') }, { signed: 'pmF2' }],
+      ['sealed deniably, the words about its certificate', { sealed: true, signature: signature('deniable') }, { user: { fingerprint: 'x' }, evidence: 'words' }],
+      ['sealed, unverified and revealed, by its signature', { signed: 'pmF2', sealed: true, signature: signature('unverified') }, { signed: 'pmF2' }],
+      ['sealed deniably, unverified and revealed', { sealed: true, signature: signature('unverified') }, { user: { fingerprint: 'x' }, evidence: 'words' }],
+      ['sealed, invalid and revealed, as from nobody', { sealed: true, signature: signature('invalid') }, null],
     ];
     for (const [name, over, want] of cases) {
       for (const conv of [lobby, pm]) expect(lineReport(line(over), conv, me), name).toEqual(want);
@@ -96,6 +101,10 @@ describe('what reporting a line names', () => {
     expect(lineReport(line({ kind: 'notice' }), lobby, me)).toBeNull();
     expect(lineReport(line({ local: true }), pm, me)).toBeNull();
     expect(lineReport(line({ id: 3, deleted: true, kind: 'deleted' }), lobby, me)).toBeNull();
+    // A sealed one still hidden, or one that could not be opened, has
+    // shown its reader nothing to report.
+    expect(lineReport(line({ sealed: true, hidden: true }), pm, me)).toBeNull();
+    expect(lineReport(line({ sealed: true, signature: { state: 'unopened', signer: null, sentAtAnotherTime: false, signatureExpected: false } }), pm, me)).toBeNull();
     // Mail that waited has uid 0 and, from a guest, no login: nobody to name.
     expect(lineReport(line({ from: { uid: 0, nick: 'Guest' } }), pm, me)).toBeNull();
   });

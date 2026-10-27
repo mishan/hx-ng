@@ -81,6 +81,9 @@ export interface RosterIdentity {
    *  `docs/e2e-messages.md` §4.6): a hint for spotting a stripped
    *  signature, never a promise that every line is signed. */
   signs?: true;
+  /** The session can open sealed messages (hxd-ng's
+   *  `docs/e2e-messages.md` §4.1): `device_cert` answers for it. */
+  sealed?: true;
 }
 
 export interface User {
@@ -285,6 +288,9 @@ export interface LoginParams {
   nick?: string;
   icon?: number;
   signs?: Signs;
+  /** This client can open sealed messages (hxd-ng's
+   *  `docs/e2e-messages.md` §4.1). */
+  sealed?: true;
 }
 
 export interface VideoLimits {
@@ -349,6 +355,9 @@ export interface LoginOk {
   /** The request's `signs`, echoed when the server will carry this
    *  session's signed lines; absent, it will not. */
   signs?: Signs;
+  /** The request's `sealed`, echoed when the server will carry sealed
+   *  messages to and from this session; absent, it will not. */
+  sealed?: true;
 }
 
 export interface ResumeParams {
@@ -356,12 +365,14 @@ export interface ResumeParams {
   token: string;
   last_seq: number;
   signs?: Signs;
+  sealed?: true;
 }
 
 export interface ResumeOk {
   replay: number;
   self: SelfUser;
   signs?: Signs;
+  sealed?: true;
 }
 
 export interface SyncOk {
@@ -395,6 +406,22 @@ export type MsgParams = {
   | { to: number; to_login?: never }
   | { to_login: string; to?: never }
 );
+
+/** A sealed message (hxd-ng's `docs/e2e-messages.md` §4.3), to one
+ *  session and nothing else beside it: `sealed` the box, base64url, and
+ *  `cert` the SHA-256 of the `device_enc` key it was sealed to
+ *  (`sealMsgRequest`). Never stored, so always `queued: false`. */
+export interface SealedMsgParams {
+  to: number;
+  sealed: string;
+  cert: string;
+}
+
+/** `device_cert`'s answer: the certificate the session proves now,
+ *  base64url, for a client to check before it seals to it. */
+export interface DeviceCertOk {
+  cert: string;
+}
 
 /** A public chat line. `text` may be empty when `media` is present: the
  *  image is the message. */
@@ -1455,7 +1482,8 @@ export interface Events {
    *  it was *sent*, not when it arrived, which is the whole difference
    *  for mail that waited. */
   msg: {
-    from: Sender;
+    /** `fingerprint` is the server's word for a sealed message's sender. */
+    from: Sender & { fingerprint?: string };
     text: string;
     at: number;
     queued: boolean;
@@ -1463,6 +1491,12 @@ export interface Events {
     media?: Media;
     /** A signed message's detached form, or its link form, base64url. */
     signed?: string;
+    /** A sealed message's box as it was sent, base64url, with `text` a
+     *  placeholder. */
+    sealed?: string;
+    /** In place of `sealed`: one held for this session was lost when it
+     *  resumed without saying `sealed`. */
+    sealed_lost?: true;
   };
   broadcast: { from: Sender; text: string };
   kicked: Record<string, never>;
@@ -1599,6 +1633,12 @@ export const FLOODING = 'flooding';
  *  (hxd-ng's `docs/e2e-messages.md` §4.11), among them one signed under
  *  a server key it no longer has. */
 export const BAD_SIGNATURE = 'bad_signature';
+/** A sealed message, or a certificate to seal one to, that cannot be:
+ *  the target cannot open them, or this session cannot. */
+export const NOT_SEALED = 'not_sealed';
+/** A sealed message's `cert` names a key the target no longer has:
+ *  fetch its certificate and seal again, never in the clear. */
+export const CERT_CHANGED = 'cert_changed';
 
 /** Human wording for the codes a person can actually act on. Anything
  *  not listed falls back to the server's own `text`, which is always

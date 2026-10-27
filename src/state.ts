@@ -55,8 +55,16 @@ export interface Line {
   /** A line's or a message's signature, once read, or the mark an
    *  unsigned one gets where a signature was expected. */
   signature?: LineSignature;
-  /** Its detached form as it came, which a report pastes beside the text. */
+  /** Its detached form as it came, which a report pastes beside the
+   *  text; for a sealed one, the whole map its box held. */
   signed?: string;
+  /** A private message sealed (true) or sent in the clear (false), said
+   *  for each one where sealing was possible (hxd-ng's
+   *  `docs/e2e-messages.md` §8). */
+  sealed?: boolean;
+  /** A sealed one invalid or unverified, its text hidden until the user
+   *  reveals it. */
+  hidden?: boolean;
 }
 
 export type ConvId = string;
@@ -95,6 +103,13 @@ export interface Conversation {
    *  can hand them all back — `lines` alone would forget the trimmed
    *  ones and leave them permanently skipped by later paging. */
   mailIds: Set<number>;
+  /** Its private messages are sealed deniably (hxd-ng's
+   *  `docs/e2e-messages.md` §3.11), by the user's choice for it. */
+  deniable?: boolean;
+  /** The identity it is under, which a sealed one goes to (§4.4): its
+   *  first message's, received verified or deniable or sent signed or
+   *  sealed, or one the user accepted in its place. */
+  verified?: string;
 }
 
 export const LOBBY: ConvId = 'lobby';
@@ -385,6 +400,8 @@ export class Store {
     into.unread += from.unread;
     for (const id of from.mailIds) into.mailIds.add(id);
     into.peer = { uid: into.peer.uid ?? from.peer.uid, login: into.peer.login ?? from.peer.login };
+    into.verified ??= from.verified;
+    into.deniable ??= from.deniable;
     for (const [k, v] of this.pmIndex) if (v === from.id) this.pmIndex.set(k, into.id);
     this.conversations.delete(from.id);
     if (this.active === from.id) this.active = into.id;

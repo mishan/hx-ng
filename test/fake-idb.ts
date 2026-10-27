@@ -86,13 +86,26 @@ class FakeObjectStore {
     const bound = Object.create(this) as FakeObjectStore;
     bound.tx = tx;
     bound.data = this.data; // share the backing map across binds
+    bound.indexes = this.indexes;
     return bound;
   }
 
-  createIndex(): void {
-    // Nothing in `storage.ts` queries the fingerprint index yet; it only
-    // has to exist so `createObjectStore` + `createIndex` don't throw
-    // during the upgrade.
+  private indexes = new Map<string, string>();
+
+  createIndex(name: string, keyPath: string): void {
+    this.indexes.set(name, keyPath);
+  }
+
+  /** The primary keys of the values whose `keyPath` falls in `range`. */
+  index(name: string): { getAllKeys(range: FakeKeyRange): FakeRequest<string[]> } {
+    const keyPath = this.indexes.get(name);
+    if (keyPath === undefined) throw new Error(`no such index: ${name}`);
+    return {
+      getAllKeys: (range) =>
+        this.tx!.run(() =>
+          [...this.data].filter(([, v]) => range.includes((v as Record<string, unknown>)?.[keyPath])).map(([k]) => k),
+        ),
+    };
   }
 
   private keyOf(value: unknown, explicitKey: unknown): string {
@@ -105,6 +118,10 @@ class FakeObjectStore {
     return this.tx!.run(() => this.data.get(String(key)));
   }
 
+  getAll(): FakeRequest<unknown[]> {
+    return this.tx!.run(() => [...this.data.values()]);
+  }
+
   put(value: unknown, key?: unknown): FakeRequest<void> {
     return this.tx!.run(() => {
       this.data.set(this.keyOf(value, key), value);
@@ -115,7 +132,7 @@ class FakeObjectStore {
   delete(key: unknown): FakeRequest<void> {
     return this.tx!.run(() => {
       if (key instanceof FakeKeyRange) {
-        for (const k of [...this.data.keys()]) if (k >= key.lower && k <= key.upper) this.data.delete(k);
+        for (const k of [...this.data.keys()]) if (key.includes(k)) this.data.delete(k);
       } else {
         this.data.delete(String(key));
       }
@@ -125,16 +142,26 @@ class FakeObjectStore {
 
 class FakeKeyRange {
   constructor(
-    readonly lower: string,
-    readonly upper: string,
+    readonly lower: string | number | undefined,
+    readonly upper: string | number,
+    readonly upperOpen = false,
   ) {}
+
+  includes(key: unknown): boolean {
+    if (typeof key !== typeof this.upper) return false;
+    const k = key as string | number;
+    return (this.lower === undefined || k >= this.lower) && (this.upperOpen ? k < this.upper : k <= this.upper);
+  }
 }
 
 class FakeDatabase {
   readonly objectStoreNames = {
     contains: (name: string) => this.stores.has(name),
   };
-  constructor(private readonly stores: Map<string, FakeObjectStore>) {}
+  constructor(
+    private readonly stores: Map<string, FakeObjectStore>,
+    private readonly closed: () => void,
+  ) {}
 
   createObjectStore(name: string, opts?: { keyPath?: string }): FakeObjectStore {
     const store = new FakeObjectStore(opts?.keyPath ?? null);
@@ -147,7 +174,7 @@ class FakeDatabase {
   }
 
   close(): void {
-    /* nothing to release */
+    this.closed();
   }
 }
 
@@ -158,16 +185,27 @@ export function installFakeIndexedDB(): void {
   const databases = new Map<string, Map<string, FakeObjectStore>>();
   const versions = new Map<string, number>();
 
-  (globalThis as any).IDBKeyRange = { bound: (lower: string, upper: string) => new FakeKeyRange(lower, upper) };
+  const open = new Map<string, number>();
+
+  (globalThis as any).IDBKeyRange = {
+    bound: (lower: string, upper: string) => new FakeKeyRange(lower, upper),
+    upperBound: (upper: number, upperOpen = false) => new FakeKeyRange(undefined, upper, upperOpen),
+  };
   (globalThis as any).indexedDB = {
     open(name: string, version: number) {
       const req = new FakeRequest<FakeDatabase>();
       queueMicrotask(() => {
         const upgrade = (versions.get(name) ?? 0) < version;
+        // A real upgrade waits, blocked, on every handle left open.
+        if (upgrade && (open.get(name) ?? 0) > 0) {
+          req.error = new Error(`upgrading ${name} is blocked by a handle left open`);
+          return req.onerror?.();
+        }
         if (upgrade) versions.set(name, version);
         const stores = databases.get(name) ?? new Map<string, FakeObjectStore>();
         databases.set(name, stores);
-        const db = new FakeDatabase(stores);
+        open.set(name, (open.get(name) ?? 0) + 1);
+        const db = new FakeDatabase(stores, () => open.set(name, open.get(name)! - 1));
         req.result = db;
         if (upgrade) (req as any).onupgradeneeded?.();
         req.onsuccess?.();

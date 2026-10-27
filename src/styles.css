@@ -646,6 +646,8 @@ button.call:disabled { opacity: 0.45; cursor: default; }
 .sig.sig-elsewhere, .sig.sig-unverified, .sig.sig-unsigned { color: var(--warn); }
 .sig.sig-invalid { color: var(--admin); }
 .sig.sig-foreign, .sig.sig-apart { color: var(--warn); }
+.sig.sig-sealed, .sig.sig-deniable { color: var(--ok); }
+.sig.sig-clear, .sig.sig-unopened { color: var(--warn); }
 .line.sig-invalid .name, .line.sig-invalid .actor, .news .sig-invalid .news-author,
 .news .sig-invalid .news-thread-author { text-decoration: line-through; }
 /* A fingerprint is read, not skimmed: whole, in a face that tells its
@@ -760,6 +762,10 @@ button.call:disabled { opacity: 0.45; cursor: default; }
   flex: none;
 }
 
+/* A conversation sent deniably says so on its switch and in the rail. */
+.deniable-switch { padding-bottom: 0.45rem; font-size: 0.75rem; white-space: nowrap; }
+.deniable-switch[aria-pressed="true"], .rail-tag { color: var(--warn); }
+.rail-tag { margin-left: 0.3rem; font-size: 0.65rem; text-transform: uppercase; letter-spacing: 0.03em; }
 .attach {
   padding-bottom: 0.35rem;
   font-size: 1.1rem;

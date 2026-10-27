@@ -126,17 +126,19 @@ describe('one conversation per person', () => {
     expect(merged.lines.map((l) => l.text)).toEqual(['sent while you were out', 'hello again']);
   });
 
-  it('carries unread and a moved active pointer through a merge', () => {
+  it('carries unread, a moved active pointer and the identity a thread is under through a merge', () => {
     const s = new Store();
     const byMail = s.openPm({ login: 'alice', nick: 'Alice' });
     s.add(byMail.id, chat(10, 'one'));
     const byRoster = s.openPm({ uid: 9, nick: 'Alice' });
     s.add(byRoster.id, chat(20, 'two'));
+    [byRoster.verified, byRoster.deniable] = ['F'.repeat(52), true];
     s.active = byRoster.id;
 
     const merged = s.openPm({ uid: 9, login: 'alice', nick: 'Alice' });
     expect(s.active).toBe(merged.id);
     expect(s.conversation(byRoster.id)).toBeUndefined();
+    expect([merged.verified, merged.deniable]).toEqual(['F'.repeat(52), true]);
   });
 
   it('matches logins case-insensitively', () => {

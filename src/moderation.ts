@@ -87,7 +87,8 @@ export function lineReport(
   me: { uid: number; nick: string } | null | undefined,
   here: (uid: number) => boolean = () => true,
 ): Omit<ReportParams, 'reason'> | null {
-  if (line.local || line.deleted) return null;
+  // Nothing the user has not been shown, and nothing this client wrote.
+  if (line.local || line.deleted || line.hidden || line.signature?.state === 'unopened') return null;
   if (line.kind !== 'chat' && line.kind !== 'action') return null;
   const from = line.from;
   if (from?.uid !== undefined && from.uid > 0 && from.uid === me?.uid) return null;
@@ -98,7 +99,18 @@ export function lineReport(
   // one's own would offer to report oneself.
   if (from?.uid === undefined && !from?.login && me && from?.nick === me.nick) return null;
   if (line.id !== undefined) return conv.kind === 'lobby' ? { line: line.id } : { msg: line.id };
-  if (line.signed !== undefined && line.signature?.state === 'verified') return { evidence: line.text, signed: line.signed };
+  const state = line.signature?.state;
+  if (line.sealed) {
+    // A signed box's whole map carries its own text and names its
+    // signer, whether or not the roster let it be checked here. A
+    // deniable one has no signature to carry: its words are the
+    // reporter's, about the identity its certificate named, whose device
+    // alone could have sealed it. An invalid one names nobody.
+    if (line.signed !== undefined && (state === 'verified' || state === 'unverified')) return { signed: line.signed };
+    const signer = state === 'deniable' || state === 'unverified' ? line.signature!.signer : null;
+    return signer ? { user: { fingerprint: signer }, evidence: line.text } : null;
+  }
+  if (line.signed !== undefined && state === 'verified') return { evidence: line.text, signed: line.signed };
   // A uid is someone on the roster now, which is who a live line with no
   // id came from, and only while they are: after that it names nobody,
   // or somebody else. A login outlives them.

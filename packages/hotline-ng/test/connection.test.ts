@@ -742,11 +742,33 @@ describe('signs', () => {
 
   it.each([
     ['with no certificate to sign with', {}],
-    ['logging in with a password, which proves no device', { signs: 'default' as const }],
-  ])('says nothing of signing at a login %s', async (_, over) => {
+    ['logging in with a password, which proves no device', { signs: 'default' as const, sealed: true }],
+  ])('says nothing of signing or sealing at a login %s', async (_, over) => {
     const conn = new Connection({ ...CREDS, ...over }, {});
     await conn.start();
     expect(server.sent('login')[0]?.params).not.toHaveProperty('signs');
+    expect(server.sent('login')[0]?.params).not.toHaveProperty('sealed');
     expect(conn.signing).toBeNull();
+    expect(conn.sealing).toBe(false);
+  });
+});
+
+describe('sealed', () => {
+  it.each([
+    ['echoed', true],
+    ['not echoed', false],
+  ] as const)('says it at an identity login and on every resume, and seals only while %s', async (_, echo) => {
+    server.on('login', () => ({ ok: loginOk(echo ? { sealed: true } : {}) }));
+    const conn = new Connection({ ...CREDS, identity: { getToken: async () => 'tok', sealed: () => true } }, {});
+    await conn.start();
+    expect(server.sent('login')[0]?.params.sealed).toBe(true);
+    expect(conn.sealing).toBe(echo);
+
+    server.on('resume', (params) => ({ ok: { replay: 0, self: me(1, 'Alice'), ...(echo ? { sealed: params.sealed } : {}) } }));
+    conn.drop();
+    // The first retry's backoff.
+    await new Promise((resolve) => setTimeout(resolve, 700));
+    expect(server.sent('resume')[0]?.params.sealed).toBe(true);
+    expect(conn.sealing).toBe(echo);
   });
 });

@@ -505,6 +505,46 @@ the key `openSealed` does. The subpath's types come through `exports`
 alone, so TypeScript finds them under `moduleResolution` `node16`,
 `nodenext` or `bundler`.
 
+## Testing
+
+`@hotline-ng/client/testing` is an in-memory server for the tests of
+code built on `Connection`, written in this package's own wire types so
+that it moves when the protocol does. It needs no network, no DOM and
+no `ws`: `server.credentials()` hands the connection a `webSocket`
+factory (`Credentials.webSocket`, returning a `SocketLike`, which a
+browser's `WebSocket` and a `ws` socket both are: it is also how to
+supply a socket where there is no global `WebSocket`).
+Each call's credentials have a URL of their own, so two connections
+never share a saved session, and one reused is a reload.
+
+```ts
+import { Connection } from '@hotline-ng/client';
+import { FakeServer } from '@hotline-ng/client/testing';
+
+const server = new FakeServer({ accounts: [{ login: 'bot', password: 'pw' }], rooms: [{ name: 'lounge' }] });
+const alice = server.addUser({ nick: 'Alice' });
+const conn = new Connection(server.credentials({ login: 'bot', password: 'pw' }));
+conn.on('chat', (d) => reply(d));
+await conn.start();
+server.say(alice, 'hello, bot');
+server.refuseNext('chat', 'rate_limited', { retry_after: 2 });
+```
+
+It serves login (a password, a guest, or an `identityToken` for an
+identity login), the roster, lobby and room chat with ids, `guid` and
+`history` paged either way, `msg`, `inbox` and `msg_read` (mail stored
+only between accounts with a password or an identity), and `rooms`,
+`room_join`, `room_part` and `room_topic` with their events. A dropped
+socket detaches a session with a password and a resume replays what it
+missed; `overflow(uid)` makes the next resume `resync_required`, for the
+catch-up. `event(uid, ev, data)` pushes any event, typed. It holds no
+privileges, rate limits or grace timer, and answers anything else
+`unknown_method`.
+
+The CBOR codec the identity objects are made of is on the main entry,
+as `encodeCbor`, `decodeCanonicalCbor` and the `cMap`-style
+constructors, for a test that builds them itself.
+
 ## Secure contexts
 
 `navigator.mediaDevices` is not merely restricted outside a secure

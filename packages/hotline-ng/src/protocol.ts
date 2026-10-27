@@ -490,11 +490,11 @@ export function newGuid(): string {
 }
 
 export interface MsgOk {
-  /** True when the message waited rather than going to a live session,
-   *  and nothing else. There is deliberately no id here: the id is the
-   *  *recipient's* handle for marking read, and handing a monotonic one
-   *  to the sender would tell them how much mail this server carries. */
+  /** True when the message waited rather than going to a live session. */
   queued: boolean;
+  /** A queued message's id, as the recipient's `msg` event will carry
+   *  it, when the sender's own account has an inbox. */
+  id?: number;
 }
 
 export interface InboxCounts {

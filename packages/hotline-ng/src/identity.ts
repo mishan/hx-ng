@@ -38,12 +38,18 @@ export type IdentityErrorKind =
   | 'bad-signature'
   | 'invalid-key'
   | 'too-large'
-  | 'server-error';
+  | 'server-error'
+  | 'key-mismatch'
+  | 'expired'
+  | 'not-yet-valid'
+  | 'capability-missing'
+  | 'cert-mismatch';
 
 export class IdentityError extends Error {
   constructor(
     readonly kind: IdentityErrorKind,
-    detail: string,
+    /** For `missing-field` and `bad-field`, the field's key. */
+    readonly detail: string,
   ) {
     super(`${kind}: ${detail}`);
     this.name = 'IdentityError';
@@ -182,6 +188,34 @@ export function fingerprintToString(digest: Uint8Array): string {
   return out;
 }
 
+/** The digest a display form spells, or `null` for one that is not
+ *  exactly 52 digits with zero padding bits. Case and Crockford's
+ *  confusables (`o` for `0`, `i` and `l` for `1`) are taken, as
+ *  `keys.rs`'s `Fingerprint::parse` takes them, since the form exists to
+ *  be typed and pasted. */
+export function fingerprintFromString(s: string): Uint8Array | null {
+  if (s.length !== 52) return null;
+  const out = new Uint8Array(32);
+  let acc = 0;
+  let nbits = 0;
+  let i = 0;
+  for (const c of s) {
+    // ASCII only, as Rust's `to_ascii_lowercase`: `toLowerCase` would
+    // take the Kelvin sign for a `k`.
+    const ch = c >= 'A' && c <= 'Z' ? c.toLowerCase() : c;
+    const d = CROCKFORD.indexOf(ch === 'o' ? '0' : ch === 'i' || ch === 'l' ? '1' : ch);
+    if (d === -1) return null;
+    acc = (acc << 5) | d;
+    nbits += 5;
+    if (nbits >= 8) {
+      nbits -= 8;
+      out[i++] = (acc >> nbits) & 0xff;
+    }
+    acc &= (1 << nbits) - 1;
+  }
+  return acc === 0 ? out : null;
+}
+
 export async function fingerprintOf(publicKey: Uint8Array): Promise<string> {
   const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', bufferSource(publicKey)));
   return fingerprintToString(digest);
@@ -196,11 +230,13 @@ function bigintToSafeNumber(n: bigint, field: string): number {
   return Number(n);
 }
 
-function reqUint(v: CborValue, key: string): number {
+/** `approx` reads a uint past 2^53 as the nearest number rather than
+ *  refusing it, for a field hl-identity takes up to `u64::MAX`. */
+function reqUint(v: CborValue, key: string, approx = false): number {
   const f = mapGet(v, key);
   if (f === undefined) throw new IdentityError('missing-field', key);
   if (f.t !== 'uint') throw new IdentityError('bad-field', key);
-  return bigintToSafeNumber(f.v, key);
+  return approx ? Number(f.v) : bigintToSafeNumber(f.v, key);
 }
 
 /** A uint read as at most `Number.MAX_SAFE_INTEGER`, for a time that
@@ -214,11 +250,8 @@ function reqUintSaturating(v: CborValue, key: string): number {
   return f.v > BigInt(Number.MAX_SAFE_INTEGER) ? Number.MAX_SAFE_INTEGER : Number(f.v);
 }
 
-function optUint(v: CborValue, key: string): number | undefined {
-  const f = mapGet(v, key);
-  if (f === undefined) return undefined;
-  if (f.t !== 'uint') throw new IdentityError('bad-field', key);
-  return bigintToSafeNumber(f.v, key);
+function optUint(v: CborValue, key: string, approx = false): number | undefined {
+  return mapGet(v, key) === undefined ? undefined : reqUint(v, key, approx);
 }
 
 function reqBytesN(v: CborValue, key: string, n: number): Uint8Array {
@@ -312,6 +345,8 @@ export interface DeviceCert {
   identity: Uint8Array;
   device: Uint8Array;
   deviceEnc: Uint8Array;
+  /** These three are approximate past 2^53, and a signed message's
+   *  checks read them exactly (`message.ts`). */
   issued: number;
   expires: number;
   caps: number | undefined;
@@ -330,9 +365,9 @@ export function decodeDeviceCert(bytes: Uint8Array): DeviceCert {
     identity: reqBytesN(value, 'identity', 32),
     device: reqBytesN(value, 'device', 32),
     deviceEnc: reqBytesN(value, 'device_enc', 32),
-    issued: reqUint(value, 'issued'),
-    expires: reqUint(value, 'expires'),
-    caps: optUint(value, 'caps'),
+    issued: reqUint(value, 'issued', true),
+    expires: reqUint(value, 'expires', true),
+    caps: optUint(value, 'caps', true),
     name,
     raw: bytes,
   };

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { CborError, cArray, cBytes, cMap, cText, cUint, decodeCanonical, encode, mapGet, mapWithout } from '../src/cbor';
+import { CborError, cArray, cBool, cBytes, cMap, cText, cUint, decodeCanonical, encode, mapGet, mapWithout } from '../src/cbor';
 
 function hex(b: Uint8Array): string {
   return [...b].map((n) => n.toString(16).padStart(2, '0')).join('');
@@ -24,8 +24,8 @@ describe('encode', () => {
     expect(hex(encode(v))).toBe('a2617a0262616101');
   });
 
-  it('round-trips byte strings, text, and arrays', () => {
-    const v = cArray([cBytes(Uint8Array.of(1, 2, 3)), cText('hi'), cUint(5)]);
+  it('round-trips byte strings, text, booleans and arrays', () => {
+    const v = cArray([cBytes(Uint8Array.of(1, 2, 3)), cText('hi'), cUint(5), cBool(false), cBool(true)]);
     const bytes = encode(v);
     expect(decodeCanonical(bytes)).toEqual(v);
   });

@@ -11,6 +11,7 @@ import {
   canonicalHost,
   decodeCard,
   decodeDeviceCert,
+  fingerprintFromString,
   fingerprintOf,
   hexToBytes,
   postAuth,
@@ -76,6 +77,32 @@ describe('fingerprintOf', () => {
   it('matches hxd-ng for the identity and device test keys', async () => {
     expect(await fingerprintOf(hexToBytes(vectors.keys.identity.public_hex))).toBe(vectors.keys.identity.fingerprint);
     expect(await fingerprintOf(hexToBytes(vectors.keys.device.public_hex))).toBe(vectors.keys.device.fingerprint);
+  });
+});
+
+describe('fingerprintFromString', () => {
+  const id = vectors.keys.identity;
+  const digest = (hexKey: string) => crypto.subtle.digest('SHA-256', hexToBytes(hexKey) as BufferSource);
+  const fp = id.fingerprint;
+  // keys.rs's own cases, and its Crockford confusables.
+  it.each([
+    ['its own display form', fp, true],
+    ['in upper case', fp.toUpperCase(), true],
+    ['with o for 0, I for 1 and l for 1', fp.replaceAll('0', 'o').replace('1', 'I').replace('1', 'l'), true],
+    ['a digit short', fp.slice(0, 51), false],
+    ['a digit long', `${fp}0`, false],
+    ['with nonzero padding bits', `${fp.slice(0, 51)}z`, false],
+    ['with a digit outside the alphabet', 'u'.repeat(52), false],
+    ['with a separator', `${fp.slice(0, 26)}-${fp.slice(27)}`, false],
+    ['with the Kelvin sign for k', fp.replace(/k/, String.fromCharCode(0x212a)), false],
+  ])('%s', async (_, s, ok) => {
+    const want = ok ? new Uint8Array(await digest(id.public_hex)) : null;
+    expect(fingerprintFromString(s)).toEqual(want);
+  });
+
+  it('spells the ends of the range', () => {
+    expect(fingerprintFromString('0'.repeat(52))).toEqual(new Uint8Array(32));
+    expect(fingerprintFromString(`${'z'.repeat(51)}g`)).toEqual(new Uint8Array(32).fill(0xff));
   });
 });
 

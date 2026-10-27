@@ -149,6 +149,14 @@ export async function getActiveDevice(): Promise<StoredDevice | null> {
   });
 }
 
+/** A device by its signing key, active or not; `null` once forgotten. */
+export async function getDevice(devicePub: string): Promise<StoredDevice | null> {
+  return withDb(DEVICES_STORE, 'readonly', async (tx) => {
+    const device = await requestResult<StoredDevice | undefined>(tx.objectStore(DEVICES_STORE).get(devicePub));
+    return device ?? null;
+  });
+}
+
 /** The active device, generating and storing one if this is the first
  *  time. Costs nothing to call repeatedly — the identity panel calls it
  *  every time it opens. */

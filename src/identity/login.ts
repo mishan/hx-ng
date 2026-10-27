@@ -22,12 +22,12 @@ import {
   hexToBytes,
   postAuth,
   signLoginProof,
-  wsToHttp,
   type AuthSuccess,
   type Credentials,
   type Discovery,
 } from '@hotline-ng/client';
 
+import { identityBase } from './base';
 import type { StoredDevice } from './storage';
 
 export interface IdentityLoginPlan {
@@ -64,7 +64,7 @@ export function planIdentityLogin(
   const card = device.card;
   const devicePub = hexToBytes(device.devicePub);
 
-  const httpBase = wsToHttp(wsUrl);
+  const httpBase = identityBase(wsUrl);
   const di = discovery.identity;
   if (!di.enabled) throw new Error('This server does not run the identity endpoints.');
 

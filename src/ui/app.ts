@@ -21,12 +21,18 @@ import {
   screenShareBlockedReason,
   VoiceSession,
   WireFailure,
+  CAP_CHAT_GUID,
   CAP_FILES,
   CAP_HISTORY,
   CAP_INBOX,
+  CAP_SIGNED,
+  BAD_SIGNATURE,
+  signChatRequest,
   isFingerprint,
   mediaBlockedReason,
   type BlockParams,
+  type ChatStyle,
+  type Signs,
   type ConnState,
   type Credentials,
   type Events,
@@ -66,6 +72,17 @@ import { type AvatarChoice, pickIcon } from './iconpicker';
 import { IdentityPanel } from './identity';
 import { installButton } from './install';
 import { takeScanFragment, type Scanned } from '../identity/scan';
+import { getActiveDevice, getDevice, type StoredDevice } from '../identity/storage';
+import { KeyWithdrawn, checkHostKey, type ServerKeyCheck } from '../identity/trust';
+import {
+  LineReader,
+  readSignLobby,
+  rememberSigningDevice,
+  signingDeviceFor,
+  signsFor,
+  writeSignLobby,
+  type PinnedKey,
+} from '../signing';
 import { renderRoster } from './roster';
 import { openSettings, type Theme } from './settings';
 import { Tiles } from './tiles';
@@ -76,7 +93,7 @@ import { closedForReporter, ModerationView, problem as moderationProblem } from 
 import { AccountsView } from './accounts';
 import { mayAdminister } from '../accounts';
 import { NewsView } from './news';
-import { appendLine, isAtBottom, keepingPlace, lineOf, renderTranscript, scrollToEnd } from './transcript';
+import { appendLine, isAtBottom, keepingPlace, lineOf, renderTranscript, scrollToEnd, spoken } from './transcript';
 import { wrapSelection } from './markdown';
 import { contentWords, disablePush, enablePush, pushEnabled, pushSupported, refreshPush } from '../push/client';
 import { awayCount, clearAway, showBadge } from '../push/badge';
@@ -202,6 +219,26 @@ export class App {
    *  1997 client comes out in italics; this is for anybody who would
    *  rather see exactly what was typed. What is sent never changes. */
   private markdown = readMarkdown();
+  /** Whether this user signs the lobby's lines: off by default, as
+   *  hxd-ng's `docs/e2e-messages.md` §8 asks. */
+  private signLobby = readSignLobby();
+  /** This device's key and certificate, for a session that may sign. */
+  private signer: { key: CryptoKey; cert: Uint8Array } | null = null;
+  /** The key this host is pinned to; `null` while a changed one is not
+   *  accepted, and then nothing is signed. */
+  private pinned: PinnedKey | null = null;
+  private lines = new LineReader(null);
+  /** Said once a connection: lobby signing is on, and this is unsigned. */
+  private unsignedNoted = false;
+  /** The ng address the key was checked at, to check it again. */
+  private keyUrl = '';
+  private repinning: Promise<void> | null = null;
+  /** What arrives on the wire, shown in its order: a chat line once it
+   *  is read, and whatever came after it behind it. */
+  private shown: Promise<void> = Promise.resolve();
+  /** Lines a moderator blanked this session, for a copy that is shown
+   *  only after: one still being read, or on a page fetched before. */
+  private redacted = new Set<number>();
 
   // Long-lived DOM.
   private shell = h('div', { class: 'app', hidden: true });
@@ -519,6 +556,10 @@ export class App {
         // server restart logs in again on this connection, and the
         // operator may have changed the banner, or taken it down.
         loggedIn = true;
+        // A login, not a resume: the device is the one it proved, and on
+        // a reconnect the key is checked again before it is signed to.
+        this.useDevice(way.url, active);
+        if (started) void this.repin();
         this.banner.show(conn);
         // Present whenever the *server* keeps mail — which is not the
         // same as this account having a mailbox. A guest on a server with
@@ -571,9 +612,13 @@ export class App {
         }
       },
       onMissedHistory: (ok) => {
-        if (this.mergeHistory(ok, 'newer') && this.store.active === LOBBY) {
-          this.renderTranscript();
-        }
+        void this.historyLines(ok).then((lines) => {
+          if (!lines) return;
+          if (this.store.mergeHistory(lines, ok.has_more, 'newer') && this.store.active === LOBBY) {
+            this.renderTranscript();
+          }
+          this.blank([...this.redacted]);
+        });
       },
       onEnded: (reason) => {
         this.say(reason);
@@ -608,10 +653,40 @@ export class App {
         }
       },
     };
+    let started = false;
+    this.keyUrl = way.url;
+    this.pinned =
+      way.wire === 'ng'
+        ? await this.pinServerKey(way.url).catch((e: unknown) => {
+            this.say(`This server's key could not be checked, so nothing will be signed here: ${this.problem(e)}`);
+            return null;
+          })
+        : null;
+    this.lines = new LineReader(this.pinned);
+    this.unsignedNoted = false;
+    this.redacted.clear();
+    // The device the session proves: for a saved session it resumes, the
+    // one that session logged in with, whichever is active now; for an
+    // identity login, the active one.
+    const active = d.identity ? await getActiveDevice().catch(() => null) : null;
+    const resuming = way.wire === 'ng' && hasSavedSession(way.url);
+    const saved = resuming ? signingDeviceFor(way.url) : null;
+    const resumed = saved ? await getDevice(saved).catch(() => null) : null;
+    const signs = this.useDevice(way.url, resuming ? resumed : active);
     const conn: Session =
       way.wire === 'classic'
         ? new ClassicConnection({ ...d, url: way.url, name: way.name }, hooks)
-        : new Connection({ ...creds, url: way.url }, hooks);
+        : new Connection(
+            {
+              ...creds,
+              url: way.url,
+              ...(signs ? { signs } : {}),
+              // Asked as the login goes out, a fresh one after a failed
+              // resume included: it proves the active device.
+              ...(d.identity ? { identity: { ...d.identity, signs: () => signsFor(active?.cert, this.signLobby) } } : {}),
+            },
+            hooks,
+          );
     this.conn = conn;
     this.images.attach(conn);
     avatars.attach(conn);
@@ -631,6 +706,7 @@ export class App {
 
     try {
       await conn.start(opts);
+      started = true;
     } catch (e) {
       this.conn = null;
       this.media = null;
@@ -768,7 +844,7 @@ export class App {
   private bindEvents(conn: Session): void {
     conn.on('user_joined', (d) => {
       this.store.put(d.user);
-      this.push(LOBBY, { t: Date.now(), kind: 'notice', text: `${d.user.nick} joined.` });
+      this.inOrder(() => this.push(LOBBY, { t: Date.now(), kind: 'notice', text: `${d.user.nick} joined.` }));
       this.renderRoster();
     });
 
@@ -776,11 +852,8 @@ export class App {
       const before = this.store.user(d.user.uid);
       this.store.put(d.user);
       if (before && before.nick !== d.user.nick) {
-        this.push(LOBBY, {
-          t: Date.now(),
-          kind: 'notice',
-          text: `${before.nick} is now known as ${d.user.nick}.`,
-        });
+        const text = `${before.nick} is now known as ${d.user.nick}.`;
+        this.inOrder(() => this.push(LOBBY, { t: Date.now(), kind: 'notice', text }));
         const pm = this.store.pmWith({ uid: d.user.uid });
         if (pm) pm.title = d.user.nick;
       }
@@ -798,26 +871,35 @@ export class App {
 
     conn.on('user_parted', (d) => {
       const gone = this.store.remove(d.uid);
-      this.push(LOBBY, {
-        t: Date.now(),
-        kind: 'notice',
-        text: `${gone?.nick ?? `uid ${d.uid}`} left.`,
-      });
+      const text = `${gone?.nick ?? `uid ${d.uid}`} left.`;
+      this.inOrder(() => this.push(LOBBY, { t: Date.now(), kind: 'notice', text }));
       this.renderRoster();
     });
 
     conn.on('chat', (d) => {
       if (d.id !== undefined && this.store.hasHistory(d.id)) return;
-      this.push(LOBBY, {
-        // `at` is required by the current wire, but pre-history servers
-        // did not send it. Keep those servers usable while deployments
-        // roll forward.
-        t: Number.isFinite(d.at) ? d.at * 1000 : Date.now(),
-        kind: styleToKind(d.style),
-        from: d.from,
-        text: d.text,
-        id: d.id,
-        media: d.media,
+      // `at` is required by the current wire, but pre-history servers
+      // did not send it. Keep those servers usable while deployments
+      // roll forward.
+      const at = Number.isFinite(d.at) ? d.at : Math.floor(Date.now() / 1000);
+      // Read before it is shown: a copy of a signed line already here is
+      // not shown at all, and one read for a session since replaced
+      // belongs to none on screen.
+      const lines = this.lines;
+      const read = lines.live({ ...d, at }, this.store.user(d.from.uid));
+      this.inOrder(async () => {
+        const { signature, duplicate } = await read;
+        if (duplicate || lines !== this.lines) return;
+        this.push(LOBBY, {
+          t: at * 1000,
+          kind: styleToKind(d.style),
+          from: d.from,
+          text: d.text,
+          id: d.id,
+          media: d.media,
+          ...(signature ? { signature } : {}),
+        });
+        if (d.id !== undefined && this.redacted.has(d.id)) this.blank([d.id]);
       });
     });
 
@@ -832,19 +914,15 @@ export class App {
     // A moderator redacted a public line: blank it where it sits, and let
     // go of any image it carried. The reader stays where they were.
     conn.on('chat_redacted', (d) => {
-      const done = this.store.redact(d.id);
-      if (!done) return;
-      if (done.handle) this.images.revoke(done.handle);
-      if (this.store.active === LOBBY) keepingPlace(this.transcript, () => this.renderTranscript());
+      this.redacted.add(d.id);
+      this.inOrder(() => this.blank([d.id]));
     });
 
     // A purge of a flood, told as one event for many lines rather than
     // one per line. Blank them all, then draw once.
     conn.on('chat_purged', (d) => {
-      const done = this.store.redactAll(d.ids);
-      if (!done.blanked) return;
-      for (const handle of done.handles) this.images.revoke(handle);
-      if (this.store.active === LOBBY) keepingPlace(this.transcript, () => this.renderTranscript());
+      for (const id of d.ids) this.redacted.add(id);
+      this.inOrder(() => this.blank(d.ids));
     });
 
     conn.on('report', (d) => this.moderation.onReport(d));
@@ -1018,10 +1096,132 @@ export class App {
     }
     // Public chat echoes, so the sender's own copy comes back off the
     // wire with the image on it; nothing is pushed locally here.
-    await conn.chat({ text, media: attached?.media.id }).catch((e: unknown) => {
+    await this.sendChat(text, 'normal', attached?.media.id).catch((e: unknown) => {
       this.restoreAttachment(attached);
       throw e;
     });
+  }
+
+  /** A lobby line, with a `guid` where the server honors one, and signed
+   *  where this user signs the lobby and the server carries it. */
+  private async sendChat(text: string, style: ChatStyle, media?: string): Promise<void> {
+    const conn = this.conn;
+    if (!conn) return;
+    if (!(conn instanceof Connection)) {
+      await (style === 'action' ? conn.request('chat', { text, style }) : conn.chat({ text, media }));
+      return;
+    }
+    const params = { text, style, media };
+    const unsigned = conn.hasCap(CAP_CHAT_GUID) ? { ...params, guid: newGuid() } : params;
+    // A media-only line has no text to sign, and goes as it is.
+    if (!this.signLobby || !text) return void (await conn.chat(unsigned));
+    const why = this.whyUnsigned(conn);
+    if (why) {
+      if (!this.unsignedNoted) this.say(`Lobby signing is on, but your lines here go unsigned: ${why}`);
+      this.unsignedNoted = true;
+      return void (await conn.chat(unsigned));
+    }
+    const sign = () =>
+      signChatRequest(this.signer!.key, { cert: this.signer!.cert, server: this.pinned!.key, room: 0, text, act: style === 'action' });
+    let req;
+    try {
+      req = await sign();
+    } catch (e) {
+      const yes = await ask({
+        title: 'Send it unsigned?',
+        body: `This line could not be signed: ${this.problem(e)}`,
+        fields: [],
+        ok: 'Send unsigned',
+      });
+      if (yes === null) {
+        this.restoreComposer(text, style);
+        throw new Error('Not sent: it could not be signed.');
+      }
+      return void (await conn.chat(unsigned));
+    }
+    try {
+      await conn.chat({ ...params, ...req });
+    } catch (e) {
+      // Refused as signed under another key, perhaps one the server has
+      // moved to (hxd-ng's `docs/e2e-messages.md` §4.13): check it
+      // again, and sign again under the key pinned now, once.
+      if (e instanceof WireFailure && e.wire.code === BAD_SIGNATURE) {
+        await this.repin();
+        if (!this.whyUnsigned(conn)) {
+          try {
+            return void (await conn.chat({ ...params, ...(await sign()) }));
+          } catch (again) {
+            e = again;
+          }
+        }
+      }
+      this.restoreComposer(text, style);
+      throw e;
+    }
+  }
+
+  /** Put a line that was not sent back where it was typed, unless
+   *  something else has been typed since. */
+  private restoreComposer(text: string, style: ChatStyle): void {
+    if (this.composer.value) return;
+    this.composer.value = style === 'action' ? `/me ${text}` : text;
+    this.autoGrow();
+  }
+
+  /** The device a session proves, remembered with the tab for a resume,
+   *  and what it says of signing, `undefined` for one that cannot sign. */
+  private useDevice(url: string, device: StoredDevice | null): Signs | undefined {
+    rememberSigningDevice(url, device?.devicePub ?? null);
+    const signs = signsFor(device?.cert, this.signLobby);
+    this.signer = signs && device?.cert ? { key: device.deviceSign, cert: device.cert } : null;
+    return signs;
+  }
+
+  /** Check the host's key again, for what is signed and read from now.
+   *  Nothing is signed while it is checked, a warning left open
+   *  included, and every caller meanwhile waits on the one check. */
+  private repin(): Promise<void> {
+    this.repinning ??= (async () => {
+      const [url, conn] = [this.keyUrl, this.conn];
+      this.pinned = null;
+      try {
+        const pinned = await this.pinServerKey(url);
+        if (url !== this.keyUrl || conn !== this.conn) return;
+        this.pinned = pinned;
+        this.lines.repin(pinned);
+      } catch (e) {
+        if (url !== this.keyUrl || conn !== this.conn) return;
+        this.say(`This server's key could not be checked again, so nothing will be signed here: ${this.problem(e)}`);
+        this.lines.repin(null);
+      } finally {
+        this.repinning = null;
+      }
+    })();
+    return this.repinning;
+  }
+
+  /** After every chat line already read is shown. */
+  private inOrder(fn: () => void | Promise<void>): void {
+    this.shown = this.shown.then(fn).catch((e: unknown) => this.say(`A line could not be shown: ${this.problem(e)}`));
+  }
+
+  /** Blank lines a moderator redacted, those held among them. */
+  private blank(ids: readonly number[]): void {
+    const done = this.store.redactAll(ids);
+    if (!done.blanked) return;
+    for (const handle of done.handles) this.images.revoke(handle);
+    if (this.store.active === LOBBY) keepingPlace(this.transcript, () => this.renderTranscript());
+  }
+
+  /** Why a line goes unsigned with lobby signing on, or `null` when it
+   *  is signed. */
+  private whyUnsigned(conn: Connection): string | null {
+    // A signed line's id is its guid (hxd-ng's `docs/e2e-messages.md` §4.6).
+    if (!conn.hasCap(CAP_SIGNED) || !conn.hasCap(CAP_CHAT_GUID)) return 'this server does not carry signed lines.';
+    if (!this.pinned) return "this server's key is not pinned.";
+    if (!this.signer) return 'this session did not log in with a device whose certificate may sign messages.';
+    if (!conn.signing) return 'the server will not carry signed lines from this session.';
+    return null;
   }
 
   // --- attaching an image (docs/inline-media.md §8) ---------------------
@@ -1094,7 +1294,7 @@ export class App {
     const arg = rest.join(' ');
     switch ((word ?? '').toLowerCase()) {
       case 'me':
-        if (arg) await conn.request('chat', { text: arg, style: 'action' });
+        if (arg) await this.sendChat(arg, 'action');
         return;
       case 'msg': {
         const [who, ...words] = rest;
@@ -1601,22 +1801,78 @@ export class App {
 
   // --- public chat history ---------------------------------------------
 
-  private mergeHistory(ok: HistoryOk, direction: 'older' | 'newer'): number {
-    return this.store.mergeHistory(
-      ok.lines.map((line) => ({
-        t: line.at * 1000,
-        kind: line.deleted ? 'deleted' : styleToKind(line.style),
-        from: line.deleted
-          ? undefined
-          : { nick: line.from.nick, icon: line.from.icon },
-        text: line.deleted ? 'Message deleted.' : line.text,
-        id: line.id,
-        deleted: line.deleted,
-        media: line.media,
-      })),
-      ok.has_more,
-      direction,
+  /** A page of history as lines, each signature read and a copy of a
+   *  signed line already here left out. */
+  private async historyLines(ok: HistoryOk): Promise<Line[] | null> {
+    const lines = this.lines;
+    const reads = await Promise.all(
+      ok.lines.map((line) => (line.deleted ? null : lines.history(line).catch(() => null))),
     );
+    // Read for a session since replaced: its page is not this one's.
+    if (lines !== this.lines) return null;
+    // Paging still moves past what is left out.
+    this.store.skipHistory(ok.lines.filter((_, i) => reads[i]?.duplicate).map((line) => line.id));
+    return ok.lines.flatMap((line, i): Line[] => {
+      const read = reads[i];
+      if (read?.duplicate) return [];
+      return [
+        {
+          t: line.at * 1000,
+          kind: line.deleted ? 'deleted' : styleToKind(line.style),
+          from: line.deleted
+            ? undefined
+            : { nick: line.from.nick, icon: line.from.icon },
+          text: line.deleted ? 'Message deleted.' : line.text,
+          id: line.id,
+          deleted: line.deleted,
+          media: line.media,
+          ...(read?.signature ? { signature: read.signature } : {}),
+        },
+      ];
+    });
+  }
+
+  /** Check the host's key against its pin before anything is signed
+   *  there (hxd-ng's `docs/e2e-messages.md` §4.13). A followed handover
+   *  moves the pin with a note; a key changed any other way waits for
+   *  the user, and until they accept it nothing is signed. */
+  private async pinServerKey(url: string): Promise<PinnedKey | null> {
+    let check: ServerKeyCheck | null;
+    try {
+      check = await checkHostKey(url);
+    } catch (e) {
+      if (this.signLobby || e instanceof KeyWithdrawn) {
+        this.say(`This server's key could not be checked, so nothing will be signed here: ${this.problem(e)}`);
+      }
+      return null;
+    }
+    if (!check) return null;
+    let outcome = check.outcome;
+    if (outcome.outcome === 'follow') {
+      this.say('This server has moved to the new key it announced in advance. Lines signed under its old key still count as said here.');
+    }
+    if (outcome.outcome === 'warn') {
+      const yes = await ask({
+        title: "This server's key has changed",
+        body:
+          'The server at this address now proves a different key from the one this browser remembers, without a handover from the old one. ' +
+          'That can be a lost or rotated key, or someone else answering in its place. ' +
+          'Until you accept the new key, this client signs nothing here and checks no signature against it.',
+        fields: [],
+        ok: 'Accept the new key',
+        danger: true,
+      });
+      if (yes === null) {
+        this.say('Not accepting the new server key: nothing will be signed here this session.');
+        return null;
+      }
+      outcome = await check.accept();
+      if (outcome.outcome === 'warn') {
+        this.say('The new server key could not be accepted, so nothing will be signed here this session.');
+        return null;
+      }
+    }
+    return check.pinned();
   }
 
   /** Load the newest public page at login, then page backwards whenever
@@ -1635,19 +1891,22 @@ export class App {
     try {
       const before = opts.initial ? undefined : this.store.oldestHistoryId;
       const page = await conn.history(before === undefined ? {} : { before });
+      const lines = await this.historyLines(page);
+      if (!lines) return;
       // Measured here rather than before the request: a live line
       // arriving while it was in flight has already changed the height,
       // and counting that as part of the prepend is the jump this
       // arithmetic exists to prevent.
       const oldHeight = this.transcript.scrollHeight;
       const oldTop = this.transcript.scrollTop;
-      const added = this.mergeHistory(page, 'older');
+      const added = this.store.mergeHistory(lines, page.has_more, 'older');
       if (added && this.store.active === LOBBY) {
         this.renderTranscript();
         if (!opts.initial) {
           this.transcript.scrollTop = oldTop + this.transcript.scrollHeight - oldHeight;
         }
       }
+      this.blank([...this.redacted]);
     } catch (e) {
       // A refusal is about this account and this server, not about this
       // request: remember it rather than rediscovering it every time
@@ -1824,7 +2083,7 @@ export class App {
       else appendLine(this.transcript, line, conv, this.store, this.images, this.transcriptOptions());
       const mine = line.from?.uid !== undefined && line.from.uid === this.store.self?.uid;
       if (fresh && !mine && !this.store.covered) {
-        this.heard.append(h('p', {}, line.from?.nick ? `${line.from.nick}: ${line.text}` : line.text));
+        this.heard.append(h('p', {}, spoken(line)));
         while (this.heard.childElementCount > 20) this.heard.firstElementChild?.remove();
       }
     }
@@ -2420,6 +2679,14 @@ export class App {
         writeSelfView(on);
         this.applySelfView();
         this.renderCallbar();
+      },
+      signLobby: this.signLobby,
+      // Said to the server on the next resume, which is when the roster
+      // hears of it.
+      setSignLobby: (on) => {
+        this.signLobby = on;
+        writeSignLobby(on);
+        if (this.conn instanceof Connection && this.conn.signs) this.conn.signs = on ? 'default' : 'able';
       },
       openDebug: () => this.debug.toggle(true),
     });

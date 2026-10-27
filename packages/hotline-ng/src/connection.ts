@@ -48,10 +48,12 @@ import {
   type InboxCounts,
   type InboxOk,
   type InboxParams,
+  type ChatOk,
   type ChatParams,
   type KickParams,
   type LoginOk,
   type LoginParams,
+  type Signs,
   type Media,
   type MediaLimits,
   type MsgOk,
@@ -168,7 +170,17 @@ export interface Credentials {
    * (`docs/hotline-ng-identity.md` §6.1) and should be sent empty; the
    * token, not a password, is the credential.
    */
-  identity?: { getToken: () => Promise<string> };
+  identity?: {
+    getToken: () => Promise<string>;
+    /** What a login with this token says of signing, for a device whose
+     *  certificate allows messages; asked as each login goes out. */
+    signs?: () => Signs | undefined;
+  };
+  /** What a resume says of signing, for a session that proved a device
+   *  whose certificate allows messages; absent, it says nothing and
+   *  signs nothing. `Connection.signs` starts here, and a login sets it
+   *  to what `identity.signs` gives. */
+  signs?: Signs;
 }
 
 /** What a resumed session is allowed to remember between page loads. The
@@ -368,11 +380,20 @@ export class Connection {
   files: FilesConfig | null = null;
   /** Round-trip time of the last explicit `ping`, in milliseconds. */
   rtt: number | null = null;
+  /** The `signs` the next login or resume says. A change reaches the
+   *  roster on the next resume (hxd-ng's `docs/e2e-messages.md` §4.6). */
+  signs: Signs | null;
+  /** The server's echo of `signs` on the latest login or resume: `null`
+   *  means it will not carry this session's signed lines, so none may be
+   *  sent. */
+  signing: Signs | null = null;
 
   constructor(
     private creds: Credentials,
     private hooks: ConnectionHooks = {},
-  ) {}
+  ) {
+    this.signs = creds.signs ?? null;
+  }
 
   // --- lifecycle --------------------------------------------------------
 
@@ -524,8 +545,13 @@ export class Connection {
       params.password = this.creds.password;
     }
     if (this.creds.nick) params.nick = this.creds.nick;
+    // A login proves a device only by an identity token, and then the
+    // one the token is for, whatever a session resumed before proved.
+    this.signs = this.creds.identity?.signs?.() ?? null;
+    if (this.signs) params.signs = this.signs;
 
     const ok = await this.request<LoginOk>('login', params);
+    this.signing = ok.signs ?? null;
     this.session = ok.session;
     this.token = ok.token;
     this.self = ok.self;
@@ -568,8 +594,10 @@ export class Connection {
         session: this.session,
         token: this.token,
         last_seq: this.seq,
+        ...(this.signs ? { signs: this.signs } : {}),
       });
       this.self = ok.self;
+      this.signing = ok.signs ?? null;
       this.retry = 0;
       this.setState('online');
       this.hooks.onResumed?.(ok.replay);
@@ -848,8 +876,8 @@ export class Connection {
    * Send a public chat line, optionally with an image this session has
    * already uploaded. `text` may be empty when there is one.
    */
-  chat(params: ChatParams): Promise<Record<string, never>> {
-    return this.request('chat', params);
+  chat(params: ChatParams): Promise<ChatOk> {
+    return this.request<ChatOk>('chat', params);
   }
 
   /**

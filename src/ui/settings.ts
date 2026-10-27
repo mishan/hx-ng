@@ -2,10 +2,11 @@
  * switches in the title bar.
  *
  * Everything here belongs to the browser, not the account: it lives in
- * `localStorage` and nothing about it goes over the wire. So a change
- * takes effect as it is made, and there is nothing to save or cancel —
- * the dialog has a Done and not an OK. A native `<dialog>`, as the icon
- * picker is, so Escape and focus are the platform's.
+ * `localStorage`, and of it a server hears only whether lines are signed
+ * by default. So a change takes effect as it is made, and there is
+ * nothing to save or cancel — the dialog has a Done and not an OK. A
+ * native `<dialog>`, as the icon picker is, so Escape and focus are the
+ * platform's.
  */
 
 import { h } from './dom';
@@ -21,6 +22,8 @@ export interface Settings {
   setMarkdown(on: boolean): void;
   selfView: boolean;
   setSelfView(on: boolean): void;
+  signLobby: boolean;
+  setSignLobby(on: boolean): void;
   openDebug(): void;
 }
 
@@ -75,6 +78,12 @@ export function openSettings(s: Settings): void {
           'Draw **bold**, `code` and the rest. Off shows chat exactly as typed; what you send is the same either way.',
           s.markdown,
           (on) => s.setMarkdown(on),
+        ),
+        toggle(
+          'Sign my lines in the lobby',
+          'With an identity login, sign each line with this device, so a server cannot change it or write one in your name. It can still drop a line or strip its signature, and an image is not covered. A signed line is proof anyone can show of what you said. Private messages are not signed.',
+          s.signLobby,
+          (on) => s.setSignLobby(on),
         ),
       ),
       h(

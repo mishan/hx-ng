@@ -1,11 +1,22 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import { CborError, cBytes, cOptMap, cText, cUint, encode, type CborValue } from '../src/cbor';
-import { CAPS, DEVICE_CERT_DOMAIN, IdentityError, bytesToHex, fingerprintToString, hexToBytes } from '../src/identity';
+import {
+  CAPS,
+  DEVICE_CERT_DOMAIN,
+  IdentityError,
+  base64urlToBytes,
+  bytesToBase64url,
+  bytesToHex,
+  fingerprintToString,
+  hexToBytes,
+} from '../src/identity';
 import {
   CHAT_DOMAIN,
   canonicalText,
   isCanonicalText,
+  readSignedChat,
+  signChatRequest,
   signatureDisplay,
   signedArticles,
   signedChatLines,
@@ -352,6 +363,57 @@ describe('signed here, read here', () => {
     for (const [name, alias, want] of cases) {
       const scope = { server: SERVER, room: 0, ...(alias ? { alias } : {}) };
       expect(signed.check({ at: SENT, sender: 'certificate', scope }).state, name).toBe(want);
+    }
+  });
+});
+
+describe('a signed chat request', () => {
+  it('names its line by its guid, sends canonical text, and reads back beside it', async () => {
+    const dev = await browserDevice();
+    const req = await signChatRequest(dev.key, { cert: dev.cert, server: SERVER, room: 0, text: 'one\r\ntwo', act: true }, SENT);
+    expect(req.text).toBe('one\ntwo');
+    const ctx = { at: SENT, sender: { named: SIGNER }, scope: { server: SERVER, room: 0 } };
+    const read = await readSignedChat(req.signed, req.text, true, ctx);
+    expect(read.outcome).toEqual({ state: 'verified', signer: SIGNER, sentApart: false });
+    expect(bytesToHex(read.line!.id)).toBe(req.guid.replaceAll('-', ''));
+    expect(read.line!.sent).toBe(SENT);
+  });
+
+  it('reads every form a chat event can carry in the state §8 gives it', async () => {
+    const dev = await browserDevice();
+    const req = await signChatRequest(dev.key, { cert: dev.cert, server: SERVER, room: 0, text: 'hi' }, SENT);
+    const link = bytesToBase64url(await (await signedChatLines.parseDetached(base64urlToBytes(req.signed), ['hi'], SENT)).link());
+    const here = { server: SERVER, room: 0 };
+    const cases: [string, string, string, boolean, object, SignedOutcome['state']][] = [
+      ['as sent', req.signed, 'hi', false, here, 'verified'],
+      ['its text changed', req.signed, 'hj', false, here, 'invalid'],
+      ['shown as an action it was not signed as', req.signed, 'hi', true, here, 'invalid'],
+      ['in another room', req.signed, 'hi', false, { server: SERVER, room: 3 }, 'elsewhere'],
+      ['on another server', req.signed, 'hi', false, { server: OTHER_SERVER, room: 0 }, 'elsewhere'],
+      ['with no key to check it against', req.signed, 'hi', false, { server: null, room: 0 }, 'unverified'],
+      ['as a link form with no certificate', link, 'hi', false, here, 'unverified'],
+      ['as a link form shown as an action it was not signed as', link, 'hi', true, here, 'invalid'],
+      ['not base64url', '!!', 'hi', false, here, 'invalid'],
+      ['not CBOR', 'AAAA', 'hi', false, here, 'invalid'],
+    ];
+    for (const [name, signed, text, act, scope, state] of cases) {
+      const read = await readSignedChat(signed, text, act, { at: SENT, sender: { named: SIGNER }, scope: scope as never });
+      expect(read.outcome.state, name).toBe(state);
+    }
+  });
+});
+
+describe('a check this runtime cannot make', () => {
+  // The strict verifier's one call into WebCrypto is SHA-512.
+  it('reads as unverified rather than throwing', async () => {
+    const dev = await browserDevice();
+    const req = await signChatRequest(dev.key, { cert: dev.cert, server: SERVER, room: 0, text: 'hi' }, SENT);
+    const digest = vi.spyOn(crypto.subtle, 'digest').mockRejectedValue(new DOMException('no SHA-512 here', 'NotSupportedError'));
+    try {
+      const read = await readSignedChat(req.signed, 'hi', false, { at: SENT, sender: { named: SIGNER }, scope: { server: SERVER, room: 0 } });
+      expect(read.outcome).toEqual({ state: 'unverified', signer: null });
+    } finally {
+      digest.mockRestore();
     }
   });
 });

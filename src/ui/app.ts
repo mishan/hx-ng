@@ -108,6 +108,7 @@ import {
   ArticleReader,
   LineReader,
   MessageReader,
+  beforeUnsigned,
   readPmSigning,
   readSealing,
   readSigning,
@@ -1318,7 +1319,9 @@ export class App {
     const params = { text, style, media };
     const unsigned = conn.hasCap(CAP_CHAT_GUID) ? { ...params, guid: newGuid() } : params;
     // A media-only line has no text to sign, and goes as it is.
-    if (!this.signLobby || !text) return void (await conn.chat(unsigned));
+    if (!text) return void (await conn.chat(unsigned));
+    const restore = () => this.restoreComposer(text, style);
+    if (!this.signLobby) return void (await this.sendUnsigned(conn, 'lobby', { unsigned: () => conn.chat(unsigned), restore }));
     const id = crypto.getRandomValues(new Uint8Array(16));
     await this.sendSigned(conn, 'lobby', {
       what: 'line',
@@ -1326,7 +1329,7 @@ export class App {
         signChatRequest(this.signer!.key, { id, cert: this.signer!.cert, server: this.pinned!.key, room: 0, text, act: style === 'action' }),
       signed: (req) => conn.chat({ ...params, ...req }),
       unsigned: () => conn.chat(unsigned),
-      restore: () => this.restoreComposer(text, style),
+      restore,
     });
   }
 
@@ -1636,16 +1639,19 @@ export class App {
     // it rather than send unsigned what would have been signed.
     await this.repinning;
     const why = this.whyUnsigned(conn, scope) ?? (await o.cannot?.()) ?? null;
+    if (why && scope === 'lobby' && beforeUnsigned(this.signLobby, conn) === 'ask') {
+      return this.unsignedAfter(conn, scope, o, `This ${o.what} cannot be signed: ${why}`, 'it cannot be signed');
+    }
     if (why) {
       if (!this.unsignedNoted.has(`${scope} ${why}`)) (o.say ?? ((t: string) => this.say(t)))(`${UNSIGNED_HERE[scope]}: ${why}`);
       this.unsignedNoted.add(`${scope} ${why}`);
-      return o.unsigned();
+      return this.sendUnsigned(conn, scope, o);
     }
     let req: Q;
     try {
       req = await o.sign();
     } catch (e) {
-      return this.unsignedAfter(o, `This ${o.what} could not be signed: ${this.problem(e)}`, 'it could not be signed');
+      return this.unsignedAfter(conn, scope, o, `This ${o.what} could not be signed: ${this.problem(e)}`, 'it could not be signed');
     }
     try {
       return await o.signed(req);
@@ -1665,17 +1671,84 @@ export class App {
         o.restore();
         throw refused;
       }
-      return this.unsignedAfter(o, `The server refused its signature: ${errorText(refused.wire)}`, 'the server refused its signature');
+      return this.unsignedAfter(conn, scope, o, `The server refused its signature: ${errorText(refused.wire)}`, 'the server refused its signature');
     }
   }
 
-  private async unsignedAfter<R>(o: SignedSend<unknown, R>, body: string, why: string): Promise<R> {
-    const yes = await ask({ title: 'Send it unsigned?', body, fields: [], ok: 'Send unsigned' });
+  private async unsignedAfter<R>(conn: Connection, scope: SignScope, o: SignedSend<unknown, R>, body: string, why: string): Promise<R> {
+    const stop = scope === 'lobby' && beforeUnsigned(this.signLobby, conn) === 'ask';
+    const yes = await ask(
+      stop
+        ? {
+            title: 'Stop signing lobby lines?',
+            body: `${body} You sign every lobby line, so none goes unsigned until you turn that off.`,
+            fields: [],
+            ok: 'Stop signing and send',
+          }
+        : { title: 'Send it unsigned?', body, fields: [], ok: 'Send unsigned' },
+    );
     if (yes === null) {
       o.restore();
       throw new Error(`Not sent: ${why}.`);
     }
+    if (stop) await this.setSignLobby(false, conn);
+    return this.sendUnsigned(conn, scope, o);
+  }
+
+  /** Send unsigned, but a lobby line only once the server no longer says
+   *  this session signs every one (hxd-ng's `docs/e2e-messages.md`
+   *  §4.6), and never while this user still does. */
+  private async sendUnsigned<R>(conn: Connection, scope: SignScope, o: Pick<SignedSend<unknown, R>, 'unsigned' | 'restore'>): Promise<R> {
+    if (scope === 'lobby') {
+      // Only a live socket can be told, and a login or resume under way
+      // may be saying `default` on its own.
+      if (beforeUnsigned(this.signLobby, conn) === 'tell' && conn.state === 'online') await this.tellSigns(conn);
+      // Asked again: a request answered may have carried another
+      // choice than this one, and the session moved on meanwhile.
+      if (beforeUnsigned(this.signLobby, conn) !== 'send') {
+        o.restore();
+        throw new Error('Not sent: the server may still say you sign every lobby line.');
+      }
+    }
     return o.unsigned();
+  }
+
+  /** Turn signing every lobby line on or off, told to the server, and
+   *  put back as the server has it if it refuses. What it is now. */
+  private async setSignLobby(on: boolean, conn = this.conn): Promise<boolean> {
+    this.signLobby = on;
+    writeSigning('lobby', on);
+    if (conn instanceof Connection && !(await this.tellSigns(conn))) {
+      this.signLobby = conn.signing === 'default';
+      writeSigning('lobby', this.signLobby);
+    }
+    return this.signLobby;
+  }
+
+  /** Bring the server's `signs` to this user's lobby choice, so the
+   *  roster says it (§4.6): now on a live socket where the server echoed
+   *  it, and otherwise at the next resume. False when the server refused
+   *  it. */
+  private async tellSigns(conn: Connection): Promise<boolean> {
+    // A session says `signs` only where its device can sign, so either
+    // value is its to say.
+    if (!conn.signs) return true;
+    const signs = this.signLobby ? 'default' : 'able';
+    if (!conn.signing || conn.state !== 'online') {
+      conn.signs = signs;
+      return true;
+    }
+    try {
+      await conn.setSigns(signs);
+      return true;
+    } catch (e) {
+      // A socket lost meanwhile: the resume says it.
+      if (!(e instanceof WireFailure)) return true;
+      // Not restated at the next resume either.
+      conn.signs = conn.signing ?? conn.signs;
+      this.say(`The server could not be told whether you sign every lobby line: ${this.problem(e)}`);
+      return false;
+    }
   }
 
   /** Put a line that was not sent back where it was typed, unless
@@ -2378,12 +2451,16 @@ export class App {
       this.say('This server has moved to the new key it announced in advance. Lines signed under its old key still count as said here.');
     }
     if (outcome.outcome === 'warn') {
+      // Before a login, as the login will say it.
+      const conn = this.conn instanceof Connection && this.conn.state === 'online' ? this.conn : null;
+      const held = conn ? beforeUnsigned(this.signLobby, conn) === 'ask' : this.signLobby;
       const yes = await ask({
         title: "This server's key has changed",
         body:
           'The server at this address now proves a different key from the one this browser remembers, without a handover from the old one. ' +
           'That can be a lost or rotated key, or someone else answering in its place. ' +
-          'Until you accept the new key, this client signs nothing here and checks no signature against it.',
+          'Until you accept the new key, this client signs nothing here and checks no signature against it' +
+          (held ? ', and your lobby lines are held until you accept it or stop signing them.' : '.'),
         fields: [],
         ok: 'Accept the new key',
         danger: true,
@@ -3334,13 +3411,7 @@ export class App {
         this.renderCallbar();
       },
       signLobby: this.signLobby,
-      // Said to the server on the next resume, which is when the roster
-      // hears of it.
-      setSignLobby: (on) => {
-        this.signLobby = on;
-        writeSigning('lobby', on);
-        if (this.conn instanceof Connection && this.conn.signs) this.conn.signs = on ? 'default' : 'able';
-      },
+      setSignLobby: (on) => this.setSignLobby(on),
       sealPms: this.sealPms,
       setSealPms: (on) => {
         this.sealPms = on;

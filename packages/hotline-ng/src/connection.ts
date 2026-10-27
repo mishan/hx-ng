@@ -54,6 +54,7 @@ import {
   type LoginOk,
   type LoginParams,
   type Signs,
+  type SignsParams,
   type Media,
   type MediaLimits,
   type MsgOk,
@@ -387,13 +388,14 @@ export class Connection {
   files: FilesConfig | null = null;
   /** Round-trip time of the last explicit `ping`, in milliseconds. */
   rtt: number | null = null;
-  /** The `signs` the next login or resume says. A change reaches the
-   *  roster on the next resume (hxd-ng's `docs/e2e-messages.md` §4.6). */
+  /** The `signs` the next resume says; `setSigns` changes it and tells
+   *  the roster at once (hxd-ng's `docs/e2e-messages.md` §4.6). */
   signs: Signs | null;
-  /** The server's echo of `signs` on the latest login or resume: `null`
-   *  means it will not carry this session's signed lines, so none may be
-   *  sent. */
+  /** The server's echo of `signs` on the latest login or resume, or a
+   *  `setSigns` it took: `null` means it will not carry this session's
+   *  signed lines, so none may be sent. */
   signing: Signs | null = null;
+  private signsTold: Promise<void> | null = null;
   /** Whether the next login or resume says `sealed` (hxd-ng's
    *  `docs/e2e-messages.md` §4.1). */
   sealed: boolean;
@@ -643,6 +645,10 @@ export class Connection {
         clearSaved();
         return false;
       }
+      // The resume's `signs` and `sealed` hold all the same, as far as
+      // the session's device allows, which an echo before said.
+      this.signing = this.signing && this.signs;
+      this.sealing &&= this.sealed;
       const historyAfter = this.lastHistoryId;
       // The session lives; only the replay is unrecoverable. Take a
       // fresh snapshot and continue from the seq it reports.
@@ -883,6 +889,28 @@ export class Connection {
    *  that is itself `sealing` may ask, and the server rations it. */
   deviceCert(uid: number): Promise<DeviceCertOk> {
     return this.request<DeviceCertOk>('device_cert', { uid });
+  }
+
+  /** Say whether this session's user signs every lobby line
+   *  (`default`) or only where asked (`able`), as a login does (hxd-ng's
+   *  `docs/e2e-messages.md` §4.6). Every later resume says it again,
+   *  told to the server now or not. One request at a time, and then only
+   *  the latest choice if the server has not got it: each costs as much
+   *  as a rename, so a user flipping it must not get the session kicked. */
+  setSigns(signs: Signs): Promise<void> {
+    this.signs = signs;
+    this.signsTold ??= (async () => {
+      try {
+        while (this.signs && this.signs !== this.signing) {
+          const want: Signs = this.signs;
+          await this.request('signs', { signs: want } satisfies SignsParams);
+          this.signing = want;
+        }
+      } finally {
+        this.signsTold = null;
+      }
+    })();
+    return this.signsTold;
   }
 
   /** Stored mail, newest first, paging backwards with `before`. */

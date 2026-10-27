@@ -77,9 +77,10 @@ export interface RosterIdentity {
   fingerprint: string;
   /** `alice@hl.example`, or null when no attestation was accepted. */
   handle: string | null;
-  /** The client signs public lines by default (hxd-ng's
-   *  `docs/e2e-messages.md` §4.6): a hint for spotting a stripped
-   *  signature, never a promise that every line is signed. */
+  /** The client signs every lobby line (hxd-ng's
+   *  `docs/e2e-messages.md` §4.6), so an unsigned one from it is one it
+   *  did not mean to send or a server stripped; the server's word for
+   *  what the client said, not a promise. */
   signs?: true;
   /** The session can open sealed messages (hxd-ng's
    *  `docs/e2e-messages.md` §4.1): `device_cert` answers for it. */
@@ -278,9 +279,14 @@ export type ChatStyle = 'normal' | 'action';
 // --- Handshake ----------------------------------------------------------
 
 /** What a session says of its signing (hxd-ng's `docs/e2e-messages.md`
- *  §4.6): `default` when its user signs public lines by default, `able`
- *  when only where asked or required. */
+ *  §4.6): `default` when its user signs every lobby line, `able` when
+ *  only where asked or required. */
 export type Signs = 'default' | 'able';
+
+/** The `signs` request: the user's choice, changed mid-session. */
+export interface SignsParams {
+  signs: Signs;
+}
 
 export interface LoginParams {
   login?: string;

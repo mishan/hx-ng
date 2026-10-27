@@ -250,8 +250,10 @@ detached or in its link form, and hands back the line as signed, whose
 `id` and `sent` are what to name and dedupe it by. A server that offers
 `chat_guid` honors `guid`, and one that offers `signed` carries the
 line. An identity login says the `signs` its `identity.signs` gives,
-every resume says `Connection.signs`, and `signing` is the server's
-echo, without which nothing may be sent signed.
+`setSigns` says a change at once, every resume says `Connection.signs`,
+and `signing` is the server's echo, without which nothing may be sent
+signed. A session saying `default` signs every lobby line, and sends
+none it cannot sign until its user turns that off.
 
 ```ts
 // serverKey: the key pinned for this host first, as Server keys below has it.

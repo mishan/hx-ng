@@ -24,7 +24,8 @@ export interface Settings {
   selfView: boolean;
   setSelfView(on: boolean): void;
   signLobby: boolean;
-  setSignLobby(on: boolean): void;
+  /** What it is once the server has had its say. */
+  setSignLobby(on: boolean): Promise<boolean>;
   sealPms: boolean;
   setSealPms(on: boolean): void;
   signPms: PmSigning;
@@ -64,9 +65,12 @@ export function openSettings(s: Settings): void {
     return h('label', { class: 'setting-choice' }, input, h('span', {}, label));
   });
 
-  const toggle = (label: string, detail: string, on: boolean, set: (on: boolean) => void) => {
+  const toggle = (label: string, detail: string, on: boolean, set: (on: boolean) => void | Promise<boolean>) => {
     const input = h('input', { type: 'checkbox', checked: on });
-    input.onchange = () => set(input.checked);
+    input.onchange = () => {
+      const now = set(input.checked);
+      if (now) void now.then((kept) => (input.checked = kept));
+    };
     return h(
       'label',
       { class: 'setting-toggle' },
@@ -105,7 +109,7 @@ export function openSettings(s: Settings): void {
         ),
         toggle(
           'Sign my lines in the lobby',
-          'With an identity login, sign each line with this device, so a server cannot change it or write one in your name. It can still drop a line or strip its signature, and an image is not covered. A signed line is proof anyone can show of what you said.',
+          'With an identity login, sign each line with this device, so a server cannot change it or write one in your name. It can still drop a line or strip its signature, and an image is not covered. A signed line is proof anyone can show of what you said. While this is on, a line that cannot be signed is not sent unsigned without asking.',
           s.signLobby,
           (on) => s.setSignLobby(on),
         ),

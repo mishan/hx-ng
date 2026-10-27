@@ -730,6 +730,56 @@ describe('signs', () => {
     expect(conn.signing).toBe(echo ? 'able' : null);
   });
 
+  it.each([
+    ['taken', { ok: {} }, 'default'],
+    ['refused', { error: { code: 'bad_request', text: 'no' } }, 'able'],
+  ] as const)('says a change at once, and again on every later resume once it is %s', async (_, answer, signing) => {
+    server.on('login', () => ({ ok: loginOk({ signs: 'able' }) }));
+    const conn = new Connection({ ...CREDS, identity: { getToken: async () => 'tok', signs: () => 'able' } }, {});
+    await conn.start();
+    server.on('signs', () => answer);
+    await conn.setSigns('default').catch(() => {});
+    expect(server.sent('signs')[0]?.params).toEqual({ signs: 'default' });
+    expect(conn.signing).toBe(signing);
+
+    server.on('resume', (params) => ({ ok: { replay: 0, self: me(1, 'Alice'), signs: params.signs } }));
+    conn.drop();
+    // The first retry's backoff.
+    await new Promise((resolve) => setTimeout(resolve, 700));
+    expect(server.sent('resume')[0]?.params.signs).toBe('default');
+  });
+
+  it.each([
+    ['a change and back while the first is asked', ['default', 'able'], ['default', 'able']],
+    ['a change, back and again', ['default', 'able', 'default'], ['default']],
+    ['what the server has already', ['able'], []],
+  ] as const)('asks one change at a time, and then only the latest: %s', async (_, flips, asked) => {
+    server.on('login', () => ({ ok: loginOk({ signs: 'able' }) }));
+    const conn = new Connection({ ...CREDS, identity: { getToken: async () => 'tok', signs: () => 'able' } }, {});
+    await conn.start();
+    server.on('signs', () => ({ ok: {} }));
+    await Promise.all(flips.map((signs) => conn.setSigns(signs)));
+    expect(server.sent('signs').map((f) => f.params.signs)).toEqual(asked);
+    expect(conn.signing).toBe(flips.at(-1));
+  });
+
+  it.each([
+    ['echoed', 'able', 'default'],
+    ['not echoed', undefined, null],
+  ] as const)('holds to a resume\'s signs answered resync_required, where the login was %s', async (_, echo, signing) => {
+    server.on('login', () => ({ ok: loginOk(echo ? { signs: echo } : {}) }));
+    const conn = new Connection({ ...CREDS, identity: { getToken: async () => 'tok', signs: () => 'able' } }, {});
+    await conn.start();
+    conn.signs = 'default';
+    server.on('resume', () => ({ error: { code: 'resync_required', text: 'gap' } }));
+    server.on('sync', () => ({ ok: { server: { name: 'Test', subject: 'hi' }, users: [me(1, 'Alice')], seq: 9 } }));
+    conn.drop();
+    // The first retry's backoff.
+    await new Promise((resolve) => setTimeout(resolve, 700));
+    expect(server.sent('resume')[0]?.params.signs).toBe('default');
+    expect(conn.signing).toBe(signing);
+  });
+
   it('says the identity login\'s own, not what a resume would have, after the resume fails', async () => {
     await connect();
     server.on('resume', () => ({ error: { code: 'session_expired', text: 'gone' } }));

@@ -1115,6 +1115,9 @@ export class App {
     const unsigned = conn.hasCap(CAP_CHAT_GUID) ? { ...params, guid: newGuid() } : params;
     // A media-only line has no text to sign, and goes as it is.
     if (!this.signLobby || !text) return void (await conn.chat(unsigned));
+    // A key check under way leaves nothing pinned until it ends; wait for
+    // it rather than send unsigned what would have been signed.
+    await this.repinning;
     const why = this.whyUnsigned(conn);
     if (why) {
       if (!this.unsignedNoted) this.say(`Lobby signing is on, but your lines here go unsigned: ${why}`);

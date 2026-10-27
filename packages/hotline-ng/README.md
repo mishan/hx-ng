@@ -262,6 +262,26 @@ if (conn.hasCap(CAP_SIGNED) && conn.hasCap(CAP_CHAT_GUID) && conn.signing) {
 }
 ```
 
+A private message and an article go the same way. `signMsgRequest`
+signs a message to the recipient's identity fingerprint into the
+`text`, `guid` and `signed` a `msg` carries, and `readSignedMessage`
+reads a `msg` event's or an `inbox` row's `signed` against the
+fingerprint the reader's session proved, `null` for none.
+`signNewsPost` signs an article into a category's node `guid` and under
+its parent into the `subject`, `body`, `mime` and `signed` a
+`news_post` carries, and `readSignedArticle` reads an article's
+`signed` against the category and parent it is listed under and the
+`mime` it is shown as. Each takes an `id` to sign one again as the same
+message (§3.6), which a server answers as the original.
+
+```ts
+const to = fingerprintFromString(row.identity.fingerprint)!;
+await conn.msg({ to: row.uid, ...(await signMsgRequest(deviceSignKey, { cert, to, text })) });
+const category = base64urlToBytes(node.guid!);
+const post = await signNewsPost(deviceSignKey, { cert, server: serverKey, category, subject, body, mime: 'text/plain' });
+await conn.newsPost({ category: node.id, subject: post.subject, body: post.body, mime: post.mime, signed: post.signed });
+```
+
 ### Server keys
 
 A server key is pinned per host, and follows the server's handovers to

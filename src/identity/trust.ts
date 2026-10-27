@@ -4,6 +4,7 @@
 
 import {
   ServerTrust,
+  bytesToHex,
   canonicalHost,
   fetchChallenge,
   fetchDiscovery,
@@ -12,7 +13,7 @@ import {
 
 import type { PinnedKey } from '../signing';
 import { identityBase } from './base';
-import { serverPins } from './storage';
+import { newsGuids, serverPins } from './storage';
 
 const trust = new ServerTrust(serverPins);
 
@@ -78,13 +79,26 @@ export async function checkHostKey(wsUrl: string): Promise<ServerKeyCheck | null
   const { discovery, challenge } = fetched;
   const chain = discovery.serverHandovers;
   const now = () => Math.floor(Date.now() / 1000);
+  // The news guids a key gave are forgotten with its pin, and again when
+  // a key is accepted anew, so a server whose operator re-imported its
+  // news under a new key, or that the user accepted afresh, starts clean.
+  const before = (await serverPins.get(host))?.key;
+  const forget = async (key: Uint8Array | undefined) => {
+    if (key) await newsGuids.forget(key).catch(() => undefined);
+  };
   const outcome = await trust.check(host, chain, challenge, now());
+  const after = (await serverPins.get(host))?.key;
+  if (before && after && bytesToHex(before) !== bytesToHex(after)) await forget(before);
   return {
     outcome,
-    accept: () =>
-      outcome.outcome === 'warn'
-        ? trust.accept(host, outcome.warning, chain, challenge, now())
-        : Promise.resolve(outcome),
+    accept: async () => {
+      if (outcome.outcome !== 'warn') return outcome;
+      const accepted = await trust.accept(host, outcome.warning, chain, challenge, now());
+      const pinned = (await serverPins.get(host))?.key;
+      await forget(pinned);
+      if (after && pinned && bytesToHex(after) !== bytesToHex(pinned)) await forget(after);
+      return accepted;
+    },
     pinned: async () => {
       const pin = await serverPins.get(host);
       return pin ? { key: pin.key, followed: pin.followed } : null;

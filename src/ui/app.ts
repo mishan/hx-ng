@@ -27,7 +27,11 @@ import {
   CAP_INBOX,
   CAP_SIGNED,
   BAD_SIGNATURE,
+  canonicalText,
+  fingerprintFromString,
   signChatRequest,
+  signMsgRequest,
+  signNewsPost,
   isFingerprint,
   mediaBlockedReason,
   type BlockParams,
@@ -39,7 +43,12 @@ import {
   type InboxOk,
   type HistoryOk,
   type Media,
+  type MsgOk,
   type MsgParams,
+  type SignedMsgRequest,
+  type NewsNode,
+  type NewsPostParams,
+  type NewsPostOk,
   type PersonRef,
   type RemoteVideo,
   type ReportParams,
@@ -72,16 +81,21 @@ import { type AvatarChoice, pickIcon } from './iconpicker';
 import { IdentityPanel } from './identity';
 import { installButton } from './install';
 import { takeScanFragment, type Scanned } from '../identity/scan';
-import { getActiveDevice, getDevice, type StoredDevice } from '../identity/storage';
+import { getActiveDevice, getDevice, newsGuids, type StoredDevice } from '../identity/storage';
 import { KeyWithdrawn, checkHostKey, type ServerKeyCheck } from '../identity/trust';
 import {
+  ArticleReader,
   LineReader,
-  readSignLobby,
+  MessageReader,
+  readSigning,
   rememberSigningDevice,
   signingDeviceFor,
   signsFor,
-  writeSignLobby,
+  writeSigning,
+  type LineSignature,
   type PinnedKey,
+  type SignScope,
+  unreadable,
 } from '../signing';
 import { renderRoster } from './roster';
 import { openSettings, type Theme } from './settings';
@@ -169,6 +183,35 @@ const MARKDOWN_KEY = 'hxd-ng.markdown';
  *  drawer and the title bar's buttons live at its foot. */
 const PHONE = '(max-width: 44rem)';
 
+/** What `App.sendSigned` sends: how to sign it, and how to send it
+ *  either way. */
+interface SignedSend<Q, R> {
+  /** `line`, `message` or `article`, in what the user is asked. */
+  what: string;
+  /** Why it goes unsigned, where only the caller knows: asked once any
+   *  key check under way has ended. */
+  cannot?: () => string | null | Promise<string | null>;
+  /** Where the note that it goes unsigned is said: the transcript
+   *  unless this says otherwise. */
+  say?: (text: string) => void;
+  sign(): Promise<Q>;
+  signed(req: Q): Promise<R>;
+  unsigned(): Promise<R>;
+  /** Put back what was written, for one that did not go. */
+  restore(): void;
+}
+
+const UNSIGNED_HERE: Record<SignScope, string> = {
+  lobby: 'Lobby signing is on, but your lines here go unsigned',
+  pm: 'Signing private messages is on, but this one goes unsigned',
+  news: 'Signing articles is on, but this one goes unsigned',
+};
+
+/** The cleartext `msg` limit a signed text is held to (§3.2). */
+const SIGNED_MSG_MAX_BYTES = 4096;
+
+const SIGNED_WHAT: Record<SignScope, string> = { lobby: 'lines', pm: 'private messages', news: 'articles' };
+
 export class App {
   private store = new Store();
   private conn: Session | null = null;
@@ -219,17 +262,29 @@ export class App {
    *  1997 client comes out in italics; this is for anybody who would
    *  rather see exactly what was typed. What is sent never changes. */
   private markdown = readMarkdown();
-  /** Whether this user signs the lobby's lines: off by default, as
-   *  hxd-ng's `docs/e2e-messages.md` §8 asks. */
-  private signLobby = readSignLobby();
+  /** Whether this user signs the lobby's lines and private messages,
+   *  off by default, and articles, on by default, as hxd-ng's
+   *  `docs/e2e-messages.md` §8 asks. */
+  private signLobby = readSigning('lobby');
+  private signPms = readSigning('pm');
+  private signNews = readSigning('news');
   /** This device's key and certificate, for a session that may sign. */
   private signer: { key: CryptoKey; cert: Uint8Array } | null = null;
+  /** The fingerprint this session proved, which a private message to it
+   *  is signed to. */
+  private proved: string | null = null;
   /** The key this host is pinned to; `null` while a changed one is not
    *  accepted, and then nothing is signed. */
   private pinned: PinnedKey | null = null;
   private lines = new LineReader(null);
-  /** Said once a connection: lobby signing is on, and this is unsigned. */
-  private unsignedNoted = false;
+  private messages = new MessageReader(null);
+  private articles = new ArticleReader(null);
+  /** Said once a connection, for each scope and reason: signing is on
+   *  there, and this goes unsigned. */
+  private unsignedNoted = new Set<string>();
+  /** For each conversation, the change of its recipient's identity it
+   *  was last told of. */
+  private recipientWarned = new Map<ConvId, string>();
   /** The ng address the key was checked at, to check it again. */
   private keyUrl = '';
   private repinning: Promise<void> | null = null;
@@ -312,6 +367,8 @@ export class App {
     // is the account that was typed. A guest is nobody either way.
     me: () => this.conn?.self?.identity?.account ?? this.account,
     onUnread: () => this.renderRail(),
+    articles: () => this.articles,
+    post: (params, category) => this.postNews(params, category),
   });
   private panes: Panes | null = null;
   /** Where the tiler draws, when it is on. Its own box inside `.panes`
@@ -604,12 +661,13 @@ export class App {
         void this.news.refreshFollowing();
       },
       onMissedMail: (ok) => {
-        const n = this.mergeStoredMail(ok);
-        if (n) {
-          this.say(
-            `Recovered ${n} private ${n === 1 ? 'message' : 'messages'} that arrived while this client was behind.`,
-          );
-        }
+        void this.mergeStoredMail(ok).then((n) => {
+          if (n) {
+            this.say(
+              `Recovered ${n} private ${n === 1 ? 'message' : 'messages'} that arrived while this client was behind.`,
+            );
+          }
+        });
       },
       onMissedHistory: (ok) => {
         void this.historyLines(ok).then((lines) => {
@@ -663,7 +721,10 @@ export class App {
           })
         : null;
     this.lines = new LineReader(this.pinned);
-    this.unsignedNoted = false;
+    this.articles = new ArticleReader(this.pinned, newsGuids);
+    this.messages = new MessageReader(null);
+    this.unsignedNoted.clear();
+    this.recipientWarned.clear();
     this.redacted.clear();
     // The device the session proves: for a saved session it resumes, the
     // one that session logged in with, whichever is active now; for an
@@ -886,7 +947,7 @@ export class App {
       // not shown at all, and one read for a session since replaced
       // belongs to none on screen.
       const lines = this.lines;
-      const read = lines.live({ ...d, at }, this.store.user(d.from.uid));
+      const read = lines.live({ ...d, at }, this.store.user(d.from.uid)).catch(() => unreadable(d.signed));
       this.inOrder(async () => {
         const { signature, duplicate } = await read;
         if (duplicate || lines !== this.lines) return;
@@ -898,6 +959,7 @@ export class App {
           id: d.id,
           media: d.media,
           ...(signature ? { signature } : {}),
+          ...(d.signed !== undefined ? { signed: d.signed } : {}),
         });
         if (d.id !== undefined && this.redacted.has(d.id)) this.blank([d.id]);
       });
@@ -941,22 +1003,37 @@ export class App {
       // The login flush and an `inbox` page carry the same rows, and
       // which arrives first is a race. Whichever loses is dropped here.
       if (d.id !== undefined && this.store.hasMail(d.id)) return;
-      const conv = this.store.openPm({ uid: d.from.uid, login: d.from.login, nick: d.from.nick });
-      // An `id` means the server stored it, so both counters move. Moving
-      // only `unread` was enough to render "1 unread of 0 stored" until
-      // the next reply corrected it.
-      if (d.id !== undefined) this.store.noteStoredMessage();
-      this.push(conv.id, {
-        t: d.at * 1000,
-        kind: 'chat',
-        from: d.from,
-        text: d.text,
-        queued: d.queued,
-        id: d.id,
-        media: d.media,
+      // Read before it is shown, in its place among the lines, as a chat
+      // line is.
+      const messages = this.messages;
+      const read = messages.live(d, d.from.uid > 0 ? this.store.user(d.from.uid) : undefined).catch(() => unreadable(d.signed));
+      this.inOrder(async () => {
+        const { signature, duplicate } = await read;
+        if (messages !== this.messages) return;
+        if (d.id !== undefined && this.store.hasMail(d.id)) return;
+        if (duplicate) {
+          if (d.id !== undefined) this.store.skipMail({ uid: d.from.uid, login: d.from.login }, d.id);
+          return;
+        }
+        const conv = this.store.openPm({ uid: d.from.uid, login: d.from.login, nick: d.from.nick });
+        // An `id` means the server stored it, so both counters move. Moving
+        // only `unread` was enough to render "1 unread of 0 stored" until
+        // the next reply corrected it.
+        if (d.id !== undefined) this.store.noteStoredMessage();
+        this.push(conv.id, {
+          t: d.at * 1000,
+          kind: 'chat',
+          from: d.from,
+          text: d.text,
+          queued: d.queued,
+          id: d.id,
+          media: d.media,
+          ...(signature ? { signature } : {}),
+          ...(d.signed !== undefined ? { signed: d.signed } : {}),
+        });
+        this.renderRail();
+        this.renderMail();
       });
-      this.renderRail();
-      this.renderMail();
     });
 
     // News events say "your copy is stale", to every reader. They are not
@@ -1075,7 +1152,7 @@ export class App {
         'to_login' in to
           ? { to_login: to.to_login, text, guid, media }
           : { to: to.to, text, guid, media };
-      const ok = await conn.msg(params).catch((e: unknown) => {
+      const { ok, signature } = await this.sendPm(conv, params).catch((e: unknown) => {
         this.restoreAttachment(attached);
         throw e;
       });
@@ -1088,6 +1165,7 @@ export class App {
         text,
         local: true,
         media: attached?.media,
+        ...(signature ? { signature } : {}),
       });
       if (ok.queued) {
         this.say(`${conv.title} is not here. The server is holding that for them.`);
@@ -1115,49 +1193,191 @@ export class App {
     const unsigned = conn.hasCap(CAP_CHAT_GUID) ? { ...params, guid: newGuid() } : params;
     // A media-only line has no text to sign, and goes as it is.
     if (!this.signLobby || !text) return void (await conn.chat(unsigned));
-    const why = this.whyUnsigned(conn);
-    if (why) {
-      if (!this.unsignedNoted) this.say(`Lobby signing is on, but your lines here go unsigned: ${why}`);
-      this.unsignedNoted = true;
-      return void (await conn.chat(unsigned));
+    const id = crypto.getRandomValues(new Uint8Array(16));
+    await this.sendSigned(conn, 'lobby', {
+      what: 'line',
+      sign: () =>
+        signChatRequest(this.signer!.key, { id, cert: this.signer!.cert, server: this.pinned!.key, room: 0, text, act: style === 'action' }),
+      signed: (req) => conn.chat({ ...params, ...req }),
+      unsigned: () => conn.chat(unsigned),
+      restore: () => this.restoreComposer(text, style),
+    });
+  }
+
+  /** A private message, signed where this user signs them, the session
+   *  can, and the recipient has an identity to sign it to; never in a
+   *  private chat, which this client does not join. What it was sent
+   *  signed as is for the sender's own copy. */
+  private async sendPm(conv: Conversation, params: MsgParams): Promise<{ ok: MsgOk; signature?: LineSignature }> {
+    const conn = this.conn;
+    if (!conn) throw new Error('Not connected.');
+    if (!(conn instanceof Connection) || !this.signPms || !params.text) return { ok: await conn.msg(params) };
+    let to = this.recipientOf(conv);
+    let id = crypto.getRandomValues(new Uint8Array(16));
+    let sent = 0;
+    let tries = 0;
+    return this.sendSigned<SignedMsgRequest, { ok: MsgOk; signature?: LineSignature }>(conn, 'pm', {
+      what: 'message',
+      cannot: () => (to ? null : `${conv.title} did not log in with an identity to sign them to.`),
+      sign: () => {
+        // The cleartext limit, which the server holds a signed text to
+        // rather than cut it.
+        if (new TextEncoder().encode(canonicalText(params.text)).length > SIGNED_MSG_MAX_BYTES) {
+          throw new Error(`it is longer than the ${SIGNED_MSG_MAX_BYTES} bytes a signed message may be`);
+        }
+        // Signed again after a refusal, to who the roster says they are
+        // now rather than to the same identity again, and to another as
+        // another message, since one id is one message (§3.6).
+        if (tries++ > 0) {
+          const now = this.rosterFingerprint(conv) ?? to;
+          if (now !== to) id = crypto.getRandomValues(new Uint8Array(16));
+          to = now;
+        }
+        sent = Math.floor(Date.now() / 1000);
+        return signMsgRequest(this.signer!.key, { id, cert: this.signer!.cert, to: fingerprintFromString(to!)!, text: params.text }, sent);
+      },
+      signed: async (req) => ({
+        ok: await conn.msg({ ...params, ...req }),
+        signature: { state: 'verified', signer: this.proved, to: to!, sent, sentAtAnotherTime: false, signatureExpected: false },
+      }),
+      unsigned: async () => ({ ok: await conn.msg(params) }),
+      restore: () => this.restoreComposer(params.text, 'normal'),
+    });
+  }
+
+  /** The identity a private message to this conversation is signed to:
+   *  the one the roster row gives, the server's current word on who they
+   *  are (§4.9), else the one their messages here were verified as
+   *  signed by. Where the two differ the conversation is told, once for
+   *  each change. */
+  private recipientOf(conv: Conversation): string | null {
+    let verified: string | null = null;
+    for (let i = conv.lines.length - 1; i >= 0 && verified === null; i--) {
+      const sig = conv.lines[i]!.signature;
+      if (!conv.lines[i]!.local && sig?.state === 'verified' && sig.signer) verified = sig.signer;
     }
-    const sign = () =>
-      signChatRequest(this.signer!.key, { cert: this.signer!.cert, server: this.pinned!.key, room: 0, text, act: style === 'action' });
-    let req;
-    try {
-      req = await sign();
-    } catch (e) {
-      const yes = await ask({
-        title: 'Send it unsigned?',
-        body: `This line could not be signed: ${this.problem(e)}`,
-        fields: [],
-        ok: 'Send unsigned',
-      });
-      if (yes === null) {
-        this.restoreComposer(text, style);
-        throw new Error('Not sent: it could not be signed.');
+    const roster = this.rosterFingerprint(conv);
+    if (roster && verified && roster !== verified) {
+      const change = `${verified} ${roster}`;
+      if (this.recipientWarned.get(conv.id) !== change) {
+        this.recipientWarned.set(conv.id, change);
+        this.push(conv.id, {
+          t: Date.now(),
+          kind: 'system',
+          local: true,
+          text:
+            `${conv.title}'s messages here were signed by ${verified.slice(0, 16)}, but the server now says they are ${roster.slice(0, 16)}. ` +
+            'Messages you sign are signed to the second. If you did not expect a new key, check it with them another way.',
+        });
       }
-      return void (await conn.chat(unsigned));
+    }
+    return roster ?? verified;
+  }
+
+  private rosterFingerprint(conv: Conversation): string | null {
+    const row = conv.peer.uid !== undefined ? this.store.user(conv.peer.uid) : undefined;
+    const fp = row?.identity?.fingerprint;
+    return fp && fingerprintFromString(fp) ? fp : null;
+  }
+
+  /** An article, signed where this user signs them and the session can,
+   *  into the category's guid and under its parent as it was read. */
+  private async postNews(params: NewsPostParams, category: NewsNode): Promise<{ id: number; note?: string }> {
+    const conn = this.conn;
+    if (!conn) throw new Error('Not connected.');
+    if (!(conn instanceof Connection) || !this.signNews) return conn.newsPost(params);
+    const mime = params.mime ?? 'text/plain';
+    // As hxd-ng keeps a subject: one line, trimmed, a tab as a space.
+    const subject = params.subject.replaceAll('\t', ' ').trim();
+    const id = crypto.getRandomValues(new Uint8Array(16));
+    let note: string | undefined;
+    // Read once the key is checked, under the key it is signed for.
+    const parentOf = () => (params.parent === undefined ? null : this.articles.replyParent(params.parent));
+    const ok: NewsPostOk = await this.sendSigned(conn, 'news', {
+      what: 'article',
+      cannot: async () => {
+        const key = await this.articles.categoryKey(category);
+        if ('why' in key) return `${key.why}, to sign it into.`;
+        if (params.parent !== undefined && !parentOf()) return 'the article it answers could not be read.';
+        return mime !== 'text/plain' && mime !== 'text/markdown' ? `an article is not signed as ${mime}.` : null;
+      },
+      say: (text) => (note = text),
+      sign: async () => {
+        const key = await this.articles.categoryKey(category);
+        if ('why' in key) throw new Error(key.why);
+        const parent = parentOf();
+        return signNewsPost(this.signer!.key, {
+          id,
+          cert: this.signer!.cert,
+          server: this.pinned!.key,
+          category: key.guid,
+          ...(parent ? { parent } : {}),
+          subject,
+          body: params.body,
+          mime: mime as 'text/plain' | 'text/markdown',
+        });
+      },
+      signed: (req) => conn.newsPost({ ...params, subject: req.subject, body: req.body, mime: req.mime, signed: req.signed }),
+      unsigned: () => conn.newsPost(params),
+      restore: () => undefined,
+    });
+    return { id: ok.id, ...(note ? { note } : {}) };
+  }
+
+  /**
+   * Send signed where the user signs `scope` and this session can, and
+   * unsigned otherwise, saying why once a connection. Nothing is lost to
+   * signing: one that cannot be signed, or whose signature the server
+   * refuses, asks before it goes unsigned, and goes back where it was
+   * written if not. A refused signature, perhaps under a key the server
+   * has moved to (hxd-ng's `docs/e2e-messages.md` §4.13), has the key
+   * checked again and is signed again once, under the same id (§3.6).
+   */
+  private async sendSigned<Q, R>(conn: Connection, scope: SignScope, o: SignedSend<Q, R>): Promise<R> {
+    // A key check under way leaves nothing pinned until it ends; wait for
+    // it rather than send unsigned what would have been signed.
+    await this.repinning;
+    const why = this.whyUnsigned(conn, scope) ?? (await o.cannot?.()) ?? null;
+    if (why) {
+      if (!this.unsignedNoted.has(`${scope} ${why}`)) (o.say ?? ((t: string) => this.say(t)))(`${UNSIGNED_HERE[scope]}: ${why}`);
+      this.unsignedNoted.add(`${scope} ${why}`);
+      return o.unsigned();
+    }
+    let req: Q;
+    try {
+      req = await o.sign();
+    } catch (e) {
+      return this.unsignedAfter(o, `This ${o.what} could not be signed: ${this.problem(e)}`, 'it could not be signed');
     }
     try {
-      await conn.chat({ ...params, ...req });
+      return await o.signed(req);
     } catch (e) {
-      // Refused as signed under another key, perhaps one the server has
-      // moved to (hxd-ng's `docs/e2e-messages.md` §4.13): check it
-      // again, and sign again under the key pinned now, once.
+      let refused = e;
       if (e instanceof WireFailure && e.wire.code === BAD_SIGNATURE) {
         await this.repin();
-        if (!this.whyUnsigned(conn)) {
+        if (!this.whyUnsigned(conn, scope)) {
           try {
-            return void (await conn.chat({ ...params, ...(await sign()) }));
+            return await o.signed(await o.sign());
           } catch (again) {
-            e = again;
+            refused = again;
           }
         }
       }
-      this.restoreComposer(text, style);
-      throw e;
+      if (!(refused instanceof WireFailure && refused.wire.code === BAD_SIGNATURE)) {
+        o.restore();
+        throw refused;
+      }
+      return this.unsignedAfter(o, `The server refused its signature: ${errorText(refused.wire)}`, 'the server refused its signature');
     }
+  }
+
+  private async unsignedAfter<R>(o: SignedSend<unknown, R>, body: string, why: string): Promise<R> {
+    const yes = await ask({ title: 'Send it unsigned?', body, fields: [], ok: 'Send unsigned' });
+    if (yes === null) {
+      o.restore();
+      throw new Error(`Not sent: ${why}.`);
+    }
+    return o.unsigned();
   }
 
   /** Put a line that was not sent back where it was typed, unless
@@ -1174,6 +1394,8 @@ export class App {
     rememberSigningDevice(url, device?.devicePub ?? null);
     const signs = signsFor(device?.cert, this.signLobby);
     this.signer = signs && device?.cert ? { key: device.deviceSign, cert: device.cert } : null;
+    this.proved = device?.cert ? (device.fingerprint ?? null) : null;
+    this.messages.prove(this.proved);
     return signs;
   }
 
@@ -1189,10 +1411,12 @@ export class App {
         if (url !== this.keyUrl || conn !== this.conn) return;
         this.pinned = pinned;
         this.lines.repin(pinned);
+        this.articles.repin(pinned);
       } catch (e) {
         if (url !== this.keyUrl || conn !== this.conn) return;
         this.say(`This server's key could not be checked again, so nothing will be signed here: ${this.problem(e)}`);
         this.lines.repin(null);
+        this.articles.repin(null);
       } finally {
         this.repinning = null;
       }
@@ -1213,14 +1437,15 @@ export class App {
     if (this.store.active === LOBBY) keepingPlace(this.transcript, () => this.renderTranscript());
   }
 
-  /** Why a line goes unsigned with lobby signing on, or `null` when it
-   *  is signed. */
-  private whyUnsigned(conn: Connection): string | null {
+  /** Why what is sent in `scope` goes unsigned with signing on there,
+   *  or `null` when it is signed. */
+  private whyUnsigned(conn: Connection, scope: SignScope): string | null {
+    const what = SIGNED_WHAT[scope];
     // A signed line's id is its guid (hxd-ng's `docs/e2e-messages.md` §4.6).
-    if (!conn.hasCap(CAP_SIGNED) || !conn.hasCap(CAP_CHAT_GUID)) return 'this server does not carry signed lines.';
+    if (!conn.hasCap(CAP_SIGNED) || (scope === 'lobby' && !conn.hasCap(CAP_CHAT_GUID))) return `this server does not carry signed ${what}.`;
     if (!this.pinned) return "this server's key is not pinned.";
     if (!this.signer) return 'this session did not log in with a device whose certificate may sign messages.';
-    if (!conn.signing) return 'the server will not carry signed lines from this session.';
+    if (!conn.signing) return `the server will not carry signed ${what} from this session.`;
     return null;
   }
 
@@ -1806,7 +2031,7 @@ export class App {
   private async historyLines(ok: HistoryOk): Promise<Line[] | null> {
     const lines = this.lines;
     const reads = await Promise.all(
-      ok.lines.map((line) => (line.deleted ? null : lines.history(line).catch(() => null))),
+      ok.lines.map((line) => (line.deleted ? null : lines.history(line).catch(() => unreadable(line.signed)))),
     );
     // Read for a session since replaced: its page is not this one's.
     if (lines !== this.lines) return null;
@@ -1827,6 +2052,7 @@ export class App {
           deleted: line.deleted,
           media: line.media,
           ...(read?.signature ? { signature: read.signature } : {}),
+          ...(line.signed !== undefined ? { signed: line.signed } : {}),
         },
       ];
     });
@@ -1939,12 +2165,24 @@ export class App {
    * line stamped Tuesday sitting under one from just now is better than
    * a client that quietly reorders a transcript.
    */
-  private mergeStoredMail(ok: InboxOk): number {
+  private async mergeStoredMail(ok: InboxOk): Promise<number> {
     let added = 0;
-    // `inbox` lists newest first; put them back in the order they were sent.
-    for (const m of [...ok.messages].reverse()) {
+    // `inbox` lists newest first; put them back in the order they were
+    // sent, and read them in it, so within a page the first of two
+    // copies is the earlier (§3.6). A page read for a session since
+    // replaced is not this one's.
+    const sent = [...ok.messages].reverse();
+    const messages = this.messages;
+    const reads = await Promise.all(sent.map((m) => messages.stored(m).catch(() => unreadable(m.signed))));
+    if (messages !== this.messages) return 0;
+    for (const [i, m] of sent.entries()) {
       if (this.store.hasMail(m.id)) continue;
+      if (reads[i]?.duplicate) {
+        this.store.skipMail({ login: m.from.login }, m.id);
+        continue;
+      }
       const conv = this.store.openPm({ login: m.from.login, nick: m.from.nick });
+      const signature = reads[i]?.signature;
       // The server knows whether this was read, possibly by another
       // client on the same account. Recovering it must not raise a badge
       // over mail its owner has already dealt with.
@@ -1961,6 +2199,8 @@ export class App {
           // as well, or a private image disappears on reload and on
           // every older page.
           media: m.media,
+          ...(signature ? { signature } : {}),
+          ...(m.signed !== undefined ? { signed: m.signed } : {}),
         },
         !m.read,
       );
@@ -1993,7 +2233,7 @@ export class App {
       const page = await conn.inbox(before === undefined ? {} : { before });
       // `mergeStoredMail` records the page — the cursor moved either way,
       // so asking again goes further back even when nothing here was new.
-      const added = this.mergeStoredMail(page);
+      const added = await this.mergeStoredMail(page);
       if (opts.initial) {
         if (added) {
           this.say(
@@ -2036,9 +2276,10 @@ export class App {
     const conn = this.conn;
     if (!conn || conv.kind !== 'pm' || !this.store.mail) return;
     let top = 0;
-    // Only mail we received has an id worth marking; our own half of the
-    // conversation is local and never had one.
-    for (const l of conv.lines) if (l.id !== undefined && !l.local && l.id > top) top = l.id;
+    // Only mail we received has an id worth marking, a copy left out as
+    // a duplicate included; our own half of the conversation is local
+    // and never had one.
+    for (const id of conv.mailIds) if (id > top) top = id;
 
     const claim = this.readCursor.claim(top);
     if (!claim) return;
@@ -2685,8 +2926,18 @@ export class App {
       // hears of it.
       setSignLobby: (on) => {
         this.signLobby = on;
-        writeSignLobby(on);
+        writeSigning('lobby', on);
         if (this.conn instanceof Connection && this.conn.signs) this.conn.signs = on ? 'default' : 'able';
+      },
+      signPms: this.signPms,
+      setSignPms: (on) => {
+        this.signPms = on;
+        writeSigning('pm', on);
+      },
+      signNews: this.signNews,
+      setSignNews: (on) => {
+        this.signNews = on;
+        writeSigning('news', on);
       },
       openDebug: () => this.debug.toggle(true),
     });

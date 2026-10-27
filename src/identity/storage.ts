@@ -19,11 +19,14 @@
 
 import { bytesToHex, type ServerPin, type ServerPinStore } from '@hotline-ng/client';
 
+import type { GuidMemory } from '../signing';
+
 const DB_NAME = 'hxd-ng.identity';
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 const DEVICES_STORE = 'devices';
 const META_STORE = 'meta';
 const SERVER_PINS_STORE = 'serverPins';
+const NEWS_GUIDS_STORE = 'newsGuids';
 const ACTIVE_KEY = 'active';
 /** The identity this browser has enrolled with before, in `meta` rather
  *  than on the device record: it has to outlive "forget this device", or
@@ -78,6 +81,9 @@ function openDb(): Promise<IDBDatabase> {
       }
       if (!db.objectStoreNames.contains(SERVER_PINS_STORE)) {
         db.createObjectStore(SERVER_PINS_STORE); // keyed by host
+      }
+      if (!db.objectStoreNames.contains(NEWS_GUIDS_STORE)) {
+        db.createObjectStore(NEWS_GUIDS_STORE); // keyed by `<server key hex>:<guid>`
       }
     };
     req.onsuccess = () => resolve(req.result);
@@ -250,5 +256,28 @@ export const serverPins: ServerPinStore = {
   put: (host, pin) =>
     withDb(SERVER_PINS_STORE, 'readwrite', (tx) => {
       tx.objectStore(SERVER_PINS_STORE).put(pin, host);
+    }),
+};
+
+const guidKey = (server: Uint8Array, guid: string) => `${bytesToHex(server)}:${guid}`;
+
+/** The news category guids each server key gave (`GuidMemory`), an
+ *  entry each, so tabs that note different guids at once keep both, and
+ *  one that sees a guid on another node than another tab did marks it
+ *  shared rather than overwriting it. */
+export const newsGuids: GuidMemory = {
+  note: (server, guid, node) =>
+    withDb(NEWS_GUIDS_STORE, 'readwrite', async (tx) => {
+      const store = tx.objectStore(NEWS_GUIDS_STORE);
+      const key = guidKey(server, guid);
+      const was = await requestResult<number | 'shared' | undefined>(store.get(key));
+      const now = was === undefined ? node : was === node ? was : 'shared';
+      if (now !== was) store.put(now, key);
+      return now;
+    }),
+  forget: (server) =>
+    withDb(NEWS_GUIDS_STORE, 'readwrite', (tx) => {
+      // ';' sorts just after ':', so this is every key under the server's.
+      tx.objectStore(NEWS_GUIDS_STORE).delete(IDBKeyRange.bound(`${bytesToHex(server)}:`, `${bytesToHex(server)};`));
     }),
 };

@@ -384,7 +384,14 @@ export interface SyncOk {
  * arrived while its sender was gone — the `msg` event for one carries
  * `uid: 0`.
  */
-export type MsgParams = { text: string; guid?: string; media?: string } & (
+export type MsgParams = {
+  text: string;
+  guid?: string;
+  media?: string;
+  /** The detached form, base64url, with `signed` (`signMsgRequest`),
+   *  whose id `guid` must be. */
+  signed?: string;
+} & (
   | { to: number; to_login?: never }
   | { to_login: string; to?: never }
 );
@@ -471,6 +478,8 @@ export interface StoredMessage {
   /** The image it was sent with, resolved as of now: with an `id` while
    *  the bytes are still there, without one when they have gone. */
   media?: Media;
+  /** A signed message's detached form, base64url. */
+  signed?: string;
 }
 
 export interface InboxParams {
@@ -605,6 +614,9 @@ export interface NewsNode {
   children?: NewsNode[];
   /** Present on a category a feed fills: nobody starts a thread in it. */
   feed?: NewsFeed;
+  /** The node's 16-byte guid, base64url, with `signed`: what a signed
+   *  article names its category by. */
+  guid?: string;
 }
 
 /** The feed filling a category, and what it allows. */
@@ -677,6 +689,8 @@ export interface NewsArticle {
   refs: NewsReference[];
   /** How many articles point at this one; `newsRefs` lists them. */
   referenced_by: number;
+  /** A signed article's detached form, base64url. Never on a tombstone. */
+  signed?: string;
 }
 
 /** A thread as a listing shows it: the starter whole, and what happened
@@ -863,6 +877,9 @@ export interface NewsPostParams {
   mime?: string;
   /** Handles returned by `uploadNewsAttachment`, in display order. */
   attach?: string[];
+  /** The detached form, base64url, with `signed` (`signNewsPost`); then
+   *  `mime` is required and the map's. */
+  signed?: string;
 }
 
 /** A staged image, usable by a later `newsPost` from this session. */
@@ -1137,14 +1154,20 @@ export type ReportKind = 'line' | 'media' | 'msg' | 'user' | 'article';
  * inbox row — a server without one, or one sent to a guest — is
  * reported as its sender (`user`) with the text pasted as `evidence`,
  * which the server marks unverified: it is the reporter's word, not a
- * row it can vouch for.
+ * row it can vouch for. Pasted with `signed`, its detached form, it may
+ * name no target, and still unverified, it carries what the sender
+ * signed for a moderator to check (hxd-ng's `docs/e2e-messages.md`
+ * §4.12).
  */
-export type ReportParams = { reason: string; evidence?: string } & (
+export type ReportParams = { reason: string; evidence?: string; signed?: string } & (
   | { line: number; media?: never; msg?: never; user?: never; article?: never }
   | { media: string; line?: never; msg?: never; user?: never; article?: never }
   | { msg: number; line?: never; media?: never; user?: never; article?: never }
   | { user: PersonRef; line?: never; media?: never; msg?: never; article?: never }
   | { article: number; line?: never; media?: never; msg?: never; user?: never }
+  /** Pasted evidence that is signed names no target: the server names
+   *  the certificate's identity. */
+  | { signed: string; line?: never; media?: never; msg?: never; user?: never; article?: never }
 );
 
 export interface ReportOk {
@@ -1431,7 +1454,16 @@ export interface Events {
    *  from a guest — and it is the handle `msg_read` takes. `at` is when
    *  it was *sent*, not when it arrived, which is the whole difference
    *  for mail that waited. */
-  msg: { from: Sender; text: string; at: number; queued: boolean; id?: number; media?: Media };
+  msg: {
+    from: Sender;
+    text: string;
+    at: number;
+    queued: boolean;
+    id?: number;
+    media?: Media;
+    /** A signed message's detached form, or its link form, base64url. */
+    signed?: string;
+  };
   broadcast: { from: Sender; text: string };
   kicked: Record<string, never>;
   /** An administrator changed the account this session is logged in as;

@@ -718,7 +718,7 @@ export const signedArticles: SignedKind<SignedArticle, ArticleScope, readonly [s
   articleSpec,
 );
 
-// --- on the wire (§4.7) -----------------------------------------------------
+// --- on the wire (§4.7, §4.9, §4.10) ----------------------------------------
 
 /** A line ready to send: `chat`'s `text`, canonical, and the `guid` and
  *  `signed` that go beside it. */
@@ -728,46 +728,110 @@ export interface SignedChatRequest {
   signed: string;
 }
 
-/** Sign a line for `chat`. Its random `id` is the request's `guid`,
- *  hyphenated as the server echoes it, so a retry sends this request
- *  again, unchanged. */
-export async function signChatRequest(
-  deviceSignKey: CryptoKey,
-  line: Omit<SignedChatLine, 'id' | 'sent'>,
-  sent = Math.floor(Date.now() / 1000),
-): Promise<SignedChatRequest> {
-  const id = crypto.getRandomValues(new Uint8Array(16));
-  const text = canonicalText(line.text);
-  const whole = await signedChatLines.sign(deviceSignKey, { ...line, id, sent, text });
-  const detached = (await signedChatLines.parse(whole, sent)).detached();
-  const hex = bytesToHex(id);
-  const guid = `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
-  return { text, guid, signed: bytesToBase64url(detached) };
+/** A private message ready to send: `msg`'s `text`, `guid` and `signed`,
+ *  as a line's. */
+export type SignedMsgRequest = SignedChatRequest;
+
+/** An article ready to post: `news_post`'s `subject`, `body` and `mime`,
+ *  the first two canonical, and the `signed` that goes beside them. */
+export interface SignedNewsPost {
+  subject: string;
+  body: string;
+  mime: SignedArticle['mime'];
+  signed: string;
 }
 
-/** What a reader makes of a line's `signed`: its state, and for one
- *  that parsed, the line as signed, whose `id`, `sent` and `act` are
- *  the signer's word rather than the server's. */
-export interface SignedChatRead {
+/** What a signer is handed for one of the objects: everything but `sent`,
+ *  and its `id` only to sign one again, as the same message (§3.6). */
+type ToSign<T extends SignedFields> = Omit<T, 'id' | 'sent'> & { id?: Uint8Array };
+
+/** Sign and detach, base64url, with the object's texts canonical. */
+async function signDetached<T extends SignedFields, S, X>(
+  kind: SignedKind<T, S, X>,
+  deviceSignKey: CryptoKey,
+  message: T,
+): Promise<string> {
+  const whole = await kind.sign(deviceSignKey, message);
+  return bytesToBase64url((await kind.parse(whole, message.sent)).detached());
+}
+
+/** An id as the guid a request names it by, hyphenated as the server
+ *  echoes it. */
+function guidOf(id: Uint8Array): string {
+  const hex = bytesToHex(id);
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+const newId = () => crypto.getRandomValues(new Uint8Array(16));
+const nowSeconds = () => Math.floor(Date.now() / 1000);
+
+/** Sign a line for `chat`. Its random `id` is the request's `guid`, so a
+ *  retry sends this request again, unchanged, or one signed again under
+ *  the same `id`. */
+export async function signChatRequest(
+  deviceSignKey: CryptoKey,
+  line: ToSign<SignedChatLine>,
+  sent = nowSeconds(),
+): Promise<SignedChatRequest> {
+  const id = line.id ?? newId();
+  const text = canonicalText(line.text);
+  const signed = await signDetached(signedChatLines, deviceSignKey, { ...line, id, sent, text });
+  return { text, guid: guidOf(id), signed };
+}
+
+/** Sign a private message for `msg`, to `to`, the recipient's identity
+ *  fingerprint, as a line is signed for `chat`. */
+export async function signMsgRequest(
+  deviceSignKey: CryptoKey,
+  message: ToSign<Omit<SignedPrivateMessage, 'quote'>>,
+  sent = nowSeconds(),
+): Promise<SignedMsgRequest> {
+  const id = message.id ?? newId();
+  const text = canonicalText(message.text);
+  const signed = await signDetached(signedPrivateMessages, deviceSignKey, { ...message, id, sent, text });
+  return { text, guid: guidOf(id), signed };
+}
+
+/** Sign an article for `news_post`, into the category whose node guid is
+ *  `category` and under `parent`, whose `article` is the request's
+ *  `parent`. A post has no guid: a retry signs it again under the same
+ *  `id`. */
+export async function signNewsPost(
+  deviceSignKey: CryptoKey,
+  article: ToSign<SignedArticle>,
+  sent = nowSeconds(),
+): Promise<SignedNewsPost & { id: Uint8Array }> {
+  const id = article.id ?? newId();
+  const [subject, body] = [canonicalText(article.subject), canonicalText(article.body)];
+  const signed = await signDetached(signedArticles, deviceSignKey, { ...article, id, sent, subject, body });
+  return { subject, body, mime: article.mime, signed, id };
+}
+
+/** What a reader makes of a `signed` it was handed: its state, and for
+ *  one that parsed, the object as signed, whose `id`, `sent` and the rest
+ *  are the signer's word rather than the server's. */
+export interface SignedRead<T> {
   outcome: SignedOutcome;
-  line: SignedChatLine | null;
+  message: T | null;
   /** A link form's id and the hash it names its certificate by, which
    *  tell it apart before the certificate is held. */
   link?: { id: Uint8Array; certSha256: Uint8Array };
 }
 
-/** Read a `chat` event's or a history line's `signed` beside its text
- *  and whether it came as an action, which its `act` must say (§4.7):
- *  its detached form, or its link form, which names `cert_sha256` in
- *  place of `cert` and is unverified until its certificate is held. A
- *  check this runtime cannot make is unverified, never thrown. */
-export async function readSignedChat(
+/** Read a `signed` beside its texts: its detached form, or its link
+ *  form, which names `cert_sha256` in place of `cert` and is unverified
+ *  until its certificate is held. `disagrees` names a key of the map
+ *  that says otherwise than how the object was shown, which makes it
+ *  invalid. A check this runtime cannot make is unverified, never
+ *  thrown. */
+async function readSigned<T extends SignedFields, S, X>(
+  kind: SignedKind<T, S, X>,
   signed: string,
-  text: string,
-  act: boolean,
-  ctx: SignedContext<ChatScope>,
-): Promise<SignedChatRead> {
-  const invalid = (error: Error): SignedChatRead => ({ outcome: { state: 'invalid', error }, line: null });
+  texts: X,
+  ctx: SignedContext<S>,
+  disagrees: (get: (key: string) => CborValue | undefined) => string | null = () => null,
+): Promise<SignedRead<T>> {
+  const invalid = (error: Error): SignedRead<T> => ({ outcome: { state: 'invalid', error }, message: null });
   let bytes: Uint8Array;
   let value: CborValue | undefined;
   try {
@@ -780,22 +844,68 @@ export async function readSignedChat(
   } catch {
     // Refused below, as a detached form.
   }
+  const get = (key: string) => (value ? mapGet(value, key) : undefined);
   try {
-    const hash = value && mapGet(value, 'cert_sha256');
-    if (value && hash) {
-      const outcome = await signedChatLines.read({ form: 'link', bytes, texts: [text] }, ctx);
-      const id = mapGet(value, 'id');
-      if (outcome.state === 'invalid' || hash.t !== 'bytes' || id?.t !== 'bytes') return { outcome, line: null };
-      if ((mapGet(value, 'act')?.v === true) !== act) return invalid(new IdentityError('bad-field', 'act'));
-      return { outcome, line: null, link: { id: id.v, certSha256: hash.v } };
+    const hash = get('cert_sha256');
+    if (hash) {
+      const outcome = await kind.read({ form: 'link', bytes, texts }, ctx);
+      const id = get('id');
+      if (outcome.state === 'invalid' || hash.t !== 'bytes' || id?.t !== 'bytes') return { outcome, message: null };
+      const bad = disagrees(get);
+      if (bad) return invalid(new IdentityError('bad-field', bad));
+      return { outcome, message: null, link: { id: id.v, certSha256: hash.v } };
     }
-    const parsed = await signedChatLines.parseDetached(bytes, [text], ctx.at);
-    if (parsed.message.act !== act) return invalid(new IdentityError('bad-field', 'act'));
-    return { outcome: parsed.check(ctx), line: parsed.message };
+    const parsed = await kind.parseDetached(bytes, texts, ctx.at);
+    const bad = disagrees(get);
+    if (bad) return invalid(new IdentityError('bad-field', bad));
+    return { outcome: parsed.check(ctx), message: parsed.message };
   } catch (error) {
     if (error instanceof IdentityError || error instanceof CborError) return invalid(error);
-    return { outcome: { state: 'unverified', signer: null }, line: null };
+    return { outcome: { state: 'unverified', signer: null }, message: null };
   }
+}
+
+/** A line's read, as `readSignedChat` gives it. */
+export interface SignedChatRead {
+  outcome: SignedOutcome;
+  line: SignedChatLine | null;
+  link?: { id: Uint8Array; certSha256: Uint8Array };
+}
+
+/** Read a `chat` event's or a history line's `signed` beside its text
+ *  and whether it came as an action, which its `act` must say (§4.7). */
+export async function readSignedChat(
+  signed: string,
+  text: string,
+  act: boolean,
+  ctx: SignedContext<ChatScope>,
+): Promise<SignedChatRead> {
+  const { message, ...rest } = await readSigned(signedChatLines, signed, [text], ctx, (get) =>
+    (get('act')?.v === true) !== act ? 'act' : null,
+  );
+  return { ...rest, line: message };
+}
+
+/** Read a `msg` event's or an `inbox` row's `signed` beside its text
+ *  (§4.9), its scope the fingerprint the reader's session proved. */
+export function readSignedMessage(
+  signed: string,
+  text: string,
+  ctx: SignedContext<MessageScope>,
+): Promise<SignedRead<SignedPrivateMessage>> {
+  return readSigned(signedPrivateMessages, signed, [text], ctx);
+}
+
+/** Read an article's `signed` beside its subject and body, and the
+ *  `mime` it is shown as, which the map's must equal (§4.10). */
+export function readSignedArticle(
+  signed: string,
+  article: { subject: string; body: string; mime: string },
+  ctx: SignedContext<ArticleScope>,
+): Promise<SignedRead<SignedArticle>> {
+  return readSigned(signedArticles, signed, [article.subject, article.body], ctx, (get) =>
+    get('mime')?.v !== article.mime ? 'mime' : null,
+  );
 }
 
 // --- §8 ---------------------------------------------------------------------

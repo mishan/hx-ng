@@ -52,9 +52,11 @@ export interface Line {
   /** A news article this line announces. The transcript draws the line
    *  as a link, and following it opens the article where it sits. */
   article?: number;
-  /** A public line's signature, once read, or the mark an unsigned one
-   *  gets where a signature was expected. */
+  /** A line's or a message's signature, once read, or the mark an
+   *  unsigned one gets where a signature was expected. */
   signature?: LineSignature;
+  /** Its detached form as it came, which a report pastes beside the text. */
+  signed?: string;
 }
 
 export type ConvId = string;
@@ -403,6 +405,15 @@ export class Store {
     if (this.active === id) this.active = LOBBY;
   }
 
+  /** A stored message left out as a copy of one already shown (§3.6):
+   *  seen, and held by the conversation it would have joined where that
+   *  is open, so marking that one read marks it read too. None is opened
+   *  for it. */
+  skipMail(who: Peer, mail: number): void {
+    this.seenMail.add(mail);
+    this.pmWith(who)?.mailIds.add(mail);
+  }
+
   /** Is this stored message already on screen? */
   hasMail(id: number): boolean {
     return this.seenMail.has(id);
@@ -586,6 +597,7 @@ function blank(line: Line): string | undefined {
   line.text = 'Message deleted.';
   line.from = undefined;
   line.signature = undefined;
+  line.signed = undefined;
   if (line.media) {
     const { id: _gone, ...rest } = line.media;
     line.media = { ...rest, removed: true };

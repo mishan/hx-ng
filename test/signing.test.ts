@@ -5,17 +5,25 @@ import {
   DEVICE_CERT_DOMAIN,
   base64urlToBytes,
   bytesToBase64url,
+  fingerprintFromString,
   hexToBytes,
   signedChatLines,
+  signedPrivateMessages,
   signChatRequest,
+  signMsgRequest,
+  signNewsPost,
   type Events,
   type FollowedHandover,
   type HistoryLine,
+  type NewsArticle,
+  type NewsNode,
+  type SignedParent,
+  type StoredMessage,
   type User,
 } from '@hotline-ng/client';
 
 import { cBytes, cOptMap, cUint, encode, type CborValue } from '../packages/hotline-ng/src/cbor';
-import { LineReader, signsFor, type PinnedKey } from '../src/signing';
+import { ArticleReader, LineReader, MessageReader, heldGuids, signsFor, type PinnedKey } from '../src/signing';
 import vectors from '../packages/hotline-ng/test/identity-vectors.json';
 
 const V: Record<string, any> = vectors;
@@ -225,5 +233,225 @@ describe('LineReader', () => {
       expect(read.signature?.state, name).toBe(state);
       expect(read.signature?.signer, name).toBe(SIGNER);
     }
+  });
+});
+
+/** The reader's own identity, which a private message to them names. */
+const ME = OTHER;
+
+/** A `msg` event as the server sends it. */
+function msgEvent(from: User | { uid: 0; nick: string }, text: string, signed?: string, over: Partial<Events['msg']> = {}): Events['msg'] {
+  return { from: { uid: from.uid, nick: from.nick }, text, at: SENT, queued: false, ...(signed ? { signed } : {}), ...over };
+}
+
+function inboxRow(id: number, text: string, signed?: string): StoredMessage {
+  return { id, from: { nick: 'Alice', login: 'alice' }, text, at: SENT, read: false, ...(signed ? { signed } : {}) };
+}
+
+describe('MessageReader', () => {
+  it('reads a message against the identity this session proved, naming its sender as the server does or by its certificate', async () => {
+    const dev = await device();
+    const sign = (to: string) => signMsgRequest(dev.key, { cert: dev.cert, to: fingerprintFromString(to)!, text: 'psst' }, SENT);
+    const signer = row({ identity: { fingerprint: SIGNER, handle: null } });
+    const linked = row({ remote: { server: 'Far', tag: 'far', tagged: false } });
+    const cases: [string, string | null, string, User | undefined, number, string][] = [
+      ['from a row naming its signer', ME, ME, signer, 7, 'verified'],
+      ['from a row naming another signer', ME, ME, row({ identity: { fingerprint: OTHER, handle: null } }), 7, 'invalid'],
+      ['from a row with no identity', ME, ME, row(), 7, 'unverified'],
+      ['waiting for a sender who has gone', ME, ME, undefined, 0, 'verified'],
+      ['from a linked user, by their certificate', ME, ME, linked, 7, 'verified'],
+      ['signed to someone else', ME, SIGNER, signer, 7, 'elsewhere'],
+      ['to a session that proved no identity', null, ME, signer, 7, 'unverified'],
+    ];
+    for (const [name, proved, to, from, uid, state] of cases) {
+      const req = await sign(to);
+      const read = await new MessageReader(proved).live(msgEvent({ ...(from ?? row()), uid } as User, req.text, req.signed), from);
+      expect(read.signature?.state, name).toBe(state);
+      if (state !== 'invalid') expect(read.signature?.signer, name).toBe(SIGNER);
+    }
+  });
+
+  it('says who an elsewhere message was for, and why one is unverified to a session with no identity', async () => {
+    const dev = await device();
+    const req = await signMsgRequest(dev.key, { cert: dev.cert, to: fingerprintFromString(SIGNER)!, text: 'psst' }, SENT);
+    const elsewhere = await new MessageReader(ME).stored(inboxRow(1, req.text, req.signed));
+    expect(elsewhere.signature?.signedFor).toBe(`someone else, whose fingerprint begins ${SIGNER.slice(0, 16)}`);
+    const nobody = await new MessageReader(null).stored(inboxRow(1, req.text, req.signed));
+    expect(nobody.signature?.why).toMatch(/no identity/);
+  });
+
+  it('shows a message once across its live copy and its inbox rows, and the first of two under one id', async () => {
+    const dev = await device();
+    const to = fingerprintFromString(ME)!;
+    const req = await signMsgRequest(dev.key, { cert: dev.cert, to, text: 'once' }, SENT);
+    const first = await signedPrivateMessages.parseDetached(base64urlToBytes(req.signed), [req.text], SENT);
+    const other = bytesToBase64url(
+      (await signedPrivateMessages.parse(await signedPrivateMessages.sign(dev.key, { ...first.message, text: 'other words' }), SENT)).detached(),
+    );
+    const signer = row({ identity: { fingerprint: SIGNER, handle: null } });
+    const messages = new MessageReader(ME);
+    const cases: [string, () => Promise<{ duplicate: boolean }>, boolean][] = [
+      ['delivered live, stored as 5', () => messages.live(msgEvent(signer, req.text, req.signed, { id: 5 }), signer), false],
+      ['its inbox row', () => messages.stored(inboxRow(5, req.text, req.signed)), false],
+      ['stored again as 6', () => messages.stored(inboxRow(6, req.text, req.signed)), true],
+      ['other words under its id', () => messages.stored(inboxRow(7, 'other words', other)), true],
+      ['other words under its id and its row', () => messages.stored(inboxRow(5, 'other words', other)), true],
+      ['the same again live, unstored', () => messages.live(msgEvent(signer, req.text, req.signed), signer), true],
+    ];
+    for (const [name, read, duplicate] of cases) expect((await read()).duplicate, name).toBe(duplicate);
+  });
+
+  it('marks an unsigned message from someone seen signing to this session', async () => {
+    const dev = await device();
+    const signer = row({ identity: { fingerprint: SIGNER, handle: null } });
+    const messages = new MessageReader(ME);
+    expect((await messages.live(msgEvent(signer, 'plain'), signer)).signature).toBeNull();
+    const req = await signMsgRequest(dev.key, { cert: dev.cert, to: fingerprintFromString(ME)!, text: 'signed' }, SENT);
+    expect((await messages.live(msgEvent(signer, req.text, req.signed), signer)).signature?.state).toBe('verified');
+    expect((await messages.live(msgEvent(signer, 'stripped'), signer)).signature).toMatchObject({ state: 'unsigned', signatureExpected: true });
+  });
+});
+
+const CATEGORY = new Uint8Array(16).fill(4);
+const OTHER_CATEGORY = new Uint8Array(16).fill(5);
+
+function node(id: number, guid: Uint8Array | null = CATEGORY): NewsNode {
+  return { id, parent: null, kind: 'category', name: 'General', count: 0, created_at: 0, ...(guid ? { guid: bytesToBase64url(guid) } : {}) };
+}
+
+function article(id: number, parent: number | null, post?: { subject: string; body: string; mime: string; signed: string }, over: Partial<NewsArticle> = {}): NewsArticle {
+  return {
+    id,
+    category: 1,
+    parent,
+    root: parent === null ? id : 1,
+    depth: parent === null ? 0 : 1,
+    from: { nick: 'Alice', login: 'alice', fingerprint: SIGNER },
+    subject: post?.subject ?? 'plain',
+    body: post?.body ?? 'unsigned',
+    mime: post?.mime ?? 'text/plain',
+    at: SENT,
+    deleted: false,
+    attachments: [],
+    refs: [],
+    referenced_by: 0,
+    ...(post ? { signed: post.signed } : {}),
+    ...over,
+  };
+}
+
+describe('ArticleReader', () => {
+  async function poster() {
+    const dev = await device();
+    return (over: { server?: Uint8Array; category?: Uint8Array; parent?: SignedParent; subject?: string; id?: Uint8Array } = {}) =>
+      signNewsPost(
+        dev.key,
+        {
+          cert: dev.cert,
+          server: over.server ?? HERE,
+          category: over.category ?? CATEGORY,
+          ...(over.parent ? { parent: over.parent } : {}),
+          ...(over.id ? { id: over.id } : {}),
+          subject: over.subject ?? 'news',
+          body: 'body',
+          mime: 'text/markdown',
+        },
+        SENT,
+      );
+  }
+
+  it('reads a thread starter against the pin, its category\'s guid and who the server says wrote it', async () => {
+    const post = await poster();
+    const cases: [string, PinnedKey | null, Awaited<ReturnType<typeof post>>, NewsNode, Partial<NewsArticle>, string][] = [
+      ['as posted', PINNED, await post(), node(1), {}, 'verified'],
+      ['by another than the server names', PINNED, await post(), node(1), { from: { nick: 'Alice', fingerprint: OTHER } }, 'invalid'],
+      ['by nobody the server names', PINNED, await post(), node(1), { from: { nick: 'Alice' } }, 'unverified'],
+      ['shown as another type', PINNED, await post(), node(1), { mime: 'text/plain' }, 'invalid'],
+      ['its subject changed', PINNED, await post(), node(1), { subject: 'olds' }, 'invalid'],
+      ['in another category', PINNED, await post({ category: OTHER_CATEGORY }), node(1), {}, 'elsewhere'],
+      ['for another server', PINNED, await post({ server: LINKED }), node(1), {}, 'elsewhere'],
+      ['as a reply, listed as a thread', PINNED, await post({ parent: { article: 9 } }), node(1), {}, 'elsewhere'],
+      ['to a host whose key is not pinned', null, await post(), node(1), {}, 'unverified'],
+      ['in a category with no guid', PINNED, await post(), node(1, null), {}, 'unverified'],
+      ['for another server, in a category with no guid', PINNED, await post({ server: LINKED }), node(1, null), {}, 'elsewhere'],
+    ];
+    for (const [name, pinned, req, category, over, state] of cases) {
+      const read = await new ArticleReader(pinned).read(article(1, null, req, over), category);
+      expect(read.signature?.state, name).toBe(state);
+      if (name === 'in a category with no guid') expect(read.signature?.why).toBe('this server gave the category no guid');
+      if (state === 'verified') expect(read.article?.subject, name).toBe('news');
+    }
+  });
+
+  it('reads a category guid two nodes give, in one listing or one session after another, as no scope at all', async () => {
+    const post = await poster();
+    const memory = heldGuids();
+    const earlier = new ArticleReader(PINNED, memory);
+    await earlier.categoryKey(node(1));
+    const cases: [string, ArticleReader, NewsNode[], string][] = [
+      ['one node', new ArticleReader(PINNED), [node(1)], 'verified'],
+      ['two in one listing', new ArticleReader(PINNED), [node(1), { ...node(2), children: [node(3)] }], 'unverified'],
+      ['another node in a later session', new ArticleReader(PINNED, memory), [node(2)], 'unverified'],
+      ['the same node in a later session under another server key', new ArticleReader({ key: LINKED, followed: [] }, memory), [node(2)], 'elsewhere'],
+    ];
+    for (const [name, reader, nodes, state] of cases) {
+      reader.nodes(nodes);
+      const read = await reader.read(article(1, null, await post()), nodes.at(-1)!);
+      expect(read.signature?.state, name).toBe(state);
+      const key = await reader.categoryKey(nodes.at(-1)!);
+      expect('why' in key ? key.why : null, name).toBe(state === 'unverified' ? 'this server gave its guid to more than one category' : null);
+    }
+  });
+
+  it('holds a reply to the parent it is threaded under, as that parent was read', async () => {
+    const post = await poster();
+    const signedParent = await post();
+    const parentId = new Uint8Array(16).fill(1);
+    const by = fingerprintFromString(SIGNER)!;
+    const cases: [string, (NewsArticle | null)[], Awaited<ReturnType<typeof post>>, string, RegExp | undefined][] = [
+      ['under a signed parent', [article(1, null, { ...(await post({ id: parentId })) })], await post({ parent: { article: 1, signed: { id: parentId, by } } }), 'verified', undefined],
+      ['under an unsigned parent', [article(1, null)], await post({ parent: { article: 1 } }), 'verified', undefined],
+      ['naming a signed parent under an unsigned one', [article(1, null)], await post({ parent: { article: 1, signed: { id: parentId, by } } }), 'elsewhere', /as signed, which is shown here without a signature/],
+      ['naming another signed parent', [article(1, null, signedParent)], await post({ parent: { article: 1, signed: { id: parentId, by } } }), 'elsewhere', /another article/],
+      ['naming another parent', [article(1, null)], await post({ parent: { article: 8 } }), 'elsewhere', /a reply to article 8/],
+      ['under a parent not read', [], await post({ parent: { article: 1, signed: { id: parentId, by } } }), 'unverified', undefined],
+      ['under a deleted parent', [article(1, null, undefined, { deleted: true })], await post({ parent: { article: 1, signed: { id: parentId, by } } }), 'unverified', undefined],
+    ];
+    for (const [name, parents, req, state, where] of cases) {
+      const reader = new ArticleReader(PINNED);
+      for (const p of parents) await reader.read(p!, node(1));
+      const read = await reader.read(article(2, 1, req), node(1));
+      expect(read.signature?.state, name).toBe(state);
+      if (where) expect(read.signature?.signedFor, name).toMatch(where);
+    }
+  });
+
+  it('says what a reply signs as its parent, once the parent is read', async () => {
+    const post = await poster();
+    const id = new Uint8Array(16).fill(7);
+    const reader = new ArticleReader(PINNED);
+    expect(reader.replyParent(1)).toBeNull();
+    await reader.read(article(1, null, await post({ id })), node(1));
+    await reader.read(article(2, null), node(1));
+    await reader.read(article(3, null, undefined, { deleted: true }), node(1));
+    expect(reader.replyParent(1)).toEqual({ article: 1, signed: { id, by: fingerprintFromString(SIGNER) } });
+    expect(reader.replyParent(2)).toEqual({ article: 2 });
+    expect(reader.replyParent(3)).toBeNull();
+  });
+
+  it('shows an article once under its signer\'s id, whatever the server numbers it', async () => {
+    const post = await poster();
+    const id = new Uint8Array(16).fill(2);
+    const first = await post({ id });
+    const again = await post({ id });
+    const reworded = await post({ id, subject: 'reworded' });
+    const reader = new ArticleReader(PINNED);
+    const cases: [string, NewsArticle, boolean][] = [
+      ['the first', article(1, null, first), false],
+      ['the same article listed again', article(1, null, first), false],
+      ['signed again, posted as another', article(4, null, again), true],
+      ['other words under its id', article(5, null, reworded), true],
+    ];
+    for (const [name, a, duplicate] of cases) expect((await reader.read(a, node(1))).duplicate, name).toBe(duplicate);
   });
 });

@@ -24,6 +24,10 @@ export interface Settings {
   setSelfView(on: boolean): void;
   signLobby: boolean;
   setSignLobby(on: boolean): void;
+  signPms: boolean;
+  setSignPms(on: boolean): void;
+  signNews: boolean;
+  setSignNews(on: boolean): void;
   openDebug(): void;
 }
 
@@ -81,9 +85,26 @@ export function openSettings(s: Settings): void {
         ),
         toggle(
           'Sign my lines in the lobby',
-          'With an identity login, sign each line with this device, so a server cannot change it or write one in your name. It can still drop a line or strip its signature, and an image is not covered. A signed line is proof anyone can show of what you said. Private messages are not signed.',
+          'With an identity login, sign each line with this device, so a server cannot change it or write one in your name. It can still drop a line or strip its signature, and an image is not covered. A signed line is proof anyone can show of what you said.',
           s.signLobby,
           (on) => s.setSignLobby(on),
+        ),
+        toggle(
+          'Sign my private messages',
+          'With an identity login, sign each private message to someone who logged in with an identity, so the server cannot change it or write one in your name. Whoever you write to can show anyone what you said. An image is not covered.',
+          s.signPms,
+          (on) => s.setSignPms(on),
+        ),
+      ),
+      h(
+        'fieldset',
+        {},
+        h('legend', {}, 'News'),
+        toggle(
+          'Sign my news articles',
+          'With an identity login, sign each article and reply you post, so it stays provably yours wherever it is read. Its images are not covered.',
+          s.signNews,
+          (on) => s.setSignNews(on),
         ),
       ),
       h(

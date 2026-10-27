@@ -74,6 +74,23 @@ describe('what reporting a line names', () => {
     expect(lineReport(line({}), lobby, me)).toEqual({ user: { uid: 5 }, evidence: 'words' });
   });
 
+  it('pastes what a verified signature covers with it, naming nobody, and only that', () => {
+    const signature = (state: 'verified' | 'unverified' | 'invalid') => ({
+      state,
+      signer: 'x',
+      sentAtAnotherTime: false,
+      signatureExpected: false,
+    });
+    const cases: [string, Partial<Line>, object][] = [
+      ['verified', { signed: 'pmF2', signature: signature('verified') }, { evidence: 'words', signed: 'pmF2' }],
+      ['unverified', { signed: 'pmF2', signature: signature('unverified') }, { user: { uid: 5 }, evidence: 'words' }],
+      ['invalid', { signed: 'pmF2', signature: signature('invalid') }, { user: { uid: 5 }, evidence: 'words' }],
+    ];
+    for (const [name, over, want] of cases) {
+      for (const conv of [lobby, pm]) expect(lineReport(line(over), conv, me), name).toEqual(want);
+    }
+  });
+
   it('names nothing for one’s own line, a notice, a local line or a blank one', () => {
     expect(lineReport(line({ id: 1, from: { uid: 1, nick: 'Me' } }), lobby, me)).toBeNull();
     expect(lineReport(line({ kind: 'notice' }), lobby, me)).toBeNull();

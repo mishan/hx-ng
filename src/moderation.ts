@@ -76,7 +76,10 @@ export function personRef(arg: string, onRoster: User | undefined): PersonRef {
  * report, and the server copies the body out of the recipient's inbox.
  * Without an id — a server that keeps no history or no inbox — the only
  * target left is the sender, with the words pasted as evidence, which
- * the server files as unverified: the reporter's word for it.
+ * the server files as unverified: the reporter's word for it. Words a
+ * signature verified go with that signature and name nobody, so the
+ * server names its signer and a moderator can check what was signed
+ * (hxd-ng's `docs/e2e-messages.md` §4.12).
  */
 export function lineReport(
   line: Line,
@@ -95,6 +98,7 @@ export function lineReport(
   // one's own would offer to report oneself.
   if (from?.uid === undefined && !from?.login && me && from?.nick === me.nick) return null;
   if (line.id !== undefined) return conv.kind === 'lobby' ? { line: line.id } : { msg: line.id };
+  if (line.signed !== undefined && line.signature?.state === 'verified') return { evidence: line.text, signed: line.signed };
   // A uid is someone on the roster now, which is who a live line with no
   // id came from, and only while they are: after that it names nobody,
   // or somebody else. A login outlives them.

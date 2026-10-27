@@ -111,11 +111,23 @@ class FakeObjectStore {
     });
   }
 
+  /** A key, or a range of string keys as `IDBKeyRange.bound` makes one. */
   delete(key: unknown): FakeRequest<void> {
     return this.tx!.run(() => {
-      this.data.delete(String(key));
+      if (key instanceof FakeKeyRange) {
+        for (const k of [...this.data.keys()]) if (k >= key.lower && k <= key.upper) this.data.delete(k);
+      } else {
+        this.data.delete(String(key));
+      }
     });
   }
+}
+
+class FakeKeyRange {
+  constructor(
+    readonly lower: string,
+    readonly upper: string,
+  ) {}
 }
 
 class FakeDatabase {
@@ -146,6 +158,7 @@ export function installFakeIndexedDB(): void {
   const databases = new Map<string, Map<string, FakeObjectStore>>();
   const versions = new Map<string, number>();
 
+  (globalThis as any).IDBKeyRange = { bound: (lower: string, upper: string) => new FakeKeyRange(lower, upper) };
   (globalThis as any).indexedDB = {
     open(name: string, version: number) {
       const req = new FakeRequest<FakeDatabase>();

@@ -15,8 +15,12 @@ import {
   CHAT_DOMAIN,
   canonicalText,
   isCanonicalText,
+  readSignedArticle,
   readSignedChat,
+  readSignedMessage,
   signChatRequest,
+  signMsgRequest,
+  signNewsPost,
   signatureDisplay,
   signedArticles,
   signedChatLines,
@@ -400,6 +404,70 @@ describe('a signed chat request', () => {
       const read = await readSignedChat(signed, text, act, { at: SENT, sender: { named: SIGNER }, scope: scope as never });
       expect(read.outcome.state, name).toBe(state);
     }
+  });
+});
+
+describe('a signed message and article on the wire', () => {
+  it('names a message by its guid, and reads it against the identity it was signed to', async () => {
+    const dev = await browserDevice();
+    const me = await otherFingerprint();
+    const req = await signMsgRequest(dev.key, { cert: dev.cert, to: me, text: 'one\r\ntwo' }, SENT);
+    expect(req.text).toBe('one\ntwo');
+    const named = { named: SIGNER };
+    const link = bytesToBase64url(await (await signedPrivateMessages.parseDetached(base64urlToBytes(req.signed), [req.text], SENT)).link());
+    const cases: [string, string, string, string | null, SignedOutcome['state']][] = [
+      ['as sent', req.signed, req.text, V.keys.other.fingerprint, 'verified'],
+      ['its text changed', req.signed, 'one\nthree', V.keys.other.fingerprint, 'invalid'],
+      ['read by someone else', req.signed, req.text, SIGNER, 'elsewhere'],
+      ['read by a session that proved no identity', req.signed, req.text, null, 'unverified'],
+      ['as a link form with no certificate', link, req.text, V.keys.other.fingerprint, 'unverified'],
+      ['not CBOR', 'AAAA', req.text, V.keys.other.fingerprint, 'invalid'],
+    ];
+    for (const [name, signed, text, scope, state] of cases) {
+      const read = await readSignedMessage(signed, text, { at: SENT, sender: named, scope });
+      expect(read.outcome.state, name).toBe(state);
+    }
+    const read = await readSignedMessage(req.signed, req.text, { at: SENT, sender: named, scope: V.keys.other.fingerprint });
+    expect(bytesToHex(read.message!.id)).toBe(req.guid.replaceAll('-', ''));
+  });
+
+  it('posts an article in canonical text, read against its category, its parent and the type it is shown as', async () => {
+    const dev = await browserDevice();
+    const parent = { article: 41 };
+    const post = await signNewsPost(
+      dev.key,
+      { cert: dev.cert, server: SERVER, category: CATEGORY, parent, subject: 'news', body: 'a\r\nb', mime: 'text/markdown' },
+      SENT,
+    );
+    expect([post.subject, post.body, post.mime]).toEqual(['news', 'a\nb', 'text/markdown']);
+    const here = { server: SERVER, category: CATEGORY, parent };
+    const shown = { subject: post.subject, body: post.body, mime: post.mime };
+    const cases: [string, object, object, SignedOutcome['state']][] = [
+      ['as posted', shown, here, 'verified'],
+      ['shown as another type', { ...shown, mime: 'text/plain' }, here, 'invalid'],
+      ['its body changed', { ...shown, body: 'a\nc' }, here, 'invalid'],
+      ['in another category', shown, { ...here, category: new Uint8Array(16) }, 'elsewhere'],
+      ['under another parent', shown, { ...here, parent: { article: 42 } }, 'elsewhere'],
+      ['as a thread of its own', shown, { ...here, parent: null }, 'elsewhere'],
+      ['on another server', shown, { ...here, server: OTHER_SERVER }, 'elsewhere'],
+    ];
+    for (const [name, article, scope, state] of cases) {
+      const read = await readSignedArticle(post.signed, article as typeof shown, { at: SENT, sender: { named: SIGNER }, scope: scope as never });
+      expect(read.outcome.state, name).toBe(state);
+    }
+  });
+
+  it('signs a post again under its id as the same article, and other words under it as another', async () => {
+    const dev = await browserDevice();
+    const article = { cert: dev.cert, server: SERVER, category: CATEGORY, subject: 'news', body: 'body', mime: 'text/plain' as const };
+    const first = await signNewsPost(dev.key, article, SENT);
+    const again = await signNewsPost(dev.key, { ...article, id: first.id }, SENT + 60);
+    const other = await signNewsPost(dev.key, { ...article, id: first.id, body: 'other' }, SENT + 60);
+    const content = async (p: { subject: string; body: string; signed: string }) =>
+      bytesToHex(await (await signedArticles.parseDetached(base64urlToBytes(p.signed), [p.subject, p.body], SENT + 60)).contentSha256());
+    expect(again.signed).not.toBe(first.signed);
+    expect(await content(again)).toBe(await content(first));
+    expect(await content(other)).not.toBe(await content(first));
   });
 });
 

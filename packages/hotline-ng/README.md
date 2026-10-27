@@ -115,6 +115,33 @@ What it handles so a caller does not have to:
 `request()` rejects with a `WireFailure` carrying the server's
 `{ code, text }`; pass `err.wire` to `errorText()`.
 
+`code` stays a `string`, since a newer server may answer with one this
+version has never heard of. `WireCode` is the union of every code it
+does know, and `isWireCode(code)` narrows to it, so a misspelled or
+retired code fails to compile and a `switch` can be made exhaustive:
+
+```ts
+const { code } = err.wire;
+if (isWireCode(code)) {
+  switch (code) {
+    case 'rate_limited':
+      return later(err.wire.retry_after);
+    // ...every other WireCode...
+    default:
+      code satisfies never;
+  }
+}
+```
+
+`isPermanent(code)` says whether retrying soon, with backoff, cannot
+help. `false` means it may pass soon — `rate_limited`, `server_error`,
+`busy` — so back off and send it again; only `rate_limited` carries
+`retry_after`. `true` includes refusals that may pass once something
+outside the request changes, a mailbox read or a day gone by: whether
+to try again later is the caller's decision. A code it does not know is
+`true`, so a program that retries on `false` never loops on a refusal
+it cannot read.
+
 ### Files
 
 The read-only Files API keeps full `u64` values as decimal strings on the

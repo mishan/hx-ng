@@ -34,6 +34,8 @@ export interface EventFrame {
 }
 
 export interface WireError {
+  /** A `WireCode` once `isWireCode` says so; a newer server may send
+   *  codes this version does not know. */
   code: string;
   text: string;
   /** Whole seconds until a `rate_limited` request would be taken. */
@@ -1766,6 +1768,144 @@ export const NOT_SEALED = 'not_sealed';
  *  fetch its certificate and seal again, never in the clear. */
 export const CERT_CHANGED = 'cert_changed';
 
+/**
+ * Every code the ng wire can answer, as hxd-ng's `docs/hotline-ng.md`
+ * §10 and the family documents beside it register them, with whether
+ * retrying soon, with backoff, cannot help. `false` is for the refusals
+ * that may pass soon — load, or capacity held for the moment by others
+ * — and `true` for everything else: those that need the request, the
+ * caller's rights or state changed, and those that may pass only after
+ * something outside the request changes (a mailbox read, a day gone
+ * by), where whether to try again later is the caller's decision.
+ * Adding a code here forces that decision.
+ *
+ * The identity endpoints' refusals (`wrong_host`, `wrong_account`,
+ * `bad_server_challenge` and `/identity/auth`'s own) are `AuthError`s,
+ * not `WireFailure`s, and are not here.
+ */
+const PERMANENT = {
+  // Universal (§10).
+  unknown_method: true,
+  not_logged_in: true,
+  bad_request: true,
+  access_denied: true,
+  rate_limited: false,
+  // Fatal: the session is kicked, and retrying is what got it kicked.
+  flooding: true,
+  server_error: false,
+  // Login and resume (§6).
+  login_failed: true,
+  denied: true,
+  revoked: true,
+  banned: true,
+  server_full: false,
+  server_busy: false,
+  // Waiting does not help; closing another of the account's connections does.
+  too_many_connections: true,
+  session_expired: true,
+  // Not a failure: the next step is `sync`, not the same `resume`.
+  resync_required: true,
+  not_available: true,
+  name_reserved: true,
+  // Rooms (chat-rooms.md §5).
+  no_such_room: true,
+  not_a_member: true,
+  read_only: true,
+  signature_required: true,
+  encryption_required: true,
+  too_many_rooms: true,
+  rooms_full: true,
+  name_taken: true,
+  // Messages (§7.1, private-messages.md, e2e-messages.md §4).
+  no_such_user: true,
+  no_inbox: true,
+  mailbox_full: true,
+  quota_exceeded: true,
+  blocked: true,
+  // Media can never cross a link, and a remote refusal seldom passes.
+  not_delivered: true,
+  // It may still arrive, and sending it again may deliver it twice.
+  unconfirmed: true,
+  not_sealed: true,
+  cert_changed: true,
+  bad_signature: true,
+  // Files (§7.2).
+  not_authorized: true,
+  not_found: true,
+  not_folder: true,
+  not_file: true,
+  already_exists: true,
+  range_unsupported: true,
+  range_invalid: true,
+  origin_changed: true,
+  too_large: true,
+  cross_filesystem: true,
+  too_deep: true,
+  busy: false,
+  // News (news.md).
+  no_news: true,
+  no_such_node: true,
+  no_such_article: true,
+  not_a_category: true,
+  wrong_category: true,
+  not_empty: true,
+  bad_body_type: true,
+  no_mailbox: true,
+  too_many_subs: true,
+  too_many_articles: true,
+  attachments_full: true,
+  news_full: true,
+  protected: true,
+  // Media, avatars and the banner (inline-media.md §8.2, avatars.md, banner.md).
+  no_such_media: true,
+  media_too_large: true,
+  unsupported_media: true,
+  media_rejected: true,
+  no_such_avatar: true,
+  no_such_banner: true,
+  // Moderation (moderation.md).
+  no_such_line: true,
+  no_such_report: true,
+  no_such_target: true,
+  own_report: true,
+  no_such_ban: true,
+  config_ban: true,
+  // Accounts (account-admin.md).
+  outranked: true,
+  no_such_account: true,
+  invalid_login: true,
+  // Voice and video (voice.md §8, capabilities-video.md).
+  voice_disabled: true,
+  video_disabled: true,
+  voice_full: false,
+  video_full: false,
+  no_such_chat: true,
+  not_in_voice: true,
+  bad_answer: true,
+  already_publishing: true,
+  not_publishing: true,
+  // Push devices (push-notifications.md).
+  too_many_devices: true,
+  no_capability: true,
+} as const satisfies Record<string, boolean>;
+
+export type WireCode = keyof typeof PERMANENT;
+
+export function isWireCode(code: string): code is WireCode {
+  return Object.hasOwn(PERMANENT, code);
+}
+
+/** Whether retrying soon, with backoff, cannot help; `false` means
+ *  back off and send it again, and only `rate_limited` says how long,
+ *  as `retry_after`. An unknown code is permanent: §10 has a client
+ *  treat it as that one request's failure, and a program retrying it
+ *  forever spends the server's request budgets for nothing and may be
+ *  kicked as `flooding` for it, where giving up wrongly costs one
+ *  request a person can send again. */
+export function isPermanent(code: string): boolean {
+  return isWireCode(code) ? PERMANENT[code] : true;
+}
+
 /** Human wording for the codes a person can actually act on. Anything
  *  not listed falls back to the server's own `text`, which is always
  *  present and always meant for a human. */
@@ -1837,7 +1977,7 @@ export const ERROR_TEXT: Record<string, string> = {
   // No `read_only`: a room, the file area and news all answer it, and
   // the server's own text says which.
   server_error: 'The server had a problem with that. It has been logged.',
-};
+} satisfies Partial<Record<WireCode, string>>;
 
 export function errorText(e: WireError): string {
   // `||` rather than `??` on the text: a server that sends an empty one

@@ -119,14 +119,20 @@ import {
 
 /** Turn a refused media request into the same `WireFailure` every other
  *  call throws, so a caller has one thing to catch. The body is the ng
- *  error shape; a proxy's own error page is not, hence the fallback. */
+ *  error shape, or the HTTP throttle's flat `{ error: code, text,
+ *  retry_after }`; a proxy's own error page is neither, hence the
+ *  fallback. */
 async function mediaFailure(res: Response): Promise<WireFailure> {
   const fallback: WireError = {
     code: res.status === 404 ? 'no_such_media' : 'server_error',
     text: `The server answered ${res.status}.`,
   };
   try {
-    const body = (await res.json()) as { error?: WireError };
+    const body = (await res.json()) as { error?: WireError | string; text?: string; retry_after?: number };
+    if (typeof body.error === 'string') {
+      const { error: code, text = fallback.text, retry_after } = body;
+      return new WireFailure(retry_after === undefined ? { code, text } : { code, text, retry_after });
+    }
     return new WireFailure(body.error ?? fallback);
   } catch {
     return new WireFailure(fallback);

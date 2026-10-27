@@ -173,6 +173,14 @@ describe('fetching', () => {
     await expect(failed).rejects.toMatchObject({ wire: { code: expect.stringMatching(/^no_such_/) } });
   });
 
+  it('reads the HTTP throttle’s flat refusal as a WireFailure', async () => {
+    stubFetch(() => jsonResponse(429, { error: 'rate_limited', text: 'too many avatar fetches', retry_after: 3 }));
+    const conn = await connect();
+    await expect(conn.fetchAvatar(AVATAR.id)).rejects.toMatchObject({
+      wire: { code: 'rate_limited', text: 'too many avatar fetches', retry_after: 3 },
+    });
+  });
+
   it('reads a 404 as no such avatar', async () => {
     stubFetch(() => jsonResponse(404, { error: { code: 'no_such_avatar', text: 'Avatar not found' } }));
     const conn = await connect();

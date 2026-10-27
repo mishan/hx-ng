@@ -196,6 +196,27 @@ export interface Credentials {
   signs?: Signs;
   /** Whether a resume says `sealed`, as `signs` above. */
   sealed?: boolean;
+  /** Opens each socket in place of the global `WebSocket`: for a
+   *  runtime without one, or a test's fake server
+   *  (`@hotline-ng/client/testing`). */
+  webSocket?: (url: string) => SocketLike;
+}
+
+/** A handler compared bivariantly, as a method's parameters are, so a
+ *  socket whose handlers take richer events still fits. */
+type Handler<E> = { bivarianceHack(ev: E): void }['bivarianceHack'];
+
+/** The parts of a `WebSocket` that `Connection` uses, which is what a
+ *  `Credentials.webSocket` factory returns. A browser's `WebSocket` is
+ *  one, and so is a socket from Node's `ws`. */
+export interface SocketLike {
+  readonly readyState: number;
+  send(data: string): void;
+  close(): void;
+  onopen: Handler<unknown> | null;
+  onmessage: Handler<{ data: unknown }> | null;
+  onerror: Handler<unknown> | null;
+  onclose: Handler<{ code: number; reason: string }> | null;
 }
 
 /** What a resumed session is allowed to remember between page loads. The
@@ -232,6 +253,9 @@ interface Saved {
 }
 
 const SAVED_KEY = 'hxd-ng.session';
+
+/** `WebSocket.OPEN`, without needing a global `WebSocket` to read it from. */
+const OPEN = 1;
 
 /** How long the history catch-up waits after `rate_limited`, doubling
  *  with each refusal. */
@@ -332,7 +356,7 @@ export interface ConnectionHooks {
 }
 
 export class Connection {
-  private ws: WebSocket | null = null;
+  private ws: SocketLike | null = null;
   private nextId = 0;
   private pending = new Map<number, { resolve: (v: any) => void; reject: (e: Error) => void }>();
   private handlers = new Map<string, Set<(data: any) => void>>();
@@ -502,8 +526,8 @@ export class Connection {
   /** Open `url` and wire it up as `this.ws`. Every fresh connection goes
    *  through here, whether it turns out to carry a resume, a classic
    *  login, or (see `openTokenedSocket`) an identity login. */
-  private async openSocket(url: string): Promise<WebSocket> {
-    const ws = new WebSocket(url);
+  private async openSocket(url: string): Promise<SocketLike> {
+    const ws: SocketLike = this.creds.webSocket?.(url) ?? new WebSocket(url);
     this.ws = ws;
 
     await new Promise<void>((resolve, reject) => {
@@ -529,7 +553,7 @@ export class Connection {
    *  (hxd-ng's `docs/hotline-ng-auth.md` §7.1's `?token=`). The token is
    *  single-use and 60 seconds, so this is only ever called immediately
    *  before the socket it's for. */
-  private async openTokenedSocket(): Promise<WebSocket> {
+  private async openTokenedSocket(): Promise<SocketLike> {
     const token = await this.creds.identity!.getToken();
     const sep = this.creds.url.includes('?') ? '&' : '?';
     return this.openSocket(`${this.creds.url}${sep}token=${encodeURIComponent(token)}`);
@@ -809,7 +833,7 @@ export class Connection {
     }
   }
 
-  private onClose(e: CloseEvent): void {
+  private onClose(e: { reason: string }): void {
     for (const p of this.pending.values()) p.reject(new Error('connection closed'));
     this.pending.clear();
     this.ws = null;
@@ -877,7 +901,7 @@ export class Connection {
   }
 
   /** Close a socket without its close counting as a dropped connection. */
-  private discard(ws: WebSocket): void {
+  private discard(ws: SocketLike): void {
     ws.onclose = null;
     ws.onmessage = null;
     ws.close();
@@ -895,7 +919,7 @@ export class Connection {
 
   request<T = unknown>(req: string, params: unknown = {}): Promise<T> {
     const ws = this.ws;
-    if (!ws || ws.readyState !== WebSocket.OPEN) {
+    if (!ws || ws.readyState !== OPEN) {
       return Promise.reject(new Error('not connected'));
     }
     const id = ++this.nextId;

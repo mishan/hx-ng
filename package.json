@@ -21,7 +21,7 @@
     "pretypecheck": "npm run build:wasm",
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.sw.json && tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.lib-node.json",
     "build:lib": "npm run build -w @hotline-ng/client",
-    "check:package": "npm run build:lib && node -e \"import('./packages/hotline-ng/dist/index.js')\" && node -e \"import('./packages/hotline-ng/dist/node.js')\"",
+    "check:package": "npm run build:lib && node -e \"import('./packages/hotline-ng/dist/index.js')\" && node -e \"import('./packages/hotline-ng/dist/node.js')\" && node -e \"import('./packages/hotline-ng/dist/testing.js')\"",
     "icons": "python3 tools/build-icons.py ../gtkhx/icons.rsrc public"
   },
   "dependencies": {

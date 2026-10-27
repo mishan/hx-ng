@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { Connection, type ConnectionHooks, type Credentials } from '../src/connection';
 import { AuthError, SERVER_CHALLENGE_REFUSED } from '../src/identity';
 import type { HistoryLine, InboxOk, LoginOk, Room, SelfUser, User } from '../src/protocol';
+import { FakeServer as FakeHotline } from '../src/testing';
 
 import { installFakeWire, settle, uninstallFakeWire, type FakeServer } from './fake-wire';
 
@@ -728,14 +729,20 @@ describe('rooms', () => {
   });
 
   it('forgets a room’s cursor when this session is parted from it, and not when someone else is', async () => {
-    const conn = await connect();
-    server.on('room_join', () => ({ ok: { members: [1, 2], topic: '', may_post: true, last_id: 5 } }));
-    await conn.roomJoin(7);
-    await conn.roomJoin(8);
-    server.event('room_member_parted', { room: 7, uid: 2 });
-    server.event('room_member_parted', { room: 8, uid: 1, reason: 'archived' });
+    const fake = new FakeHotline({ accounts: [{ login: 'alice', password: 'pw' }], rooms: [{ name: 'den' }, { name: 'lounge' }] });
+    const bob = fake.addUser({ nick: 'Bob' });
+    const conn = new Connection(fake.credentials({ login: 'alice', password: 'pw' }));
+    await conn.start();
+    const [den, lounge] = conn.login!.rooms!.list.map((r) => r.id) as [number, number];
+    for (const room of [den, lounge]) {
+      fake.joinRoom(bob, room);
+      await conn.roomJoin(room);
+    }
+    fake.say(bob, 'hi', { room: lounge });
+    fake.partRoom(bob, lounge);
+    fake.archiveRoom(den);
     await settle();
-    expect(Object.fromEntries(conn.roomHistoryIds)).toEqual({ 7: 5 });
+    expect(Object.fromEntries(conn.roomHistoryIds)).toEqual({ [lounge]: 1 });
   });
 });
 

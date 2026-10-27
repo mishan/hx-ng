@@ -58,6 +58,24 @@ export {
   type MdBlock,
   type MdRun,
 } from './markdown.js';
+// Named rather than `*`, with the codec's two functions renamed: a bare
+// `encode` says nothing beside every other module's exports.
+export {
+  CborError,
+  cArray,
+  cBool,
+  cBytes,
+  cMap,
+  cOptMap,
+  cText,
+  cUint,
+  decodeCanonical as decodeCanonicalCbor,
+  encode as encodeCbor,
+  mapGet,
+  mapWithout,
+  type CborErrorKind,
+  type CborValue,
+} from './cbor.js';
 export * from './identity.js';
 export * from './handover.js';
 export * from './message.js';
@@ -91,6 +109,7 @@ export {
   type ConnState,
   type Credentials,
   type FileUploadOptions,
+  type SocketLike,
   type TraceEntry,
 } from './connection.js';
 export {

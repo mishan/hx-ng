@@ -133,14 +133,18 @@ if (isWireCode(code)) {
 }
 ```
 
-`isPermanent(code)` says whether retrying soon, with backoff, cannot
-help. `false` means it may pass soon — `rate_limited`, `server_error`,
-`busy` — so back off and send it again; only `rate_limited` carries
-`retry_after`. `true` includes refusals that may pass once something
-outside the request changes, a mailbox read or a day gone by: whether
-to try again later is the caller's decision. A code it does not know is
-`true`, so a program that retries on `false` never loops on a refusal
-it cannot read.
+`retryClass(code)` says when sending the same request again could
+succeed. `soon` may pass on a resend after a backoff: `rate_limited`,
+`server_error`, `busy`, a full server or voice chat. Only
+`rate_limited` carries `retry_after`, and a `server_error` is safe to
+resend only for an idempotent request or one with a `guid`. `later`
+may pass, unchanged, once something outside it does — a mailbox read,
+a day gone by, a ban lapsing, a fresh login — and whether to wait for
+that is the caller's decision. `never` needs the request changed, and
+is what a code it does not know gets, so a program that retries on
+`soon` never loops on a refusal it cannot read. `not_available` is
+`never`, though the file area and its uploads also answer it for a
+passing failure of their own.
 
 ### Files
 

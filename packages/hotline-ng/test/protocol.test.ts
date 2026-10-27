@@ -4,7 +4,6 @@ import {
   errorText,
   isEvent,
   isFingerprint,
-  isPermanent,
   isReply,
   isWireCode,
   moderationErrorText,
@@ -12,6 +11,7 @@ import {
   parsePushPayload,
   parseRecvMid,
   pushSubscriptionParams,
+  retryClass,
   sendMid,
   type ServerFrame,
 } from '../src/protocol';
@@ -79,13 +79,14 @@ describe('errorText', () => {
   });
 });
 
-describe('isPermanent', () => {
+describe('retryClass', () => {
   it.each([
-    ['rate_limited', false],
-    ['no_such_user', true],
-    ['something_new', true],
-  ])('%s is %s', (code, permanent) => {
-    expect(isPermanent(code)).toBe(permanent);
+    ['rate_limited', 'soon'],
+    ['mailbox_full', 'later'],
+    ['no_such_user', 'never'],
+    ['something_new', 'never'],
+  ])('%s is %s', (code, retry) => {
+    expect(retryClass(code)).toBe(retry);
   });
 });
 

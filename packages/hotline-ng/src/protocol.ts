@@ -1768,142 +1768,163 @@ export const NOT_SEALED = 'not_sealed';
  *  fetch its certificate and seal again, never in the clear. */
 export const CERT_CHANGED = 'cert_changed';
 
+/** When sending the same request again could succeed: `soon`, on a
+ *  resend after a backoff; `later`, with the request unchanged, once
+ *  something outside it does; `never`, unless the request itself
+ *  changes. */
+export type RetryClass = 'soon' | 'later' | 'never';
+
 /**
  * Every code the ng wire can answer, as hxd-ng's `docs/hotline-ng.md`
- * §10 and the family documents beside it register them, with whether
- * retrying soon, with backoff, cannot help. `false` is for the refusals
- * that may pass soon — load, or capacity held for the moment by others
- * — and `true` for everything else: those that need the request, the
- * caller's rights or state changed, and those that may pass only after
- * something outside the request changes (a mailbox read, a day gone
- * by), where whether to try again later is the caller's decision.
- * Adding a code here forces that decision.
+ * §10 and the family documents beside it register them, with its
+ * `RetryClass`. Adding a code here forces that decision.
+ *
+ * `soon` is load, or capacity others hold for the moment. `later` is
+ * time passing, other people acting in the ordinary course (reading
+ * their mail, a linked server coming back), or the session: `flooding`,
+ * `not_logged_in`, `session_expired`, `too_many_connections`,
+ * `not_authorized` and `encryption_required` concern the session or its
+ * connection, not the request, and the work may pass after logging in
+ * again. Whether to wait for that is the caller's decision. `never`
+ * covers the rest, including what passes only once the caller has done
+ * something else first (left a room, emptied a bundle) or someone has
+ * decided differently about it (a grant, a block), which a retry loop
+ * cannot know to wait for.
+ *
+ * `not_available` is `never`, the server not offering something, except
+ * that the file area and its uploads also answer it for a passing
+ * failure of their own (a race over a partial upload, a disk that would
+ * not answer), which the server may come to answer as `busy`.
  *
  * The identity endpoints' refusals (`wrong_host`, `wrong_account`,
  * `bad_server_challenge` and `/identity/auth`'s own) are `AuthError`s,
  * not `WireFailure`s, and are not here.
  */
-const PERMANENT = {
+const RETRY = {
   // Universal (§10).
-  unknown_method: true,
-  not_logged_in: true,
-  bad_request: true,
-  access_denied: true,
-  rate_limited: false,
-  // Fatal: the session is kicked, and retrying is what got it kicked.
-  flooding: true,
-  server_error: false,
+  unknown_method: 'never',
+  not_logged_in: 'later',
+  bad_request: 'never',
+  access_denied: 'never',
+  rate_limited: 'soon',
+  flooding: 'later',
+  server_error: 'soon',
   // Login and resume (§6).
-  login_failed: true,
-  denied: true,
-  revoked: true,
-  banned: true,
-  server_full: false,
-  server_busy: false,
-  // Waiting does not help; closing another of the account's connections does.
-  too_many_connections: true,
-  session_expired: true,
+  login_failed: 'never',
+  denied: 'never',
+  revoked: 'never',
+  // At `expires_at`; a `null` one never lapses.
+  banned: 'later',
+  server_full: 'soon',
+  server_busy: 'soon',
+  too_many_connections: 'later',
+  session_expired: 'later',
   // Not a failure: the next step is `sync`, not the same `resume`.
-  resync_required: true,
-  not_available: true,
-  name_reserved: true,
+  resync_required: 'never',
+  not_available: 'never',
+  name_reserved: 'never',
   // Rooms (chat-rooms.md §5).
-  no_such_room: true,
-  not_a_member: true,
-  read_only: true,
-  signature_required: true,
-  encryption_required: true,
-  too_many_rooms: true,
-  rooms_full: true,
-  name_taken: true,
-  // Messages (§7.1, private-messages.md, e2e-messages.md §4).
-  no_such_user: true,
-  no_inbox: true,
-  mailbox_full: true,
-  quota_exceeded: true,
-  blocked: true,
-  // Media can never cross a link, and a remote refusal seldom passes.
-  not_delivered: true,
+  no_such_room: 'never',
+  not_a_member: 'never',
+  read_only: 'never',
+  signature_required: 'never',
+  encryption_required: 'later',
+  too_many_rooms: 'never',
+  rooms_full: 'never',
+  name_taken: 'never',
+  // Messages (§7.1, private-messages.md, e2e-messages.md §4). Mail by
+  // `to_login` to an account with a mailbox and no session is queued,
+  // so `no_such_user` is never "not here now": it is a uid nobody
+  // holds, no such account, or one that takes no offline mail, which
+  // private-messages.md §11 makes one answer.
+  no_such_user: 'never',
+  no_inbox: 'never',
+  mailbox_full: 'later',
+  quota_exceeded: 'later',
+  blocked: 'never',
+  // `text` says which; media can never cross a link.
+  not_delivered: 'later',
   // It may still arrive, and sending it again may deliver it twice.
-  unconfirmed: true,
-  not_sealed: true,
-  cert_changed: true,
-  bad_signature: true,
+  unconfirmed: 'never',
+  not_sealed: 'never',
+  cert_changed: 'never',
+  bad_signature: 'never',
   // Files (§7.2).
-  not_authorized: true,
-  not_found: true,
-  not_folder: true,
-  not_file: true,
-  already_exists: true,
-  range_unsupported: true,
-  range_invalid: true,
-  origin_changed: true,
-  too_large: true,
-  cross_filesystem: true,
-  too_deep: true,
-  busy: false,
+  not_authorized: 'later',
+  not_found: 'never',
+  not_folder: 'never',
+  not_file: 'never',
+  already_exists: 'never',
+  range_unsupported: 'never',
+  range_invalid: 'never',
+  origin_changed: 'never',
+  too_large: 'never',
+  cross_filesystem: 'never',
+  too_deep: 'never',
+  busy: 'soon',
   // News (news.md).
-  no_news: true,
-  no_such_node: true,
-  no_such_article: true,
-  not_a_category: true,
-  wrong_category: true,
-  not_empty: true,
-  bad_body_type: true,
-  no_mailbox: true,
-  too_many_subs: true,
-  too_many_articles: true,
-  attachments_full: true,
-  news_full: true,
-  protected: true,
+  no_news: 'never',
+  no_such_node: 'never',
+  no_such_article: 'never',
+  not_a_category: 'never',
+  wrong_category: 'never',
+  not_empty: 'never',
+  bad_body_type: 'never',
+  no_mailbox: 'never',
+  too_many_subs: 'never',
+  too_many_articles: 'never',
+  attachments_full: 'never',
+  news_full: 'never',
+  protected: 'never',
   // Media, avatars and the banner (inline-media.md §8.2, avatars.md, banner.md).
-  no_such_media: true,
-  media_too_large: true,
-  unsupported_media: true,
-  media_rejected: true,
-  no_such_avatar: true,
-  no_such_banner: true,
+  no_such_media: 'never',
+  media_too_large: 'never',
+  unsupported_media: 'never',
+  media_rejected: 'never',
+  no_such_avatar: 'never',
+  no_such_banner: 'never',
   // Moderation (moderation.md).
-  no_such_line: true,
-  no_such_report: true,
-  no_such_target: true,
-  own_report: true,
-  no_such_ban: true,
-  config_ban: true,
+  no_such_line: 'never',
+  no_such_report: 'never',
+  no_such_target: 'never',
+  own_report: 'never',
+  no_such_ban: 'never',
+  config_ban: 'never',
   // Accounts (account-admin.md).
-  outranked: true,
-  no_such_account: true,
-  invalid_login: true,
+  outranked: 'never',
+  no_such_account: 'never',
+  invalid_login: 'never',
   // Voice and video (voice.md §8, capabilities-video.md).
-  voice_disabled: true,
-  video_disabled: true,
-  voice_full: false,
-  video_full: false,
-  no_such_chat: true,
-  not_in_voice: true,
-  bad_answer: true,
-  already_publishing: true,
-  not_publishing: true,
+  voice_disabled: 'never',
+  video_disabled: 'never',
+  voice_full: 'soon',
+  video_full: 'soon',
+  no_such_chat: 'never',
+  not_in_voice: 'never',
+  bad_answer: 'never',
+  already_publishing: 'never',
+  not_publishing: 'never',
   // Push devices (push-notifications.md).
-  too_many_devices: true,
-  no_capability: true,
-} as const satisfies Record<string, boolean>;
+  too_many_devices: 'never',
+  no_capability: 'never',
+} as const satisfies Record<string, RetryClass>;
 
-export type WireCode = keyof typeof PERMANENT;
+export type WireCode = keyof typeof RETRY;
 
 export function isWireCode(code: string): code is WireCode {
-  return Object.hasOwn(PERMANENT, code);
+  return Object.hasOwn(RETRY, code);
 }
 
-/** Whether retrying soon, with backoff, cannot help; `false` means
- *  back off and send it again, and only `rate_limited` says how long,
- *  as `retry_after`. An unknown code is permanent: §10 has a client
- *  treat it as that one request's failure, and a program retrying it
- *  forever spends the server's request budgets for nothing and may be
- *  kicked as `flooding` for it, where giving up wrongly costs one
- *  request a person can send again. */
-export function isPermanent(code: string): boolean {
-  return isWireCode(code) ? PERMANENT[code] : true;
+/** Only `rate_limited` says how long to wait, as `retry_after`. A
+ *  `server_error` is safe to send again only for a request that is
+ *  idempotent or carries a `guid`: a `chat` without one, or a
+ *  `news_post`, may land twice. An unknown code is `never`: §10 has a
+ *  client treat it as that one request's failure, and a program
+ *  retrying it forever spends the server's request budgets for nothing
+ *  and may be kicked as `flooding` for it, where giving up wrongly
+ *  costs one request a person can send again. */
+export function retryClass(code: string): RetryClass {
+  return isWireCode(code) ? RETRY[code] : 'never';
 }
 
 /** Human wording for the codes a person can actually act on. Anything

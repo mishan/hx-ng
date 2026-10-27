@@ -202,6 +202,47 @@ event, not once per id.
 `no_such_user` from these means nobody by that name, not nobody who can
 be messaged, so `moderationErrorText` is the wording to show for them.
 
+### Rooms
+
+Where `caps` lists `rooms`, the login reply's `rooms` block lists the
+rooms this session may see, as they stood at login. No room event
+reaches a session until it sends a room request other than the
+lobby's `roomTopic(0, topic)`, or a `chat` or `history` naming a room,
+so a client that never asks sees the protocol as it was before rooms;
+one that wants the list kept current calls `rooms()` once. Room 0 is
+the lobby in every request, and events about the lobby carry no
+`room`.
+
+```ts
+const { list } = await conn.rooms();
+const lounge = list.find((r) => r.name === 'lounge')!;
+const { members, topic, may_post } = await conn.roomJoin(lounge.id);
+conn.on('chat', (d) => d.room === lounge.id && append(d.text));
+conn.on('room_member_parted', ({ room, uid, reason }) =>
+  uid === conn.self?.uid && leftRoom(room, reason));
+if (may_post) await conn.chat({ room: lounge.id, text: 'hello' });
+await conn.roomTopic(lounge.id, 'anything goes');
+await conn.roomPart(lounge.id);
+```
+
+A room the session may not see answers `no_such_room`, exactly as one
+that does not exist. `may_post` is false in a room the session may only
+read, and in a `signed` room for a session that cannot sign, where an
+unsigned line is refused `signature_required`. A session that
+`conn.manageRooms` says may manage rooms, which the login reply's `self`
+says and a resume's does not, also has `roomCreate`, `roomEdit`,
+`roomArchive` and `roomUnarchive`, and is shown each room's `read` and
+`post` gates.
+
+`Connection` keeps a history cursor per joined room beside the lobby's,
+and after a resync pages each room `sync` says has moved on from its
+own, handing the pages to `onMissedHistory` with the room's id. `sync`
+also settles which rooms those are: a room it does not list is
+forgotten, and one it lists that `Connection` had no cursor for, such
+as a room joined with `request` rather than `roomJoin`, starts at its
+newest line, so that gap is the caller's to page and later ones are
+covered.
+
 ### Signed messages
 
 A line, a private message or an article can be signed by the device

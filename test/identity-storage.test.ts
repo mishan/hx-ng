@@ -7,6 +7,7 @@ import {
   ensureActiveDevice,
   forgetActiveDevice,
   getActiveDevice,
+  newsGuids,
   serverPins,
 } from '../src/identity/storage';
 import { installFakeIndexedDB } from './fake-idb';
@@ -94,5 +95,38 @@ describe('serverPins', () => {
     expect(await serverPins.get('hl.example:5700')).toEqual(pin);
     expect(await serverPins.get('other.example')).toBeUndefined();
     expect((await getActiveDevice())?.devicePub).toBe('ab');
+  });
+});
+
+describe('newsGuids', () => {
+  it('upgrades a v2 database with its pins kept, and keeps each guid a server key gave apart', async () => {
+    // The v2 schema, and a pin in it, as a browser that predates this
+    // store left them.
+    const db = await new Promise<IDBDatabase>((resolve) => {
+      const req = indexedDB.open('hxd-ng.identity', 2);
+      req.onupgradeneeded = () => {
+        req.result.createObjectStore('devices', { keyPath: 'devicePub' }).createIndex('fingerprint', 'fingerprint');
+        req.result.createObjectStore('meta');
+        req.result.createObjectStore('serverPins');
+      };
+      req.onsuccess = () => resolve(req.result);
+    });
+    const pin = { key: new Uint8Array(32).fill(1), commitment: undefined, followed: [], dismissed: [] };
+    const tx = db.transaction(['serverPins'], 'readwrite');
+    await new Promise((resolve) => (tx.objectStore('serverPins').put(pin, 'hl.example').onsuccess = resolve));
+
+    const [here, there] = [new Uint8Array(32).fill(1), new Uint8Array(32).fill(2)];
+    const cases: [string, () => Promise<unknown>, unknown][] = [
+      ['a guid first given', () => newsGuids.note(here, 'g1', 4), 4],
+      ['given to the same node again', () => newsGuids.note(here, 'g1', 4), 4],
+      ['another guid, beside it', () => newsGuids.note(here, 'g2', 5), 5],
+      ['the first given to another node', () => newsGuids.note(here, 'g1', 6), 'shared'],
+      ['and to its first node again', () => newsGuids.note(here, 'g1', 4), 'shared'],
+      ['the same guid from another server key', () => newsGuids.note(there, 'g1', 6), 6],
+      ['after that key is forgotten', () => newsGuids.forget(here).then(() => newsGuids.note(here, 'g1', 6)), 6],
+      ['the other key, untouched', () => newsGuids.note(there, 'g1', 6), 6],
+    ];
+    for (const [name, run, want] of cases) expect(await run(), name).toBe(want);
+    expect(await serverPins.get('hl.example')).toEqual(pin);
   });
 });

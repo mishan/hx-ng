@@ -222,7 +222,7 @@ function chatLine(
 }
 
 /** Whether a line carries a signature that parsed, which names it. */
-function signedBy(sig: LineSignature | undefined): sig is LineSignature {
+export function signedBy(sig: LineSignature | undefined): sig is LineSignature {
   return sig !== undefined && (sig.state === 'verified' || sig.state === 'elsewhere' || sig.state === 'unverified');
 }
 
@@ -230,15 +230,22 @@ function signedBy(sig: LineSignature | undefined): sig is LineSignature {
  *  makes another key to match it. */
 const SIGNER_CHARS = 16;
 
-/** Who a line is shown as from. A signed one is named by its signer's
- *  fingerprint (§8), whatever nick the server put on it, and the nick
- *  goes beside the text as an aside the signature does not cover. */
+/** Who a line is shown as from. */
 function speaker(line: Line): { name: string; title: string; signed: boolean; aside: HTMLElement | null } {
-  const sig = line.signature;
-  const nick = line.from?.nick ?? '';
+  return signedName(line.signature, line.from?.nick ?? '');
+}
+
+/** Who a line, a message or an article is shown as from. A signed one is
+ *  named by its signer's fingerprint (§8), whatever nick the server put
+ *  on it, and the nick goes beside the text as an aside the signature
+ *  does not cover. */
+export function signedName(
+  sig: LineSignature | undefined,
+  nick: string,
+): { name: string; title: string; signed: boolean; aside: HTMLElement | null } {
   if (!signedBy(sig)) return { name: nick, title: '', signed: false, aside: null };
   const title = sig.signer
-    ? `Signed by ${sig.signer}${sig.home ? `, a user of ${sig.home}` : ''}`
+    ? `Signed by ${sig.signer}${sig.home ? `, a user of ${sig.home}` : ''}${sig.to ? `, to ${sig.to}` : ''}`
     : 'Signed by a key that could not be checked';
   const aside = nick
     ? h('span', { class: 'sig-nick', title: "The server's name for them, which the signature does not cover" }, `as ${nick}`)
@@ -278,19 +285,22 @@ function uncovered(line: Line): HTMLElement | null {
 
 /** §8's state of a signed line, or of an unsigned one where a signature
  *  was expected: tags that outweigh the nick beside it. */
-function signatureTag(sig: LineSignature | undefined): HTMLElement[] {
+export function signatureTag(sig: LineSignature | undefined): HTMLElement[] {
   if (!sig) return [];
   const by = sig.signer ? ` by ${sig.signer}` : '';
   const at = sig.sent !== undefined ? ` ${signedAt(sig.sent)}` : '';
   const on = sig.home ? ` on ${sig.home}` : '';
   const [label, title] = {
-    verified: [`signed${at}${on}`, `Signed${by}.`],
+    verified: [`signed${at}${on}`, `Signed${by}${sig.to ? ` to ${sig.to}` : ''}.`],
     elsewhere: [
       `signed elsewhere${at}: ${sig.signedFor ?? 'another scope'}`,
       `Signed${by} for ${sig.signedFor ?? 'another scope'}, so not said here.`,
     ],
-    unverified: [`unverified${on}`, `Signed${by || ' by a key that could not be checked'}, with nothing to check it against: not shown as from this nick.`],
-    invalid: ['bad signature', 'The signature does not check: this line is not from the user named.'],
+    unverified: [
+      `unverified${on}`,
+      `Signed${by || ' by a key that could not be checked'}, ${sig.why ? `but ${sig.why}` : 'with nothing to check it against'}: not shown as from this nick.`,
+    ],
+    invalid: ['bad signature', 'The signature does not check: this is not from the user named.'],
     unsigned: ['signature expected', 'Unsigned, from someone seen to sign here: a signature may have been removed.'],
   }[sig.state];
   const tags = [h('span', { class: `sig sig-${sig.state}`, title }, label)];

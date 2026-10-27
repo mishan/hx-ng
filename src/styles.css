@@ -630,7 +630,7 @@ button.call:disabled { opacity: 0.45; cursor: default; }
 /* A signature's state (e2e-messages.md section 8). A signed line is
    named by its key, and the nick the server gave it is an aside; a bad
    signature's line is not from the nick it names, which is struck. */
-.line .text > .sig {
+.line .text > .sig, .news .sig {
   display: inline-block;
   margin-right: 0.4rem;
   padding: 0 0.3rem;
@@ -646,16 +646,17 @@ button.call:disabled { opacity: 0.45; cursor: default; }
 .sig.sig-elsewhere, .sig.sig-unverified, .sig.sig-unsigned { color: var(--warn); }
 .sig.sig-invalid { color: var(--admin); }
 .sig.sig-foreign, .sig.sig-apart { color: var(--warn); }
-.line.sig-invalid .name, .line.sig-invalid .actor { text-decoration: line-through; }
+.line.sig-invalid .name, .line.sig-invalid .actor, .news .sig-invalid .news-author,
+.news .sig-invalid .news-thread-author { text-decoration: line-through; }
 /* A fingerprint is read, not skimmed: whole, in a face that tells its
    characters apart. */
-.line .name.signer, .line .actor.signer {
+.line .name.signer, .line .actor.signer, .news-author.signer, .news-thread-author.signer {
   font-family: ui-monospace, monospace;
   font-size: 0.72rem;
   overflow: visible;
 }
-.line .text > .sig-nick { margin-right: 0.4rem; color: var(--muted); font-size: 0.8rem; }
-.line .text > .sig-note { display: block; color: var(--muted); font-size: 0.75rem; font-style: italic; }
+.line .text > .sig-nick, .news .sig-nick { margin-right: 0.4rem; color: var(--muted); font-size: 0.8rem; }
+.line .text > .sig-note, .news .sig-note { display: block; color: var(--muted); font-size: 0.75rem; font-style: italic; }
 .line.notice .text, .line.system .text { color: var(--muted); font-style: italic; }
 /* A news notification: the one notice that goes somewhere. */
 .line.notice a.news-notice { color: var(--link); }

@@ -24,6 +24,11 @@
  * article's `refs` is a link, whether it was written `#51` or
  * `[text](news:51)`. Search snippets and notification excerpts are the
  * server's plain text, and stay that.
+ *
+ * A signed article (hxd-ng's `docs/e2e-messages.md` §4.10) is read
+ * before it is drawn, in the order a listing gives, and drawn as it was
+ * signed: named by its signer, with §8's state, and its images marked as
+ * not covered.
  */
 
 import type { Session } from '../session';
@@ -42,6 +47,7 @@ import {
   type NewsHit,
   type NewsNode,
   type NewsNodeKind,
+  type NewsPostParams,
   type NewsReference,
   type NewsScope,
   type NewsSub,
@@ -73,10 +79,12 @@ import {
   trailTo,
   type DraftAttachment,
 } from '../news';
+import { unreadable, type ArticleRead, type ArticleReader } from '../signing';
 import { ask } from './ask';
 import { badge, fill, h, linkify } from './dom';
 import { blockNodes, wrapSelection } from './markdown';
 import { MediaCache } from './media';
+import { signatureTag, signedBy, signedName } from './transcript';
 
 const NEWS_MARKDOWN_KEY = 'hxd-ng.news-markdown';
 
@@ -131,6 +139,12 @@ export interface NewsHooks {
   me: () => string | null;
   /** Something the rail's badge is drawn from has changed. */
   onUnread: () => void;
+  /** The reader of this session's signed articles. */
+  articles: () => ArticleReader;
+  /** Post, signed where the user signs articles and the session can,
+   *  into `category` under `parent`. `note` says once why an article
+   *  went unsigned. */
+  post: (params: NewsPostParams, category: NewsNode) => Promise<{ id: number; note?: string }>;
 }
 
 /** The largest thread page the wire allows. */
@@ -240,6 +254,8 @@ export class NewsView {
   private articles: NewsArticle[] = [];
   private articlesMore = false;
   private articleSnapshot: number | null = null;
+  /** What each article listed was read as, by id. */
+  private reads = new Map<number, ArticleRead>();
   /** The open compose form: a new thread, or a reply to `parent`. Held
    *  here rather than read back off the DOM, so a redraw keeps it. */
   private draft: {
@@ -360,6 +376,7 @@ export class NewsView {
     this.threads = [];
     this.articles = [];
     this.articleSnapshot = null;
+    this.reads.clear();
     this.draft = null;
     this.naming = null;
     this.backlinks.clear();
@@ -751,14 +768,16 @@ export class NewsView {
         const parent = s.trail.at(-1)?.id;
         const ok = await conn.newsTree(parent === undefined ? {} : { parent });
         if (gen !== this.generation) return;
+        this.hooks.articles().nodes(ok.nodes);
         this.nodes = ok.nodes;
       } else if (s.at === 'category') {
         // As deep as the reader had already paged, so a refresh does not
         // throw away the older threads they scrolled down to.
         const limit = Math.min(200, Math.max(50, this.threads.length));
         const ok = await conn.newsThreads({ category: s.category.id, limit });
+        const shown = await this.readAll(ok.threads.map((t) => t.article), s.category);
         if (gen !== this.generation) return;
-        this.threads = ok.threads;
+        this.threads = ok.threads.filter((t) => shown.has(t.article.id));
         this.threadsMore = ok.has_more;
       } else if (s.at === 'search') {
         // As deep as the reader had already paged, like a category.
@@ -795,7 +814,9 @@ export class NewsView {
           after = page.articles.at(-1)?.id;
           if (after === undefined) break;
         }
-        this.articles = all;
+        const shown = await this.readAll(all, s.category);
+        if (gen !== this.generation) return;
+        this.articles = all.filter((a) => shown.has(a.id));
         this.articlesMore = more;
         this.articleSnapshot = snapshot ?? null;
       }
@@ -828,8 +849,11 @@ export class NewsView {
     this.paging = true;
     try {
       const ok = await conn.newsThreads({ category: s.category.id, before });
+      const shown = await this.readAll(ok.threads.map((t) => t.article), s.category);
       if (gen !== this.generation) return;
-      this.threads = this.threads.concat(ok.threads.filter((t) => !this.threads.some((x) => x.article.id === t.article.id)));
+      this.threads = this.threads.concat(
+        ok.threads.filter((t) => shown.has(t.article.id) && !this.threads.some((x) => x.article.id === t.article.id)),
+      );
       this.threadsMore = ok.has_more;
     } catch (e) {
       if (gen !== this.generation) return;
@@ -850,12 +874,13 @@ export class NewsView {
     this.paging = true;
     try {
       const page = await conn.newsThread({ root: s.root, after, snapshot, limit: THREAD_PAGE });
+      const shown = await this.readAll(page.articles, s.category);
       if (gen !== this.generation) return;
       // An article already here is not drawn twice, whatever the page
       // overlapped: two elements with one id is a thread that scrolls to
       // the wrong place.
       const have = new Set(this.articles.map((a) => a.id));
-      this.articles = this.articles.concat(page.articles.filter((a) => !have.has(a.id)));
+      this.articles = this.articles.concat(page.articles.filter((a) => shown.has(a.id) && !have.has(a.id)));
       this.articlesMore = page.has_more;
       this.articleSnapshot = page.snapshot;
     } catch (e) {
@@ -865,6 +890,49 @@ export class NewsView {
       this.paging = false;
     }
     this.render();
+  }
+
+  /** Read a listing's articles in its order, a reply after its parent,
+   *  and say which to show: a second copy of a signed article under its
+   *  id is not (§3.6). One that cannot be read is shown as unverified,
+   *  never left out, and a read for a session since replaced is not
+   *  kept. */
+  private async readAll(list: readonly NewsArticle[], category: NewsNode): Promise<Set<number>> {
+    const reader = this.hooks.articles();
+    const reads = await Promise.all(
+      list.map((a) =>
+        reader.read(a, category).catch((): ArticleRead => ({ ...unreadable(a.signed), article: null })),
+      ),
+    );
+    const shown = new Set<number>();
+    if (reader !== this.hooks.articles()) return new Set(list.map((a) => a.id));
+    list.forEach((a, i) => {
+      this.reads.set(a.id, reads[i]!);
+      if (!reads[i]!.duplicate) shown.add(a.id);
+    });
+    return shown;
+  }
+
+  /** An article as it is drawn: as signed, where its signature parsed. */
+  private asSigned(a: NewsArticle): NewsArticle {
+    const signed = this.reads.get(a.id)?.article;
+    return signed ? { ...a, subject: signed.subject, body: signed.body, mime: signed.mime } : a;
+  }
+
+  private sigClass(a: NewsArticle): string {
+    const sig = this.reads.get(a.id)?.signature;
+    return sig ? ` sig-${sig.state}` : '';
+  }
+
+  /** Who an article is shown as from, and the state its signature is in. */
+  private author(a: NewsArticle, cls: string): (HTMLElement | null)[] {
+    const sig = this.reads.get(a.id)?.signature ?? undefined;
+    const who = signedName(sig, a.from.nick || 'guest');
+    return [
+      h('span', { class: `${cls}${who.signed ? ' signer' : ''}`, title: who.title }, who.name),
+      who.aside,
+      ...signatureTag(sig),
+    ];
   }
 
   // --- acting -----------------------------------------------------------
@@ -901,7 +969,7 @@ export class NewsView {
         attach: d.attachments.map((a) => a.id),
         ...mime,
       };
-      const { id } = await conn.newsPost(parent ? { ...params, parent: parent.id } : params);
+      const { id, note } = await this.hooks.post(parent ? { ...params, parent: parent.id } : params, s.category);
       // Posted, wherever the reader is now. One who moved on while it
       // went is left there, along with any draft they started there.
       if (this.screen !== s) return;
@@ -915,6 +983,10 @@ export class NewsView {
         s.focus = id;
         this.scrollTo = id;
         await this.load();
+      }
+      if (note) {
+        this.notice = note;
+        this.render();
       }
     } catch (e) {
       if (this.screen !== s) return;
@@ -1444,11 +1516,11 @@ export class NewsView {
       out.push(h('p', { class: 'news-empty' }, 'No threads here yet.'));
     }
     for (const t of this.threads) {
-      const a = t.article;
+      const a = this.asSigned(t.article);
       const unread = this.following.unreadOf({ thread: a.id });
       const row = h(
         'button',
-        { class: `news-thread${a.deleted ? ' deleted' : ''}` },
+        { class: `news-thread${a.deleted ? ' deleted' : ''}${this.sigClass(a)}` },
         h(
           'span',
           { class: 'news-thread-head' },
@@ -1459,7 +1531,8 @@ export class NewsView {
         h(
           'span',
           { class: 'news-thread-meta' },
-          `${a.deleted ? '—' : a.from.nick} · ${plural(t.replies, 'reply', 'replies')} · `,
+          ...(a.deleted ? ['—'] : this.author(a, 'news-thread-author')),
+          ` · ${plural(t.replies, 'reply', 'replies')} · `,
           stamp(t.last_at),
         ),
       );
@@ -1528,11 +1601,16 @@ export class NewsView {
     return out;
   }
 
-  private articleEl(a: NewsArticle): HTMLElement {
+  private articleEl(listed: NewsArticle): HTMLElement {
+    const a = this.asSigned(listed);
+    const sig = this.reads.get(a.id)?.signature ?? undefined;
     const s = this.screen;
     const cfg = this.hooks.conn()?.news ?? null;
     const focus = s.at === 'thread' && s.focus === a.id;
-    const el = h('article', { class: `news-article${a.deleted ? ' deleted' : ''}${focus ? ' focus' : ''}`, id: `news-${a.id}` });
+    const el = h('article', {
+      class: `news-article${a.deleted ? ' deleted' : ''}${focus ? ' focus' : ''}${this.sigClass(a)}`,
+      id: `news-${a.id}`,
+    });
     // Indentation is how a thread shows who answered whom, and it stops
     // somewhere: past a few levels it only pushes the text off a phone.
     el.style.setProperty('--depth', String(Math.min(a.depth, 6)));
@@ -1541,7 +1619,7 @@ export class NewsView {
       h(
         'div',
         { class: 'news-meta' },
-        h('span', { class: 'news-author' }, a.deleted ? 'Deleted' : a.from.nick || 'guest'),
+        ...(a.deleted ? [h('span', { class: 'news-author' }, 'Deleted')] : this.author(a, 'news-author')),
         !a.deleted && a.from.feed
           ? h('span', { class: 'news-feed', title: `Posted by the feed ${a.from.feed}` }, a.from.feed)
           : null,
@@ -1557,6 +1635,7 @@ export class NewsView {
         h('div', { class: isMarkdown(a.mime) ? 'news-text md' : 'news-text' }, ...this.bodyNodes(a)),
       );
       if (a.attachments.length) {
+        if (signedBy(sig)) el.append(h('span', { class: 'sig-note' }, 'The images are not covered by the signature.'));
         el.append(h('div', { class: 'news-attachments' }, ...a.attachments.map((item) => this.attachmentEl(item))));
       }
     }

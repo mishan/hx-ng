@@ -113,7 +113,8 @@ export async function x25519PublicKey(sk: CryptoKey): Promise<Uint8Array> {
 
 /** An X25519 private key, non-extractable, from its 32 bytes. */
 export function importX25519Secret(sk: Uint8Array): Promise<CryptoKey> {
-  return crypto.subtle.importKey('pkcs8', buf(concat(PKCS8_X25519_PREFIX, sk)), { name: 'X25519' }, false, ['deriveBits']);
+  const pkcs8 = concat(PKCS8_X25519_PREFIX, sk);
+  return crypto.subtle.importKey('pkcs8', buf(pkcs8), { name: 'X25519' }, false, ['deriveBits']).finally(() => pkcs8.fill(0));
 }
 
 /** `DeriveKeyPair`'s private key (RFC 9180 §7.1.3), which X25519

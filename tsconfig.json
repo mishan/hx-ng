@@ -37,8 +37,12 @@
   },
   // The service worker needs the WebWorker library, which does not mix
   // with this program's, so it has one of its own: `tsconfig.sw.json`.
+  // The library's Node subpath and its test import `node:` modules, so
+  // they are `tsconfig.lib-node.json`'s.
   "exclude": [
-    "src/sw.ts"
+    "src/sw.ts",
+    "packages/hotline-ng/src/node.ts",
+    "packages/hotline-ng/test/node.test.ts"
   ],
   "include": [
     "src",

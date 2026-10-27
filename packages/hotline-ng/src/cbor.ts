@@ -321,3 +321,12 @@ export function decodeCanonical(bytes: Uint8Array): CborValue {
   }
   return v;
 }
+
+/** How many bytes the item at the start of `bytes` takes, read as
+ *  leniently as `decodeCanonical` first reads it: where a padded
+ *  plaintext's map ends and its padding begins. */
+export function itemLength(bytes: Uint8Array): number {
+  const r = new Reader(bytes);
+  r.item(0);
+  return r.pos;
+}

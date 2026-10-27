@@ -530,8 +530,9 @@ async function verifySignature(signed: Uint8Array, key: Uint8Array, domain: stri
 
 /** §3.5 step 2: a certificate its identity signed, at most
  *  `SIGNED_CERT_MAX_BYTES`, that allows messages and is valid at `sent`
- *  and at `at`. Its times and caps are read from its map, exactly. */
-async function checkCert(raw: Uint8Array, sent: bigint, at: bigint): Promise<DeviceCert> {
+ *  and at `at`, and at any later `times` given. Its times and caps are
+ *  read from its map, exactly. */
+async function checkCert(raw: Uint8Array, ...times: bigint[]): Promise<DeviceCert> {
   if (raw.length > SIGNED_CERT_MAX_BYTES) throw bad('cert');
   const cert = decodeDeviceCert(raw);
   await verifySignature(raw, cert.identity, DEVICE_CERT_DOMAIN);
@@ -540,7 +541,7 @@ async function checkCert(raw: Uint8Array, sent: bigint, at: bigint): Promise<Dev
   const message = BigInt(CAPS.MESSAGE);
   if (caps !== undefined && (caps & message) !== message) throw new IdentityError('capability-missing', 'message');
   const [issued, expires] = [big(value, 'issued'), big(value, 'expires')];
-  for (const t of [sent, at]) {
+  for (const t of times) {
     if (expires <= issued || issued > t + SKEW) throw new IdentityError('not-yet-valid', 'device certificate');
     if (expires + SKEW < t) throw new IdentityError('expired', 'device certificate');
   }
@@ -555,6 +556,40 @@ function checkEnvelope(v: CborValue): void {
   if (version !== 1n) throw new IdentityError('unsupported-version', String(version));
   bytes(v, 'sig', 64);
 }
+
+// --- inside a sealed box (`sealed.ts`) --------------------------------------
+
+/** A certificate a message carries, checked as §3.5 step 2 checks it and
+ *  valid at each of `times`: a message's `sent` and `at`, and for a
+ *  sealed box the reader's `now` as well. */
+export { checkCert as checkMessageCert };
+
+/** A private message's map as a sealed box holds it (§3.9 step 2): whole
+ *  in a signed box, and without `sig` in a deniable one, where a
+ *  signature would undo it (§3.11). */
+function sealedPrivateMessage(value: CborValue, deniable: boolean): SignedPrivateMessage {
+  if (!deniable) {
+    checkEnvelope(value);
+  } else {
+    if (value.t !== 'map') throw new IdentityError('not-a-map', 'not a CBOR map');
+    refuse(value, 'sig');
+    const version = big(value, 'v');
+    if (version !== 1n) throw new IdentityError('unsupported-version', String(version));
+  }
+  return privateMessageSpec.fromValue(value, false);
+}
+
+/** The map a deniable box seals: `message` without `sig`, refused where
+ *  a reader would refuse it. */
+function unsignedPrivateMessage(message: SignedPrivateMessage): Uint8Array {
+  const value = privateMessageSpec.unsigned(message);
+  privateMessageSpec.fromValue(value, false);
+  return encode(value);
+}
+
+/** `sealed.ts`'s, and out of the package's surface: `export *` never
+ *  re-exports a default. */
+export default { sealedPrivateMessage, unsignedPrivateMessage };
 
 /** A link form's map and the hash it names its certificate by. */
 function linkValue(raw: Uint8Array): { value: CborValue; hash: Uint8Array } {

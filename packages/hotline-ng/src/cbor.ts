@@ -6,15 +6,15 @@
  * (the rules `docs/hotline-ng-identity.md` §3.1 also points to, for the
  * objects this codec ultimately serves).
  *
- * Five major types: unsigned integer, byte string, text string, array,
- * map. `decodeCanonical` is the only decoder exported, and it works the
- * way the Rust one does: decode leniently, then re-encode, and require
- * the re-encoding to match the input byte-for-byte. That single
- * comparison rules out non-shortest integer heads, indefinite lengths and
- * out-of-order map keys all at once — a signature is only meaningful over
- * bytes with exactly one valid encoding. A separate pass catches
- * duplicate map keys, which re-encode to identical bytes and so survive
- * the comparison on their own.
+ * Five major types and two simple values: unsigned integer, byte string,
+ * text string, array, map, `false` and `true`. `decodeCanonical` is the
+ * only decoder exported, and it works the way the Rust one does: decode
+ * leniently, then re-encode, and require the re-encoding to match the
+ * input byte-for-byte. That single comparison rules out non-shortest
+ * integer heads, indefinite lengths and out-of-order map keys all at
+ * once — a signature is only meaningful over bytes with exactly one valid
+ * encoding. A separate pass catches duplicate map keys, which re-encode
+ * to identical bytes and so survive the comparison on their own.
  */
 
 const textEncoder = new TextEncoder();
@@ -25,7 +25,8 @@ export type CborValue =
   | { readonly t: 'bytes'; readonly v: Uint8Array }
   | { readonly t: 'text'; readonly v: string }
   | { readonly t: 'array'; readonly v: readonly CborValue[] }
-  | { readonly t: 'map'; readonly v: readonly (readonly [CborValue, CborValue])[] };
+  | { readonly t: 'map'; readonly v: readonly (readonly [CborValue, CborValue])[] }
+  | { readonly t: 'bool'; readonly v: boolean };
 
 export function cUint(n: number | bigint): CborValue {
   const v = typeof n === 'bigint' ? n : BigInt(n);
@@ -37,6 +38,9 @@ export function cBytes(v: Uint8Array): CborValue {
 }
 export function cText(v: string): CborValue {
   return { t: 'text', v };
+}
+export function cBool(v: boolean): CborValue {
+  return { t: 'bool', v };
 }
 export function cArray(v: readonly CborValue[]): CborValue {
   return { t: 'array', v };
@@ -131,6 +135,9 @@ function encodeInto(v: CborValue, out: number[]): void {
       for (const b of bytes) out.push(b);
       return;
     }
+    case 'bool':
+      out.push(v.v ? 0xf5 : 0xf4);
+      return;
     case 'array':
       putHead(out, 4, BigInt(v.v.length));
       for (const item of v.v) encodeInto(item, out);
@@ -183,6 +190,7 @@ function cborEquals(a: CborValue, b: CborValue): boolean {
   if (a.t !== b.t) return false;
   if (a.t === 'uint' && b.t === 'uint') return a.v === b.v;
   if (a.t === 'text' && b.t === 'text') return a.v === b.v;
+  if (a.t === 'bool' && b.t === 'bool') return a.v === b.v;
   if (a.t === 'bytes' && b.t === 'bytes') return bytesEqual(a.v, b.v);
   if (a.t === 'array' && b.t === 'array') {
     return a.v.length === b.v.length && a.v.every((x, i) => cborEquals(x, b.v[i]!));
@@ -251,6 +259,13 @@ class Reader {
   item(depth: number): CborValue {
     if (depth > MAX_DEPTH) throw new CborError('too-deep', 'CBOR nesting too deep');
     const start = this.pos;
+    // Read before `head`, since major type 7's additional information
+    // is not a length: 25 to 27 are floats.
+    const simple = this.buf[this.pos];
+    if (simple === 0xf4 || simple === 0xf5) {
+      this.pos++;
+      return cBool(simple === 0xf5);
+    }
     const { major, n } = this.head();
     switch (major) {
       case 0:

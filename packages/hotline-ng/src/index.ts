@@ -33,6 +33,8 @@
  * - `identity` needs `crypto.subtle` (Ed25519 signing, X25519, SHA-256,
  *   SHA-512) and `fetch`. It holds no keys of its own — a device's
  *   private keys live in the app's own `IndexedDB` store, never here.
+ *   `message`, the signed lines, messages and articles, needs
+ *   `crypto.subtle` alone.
  *
  * Relative imports carry their `.js` extension because that is what the
  * published ESM has to say for Node to resolve it; a bundler is happy
@@ -57,6 +59,7 @@ export {
 } from './markdown.js';
 export * from './identity.js';
 export * from './handover.js';
+export * from './message.js';
 export {
   Connection,
   hasSavedSession,

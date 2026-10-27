@@ -202,6 +202,47 @@ event, not once per id.
 `no_such_user` from these means nobody by that name, not nobody who can
 be messaged, so `moderationErrorText` is the wording to show for them.
 
+### Signed messages
+
+A line, a private message or an article can be signed by the device
+that wrote it, so that no server can write one in its name or alter
+one (hxd-ng's `docs/e2e-messages.md` §3). `signedChatLines`,
+`signedPrivateMessages` and `signedArticles` build, sign and read the
+three objects; what they carry on the wire, and when to sign, is the
+caller's. Signing takes the device's non-extractable key and refuses
+what a reader would refuse, a certificate that does not allow messages
+included.
+
+```ts
+const sent = Math.floor(Date.now() / 1000);
+const whole = await signedChatLines.sign(deviceSignKey, { id, sent, server: serverKey, room: 0, cert, text });
+const signed = (await signedChatLines.parse(whole, sent)).detached(); // sent beside the text
+```
+
+A reader hands over the form it was given (whole, detached beside its
+texts, or a link form with the certificate fetched for it, if one was)
+and what it knows: when the server received it, who the server says
+sent it, and where it is shown. `read` checks it in hl-identity's order
+and answers one of §8's states: `verified`, `elsewhere` (signed for
+another server, room, category, parent or recipient), `unverified`
+(nothing to check it against) or `invalid`.
+
+```ts
+const outcome = await signedChatLines.read(
+  { form: 'detached', bytes: signed, texts: [text] },
+  { at, sender: { named: row.identity.fingerprint }, scope: { server: serverKey, room: 0 } },
+);
+const shown = signatureDisplay(outcome); // signatureDisplay(null, { rowSigns: true }) for an unsigned line
+```
+
+A scope's server is its key; `alias` says whether another key an object
+names stands for it, as a followed handover keeps an old one.
+`signatureDisplay` adds `unsigned` and §8's two marks: sent at another
+time, and signature expected on an unsigned line from someone seen to
+sign, whose row says `signs`, or in a room that requires signing.
+`contentSha256` is what tells a message signed again from another under
+the same id (§3.6); remembering which ones were seen is the caller's.
+
 ### Server keys
 
 A server key is pinned per host, and follows the server's handovers to

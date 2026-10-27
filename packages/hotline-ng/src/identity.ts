@@ -25,6 +25,7 @@
  */
 
 import { cBytes, cMap, cOptMap, cText, cUint, decodeCanonical, encode, mapGet, mapWithout, type CborValue } from './cbor.js';
+import { isStrongKey, verifyStrict } from './ed25519.js';
 import { hasDeceptiveChar } from './names.js';
 
 const textEncoder = new TextEncoder();
@@ -267,34 +268,6 @@ function openEnvelope(bytes: Uint8Array): Envelope {
   return { value, signedBytes: encode(mapWithout(value, 'sig')), sig };
 }
 
-const ED25519_P = 2n ** 255n - 19n;
-const ED25519_L = 2n ** 252n + 27742317777372353535851937790883648493n;
-
-/** The y coordinates of the points of small order, below p, either
- *  sign: the order-4 pair, the neutral element, the order-2 point and
- *  the order-8 points. */
-const SMALL_ORDER_Y = new Set([
-  0n,
-  1n,
-  ED25519_P - 1n,
-  2707385501144840649318225287225658788936804267575313519463743609750303402022n,
-  55188659117513257062467267217118295137698188065244968500265048394206261417927n,
-]);
-
-function leUint(b: Uint8Array): bigint {
-  return b.reduceRight((n, x) => (n << 8n) | BigInt(x), 0n);
-}
-
-/** An encoding hxd-ng's `verify_domain` takes for a key or an R: y in
- *  canonical form (below p) and not a point of small order. The other
- *  non-canonical form, x = 0 under the sign bit, exists only at y = ±1,
- *  which are of small order. Whether the bytes are a point at all is
- *  left to WebCrypto. */
-function strongPoint(b: Uint8Array): boolean {
-  const y = leUint(b) & ((1n << 255n) - 1n);
-  return b.length === 32 && y < ED25519_P && !SMALL_ORDER_Y.has(y);
-}
-
 /** Verify a signed object's envelope against `publicKey` under `domain`.
  *  Returns the decoded map on success. The server re-verifies everything
  *  it is handed; this exists for the enrollment paste (this repo's own
@@ -302,22 +275,9 @@ function strongPoint(b: Uint8Array): boolean {
  *  rather than at `/identity/auth`. */
 export async function verifyEnvelope(bytes: Uint8Array, publicKey: Uint8Array, domain: string): Promise<CborValue> {
   const { value, signedBytes, sig } = openEnvelope(bytes);
-  // WebCrypto engines disagree about what verifies. Chromium's and
-  // Firefox's accept a small-order key, and the neutral element signs
-  // any message with R = itself and S = 0: one fingerprint every holder
-  // could sign for. Both accept a small-order R, and Chromium's such a
-  // key in its second encoding; Node's refuses them all. So what hxd-ng
-  // refuses by its encoding is refused here before any engine sees it,
-  // and S at or past L with it, which every engine tested refuses but
-  // costs one comparison not to depend on. The equation is left to
-  // WebCrypto, cofactorless in each engine tested, as `verify_strict` is.
-  if (!strongPoint(publicKey)) throw new IdentityError('invalid-key', domain);
-  if (!strongPoint(sig.subarray(0, 32)) || leUint(sig.subarray(32)) >= ED25519_L) {
-    throw new IdentityError('bad-signature', domain);
-  }
-  const key = await crypto.subtle.importKey('raw', bufferSource(publicKey), { name: 'Ed25519' }, false, ['verify']);
+  if (!isStrongKey(publicKey)) throw new IdentityError('invalid-key', domain);
   const message = concatBytes(textEncoder.encode(domain), Uint8Array.of(0), signedBytes);
-  const ok = await crypto.subtle.verify({ name: 'Ed25519' }, key, bufferSource(sig), bufferSource(message));
+  const ok = await verifyStrict(publicKey, message, sig);
   if (!ok) throw new IdentityError('bad-signature', domain);
   return value;
 }

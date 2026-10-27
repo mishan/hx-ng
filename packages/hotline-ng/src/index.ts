@@ -30,9 +30,9 @@
  *   `MediaStream` and the mid it arrived on, and where that belongs on
  *   your page is your business. Importing it costs nothing outside a
  *   browser; calling into it is what needs one.
- * - `identity` needs `crypto.subtle` (Ed25519, X25519, SHA-256) and
- *   `fetch`. It holds no keys of its own — a device's private keys live
- *   in the app's own `IndexedDB` store, never here.
+ * - `identity` needs `crypto.subtle` (Ed25519 signing, X25519, SHA-256,
+ *   SHA-512) and `fetch`. It holds no keys of its own — a device's
+ *   private keys live in the app's own `IndexedDB` store, never here.
  *
  * Relative imports carry their `.js` extension because that is what the
  * published ESM has to say for Node to resolve it; a bundler is happy

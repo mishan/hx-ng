@@ -43,7 +43,10 @@ export type IdentityErrorKind =
   | 'expired'
   | 'not-yet-valid'
   | 'capability-missing'
-  | 'cert-mismatch';
+  | 'cert-mismatch'
+  | 'clock-skew'
+  | 'open-failed'
+  | 'replayed';
 
 export class IdentityError extends Error {
   constructor(

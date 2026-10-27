@@ -282,6 +282,43 @@ const post = await signNewsPost(deviceSignKey, { cert, server: serverKey, catego
 await conn.newsPost({ category: node.id, subject: post.subject, body: post.body, mime: post.mime, signed: post.signed });
 ```
 
+### Sealed messages
+
+A private message can be sealed to the one device that reads it, so
+that no server on its way can (hxd-ng's `docs/e2e-messages.md`
+§3.7–§3.11): signed and sealed with HPKE (RFC 9180, X25519 and
+AES-256-GCM, all in WebCrypto), or sealed deniably, unsigned and in
+HPKE's auth mode under the sender device's own `device_enc` key, which
+convinces its recipient and nobody else. `sealMessage` takes the
+device's two non-extractable keys and the recipient's `device_enc`;
+`sealMessageTo` takes the recipient's certificate instead, the bytes
+`device_cert` answers, and seals only to one that passes the checks a
+sender's does (§4.2) and is of the identity `to` names.
+Where the box rides on the wire is the caller's.
+
+```ts
+const keys = { sign: deviceSignKey, enc: deviceEncKey };
+const box = await sealMessageTo({ id, sent, to, cert, text }, keys, recipientCert, deniable);
+```
+
+`openSealed` opens one with the reader's `device_enc` key in §3.9's
+order and answers §8's states: `verified` (a signed box, its `message`
+the signed map), `deniable` (with `senderEnc`, the key it opened
+under), `unverified`, `invalid`, `dropped` (stale or replayed, never
+shown) or `unopened`. Freshness is judged by the reader's own clock,
+and a box is accepted once: the `SealedReplay` it is handed is the
+caller's to keep with the device key, across restarts and shared by
+every tab using it. `MemorySealedReplay` keeps one in memory.
+
+```ts
+const opened = await openSealed(box, deviceEncKey, {
+  now: Math.floor(Date.now() / 1000),
+  at,
+  reader: myFingerprint,
+  sender: { named: from.fingerprint },
+}, replay);
+```
+
 ### Server keys
 
 A server key is pinned per host, and follows the server's handovers to

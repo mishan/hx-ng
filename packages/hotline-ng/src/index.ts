@@ -34,7 +34,8 @@
  *   SHA-512) and `fetch`. It holds no keys of its own — a device's
  *   private keys live in the app's own `IndexedDB` store, never here.
  *   `message`, the signed lines, messages and articles, needs
- *   `crypto.subtle` alone.
+ *   `crypto.subtle` alone, and so does `sealed`, private messages
+ *   sealed to one device (X25519, AES-GCM, HMAC).
  *
  * Relative imports carry their `.js` extension because that is what the
  * published ESM has to say for Node to resolve it; a bundler is happy
@@ -60,6 +61,27 @@ export {
 export * from './identity.js';
 export * from './handover.js';
 export * from './message.js';
+// Named rather than `*`: the padding and a box made from a fixed
+// ephemeral key are for the tests that pin hl-identity's vectors.
+export {
+  MemorySealedReplay,
+  SEALED_DENIABLE_BOX,
+  SEALED_DENIABLE_INFO,
+  SEALED_HOLD_SECONDS,
+  SEALED_OVERHEAD,
+  SEALED_PAD_SIZES,
+  SEALED_SIGNED_BOX,
+  SEALED_SIGNED_INFO,
+  checkSealedLength,
+  openSealed,
+  sealMessage,
+  sealMessageTo,
+  type DeviceKeys,
+  type SealedForm,
+  type SealedOpening,
+  type SealedOutcome,
+  type SealedReplay,
+} from './sealed.js';
 export {
   Connection,
   hasSavedSession,

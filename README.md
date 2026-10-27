@@ -186,6 +186,9 @@ Two things follow from how browsers treat an installed app:
   offline use: without its socket the client has nothing to show, and a
   cached shell would be one more thing to go stale after a deploy. The
   only workers are the notification ones, each scoped under `push/`.
+  A page left open learns of a deploy from `version.json`, which each
+  build writes beside `index.html`, and offers to reload; Settings and
+  the connect form show which build is running.
 
 A deployment that wants its own name under the icon edits `name` and
 `short_name` in `manifest.webmanifest`, and `apple-mobile-web-app-title`

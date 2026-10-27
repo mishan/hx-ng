@@ -220,6 +220,7 @@ export function connectScreen(
     h('div', { class: 'button-row' }, submit, identityBtn),
     identityChooser,
     h('p', { class: 'button-row' }, identityKeysLink, installButton()),
+    h('p', { class: 'muted build-stamp' }, `Build ${__BUILD__.id} (${__BUILD__.date})`),
   );
 
   // Always shown rather than hidden pending an async `getActiveDevice()`

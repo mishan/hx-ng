@@ -74,6 +74,9 @@ export interface ClassicHooks extends ConnectionHooks {
    *  Without this hook the agreement is accepted unseen, which is what the
    *  server is told either way when it has nothing to show. */
   onAgreement?: (text: string, signal: AbortSignal) => Promise<boolean>;
+  /** The module did not load: perhaps a newer build was deployed and
+   *  this page's hashed copy of it is gone. */
+  onModuleFailed?: () => void;
 }
 
 /** What a classic server cannot do, said in this client's own words: the
@@ -261,7 +264,10 @@ export class ClassicConnection implements Session {
     let s: ClassicSession;
     let ws: WebSocket;
     try {
-      await loadClassic();
+      await loadClassic().catch((e: unknown) => {
+        this.hooks.onModuleFailed?.();
+        throw e;
+      });
       // Dropped while the module loaded: there is nothing to start.
       if (this.ending) throw new Error('Disconnected.');
       s = new ClassicSession(

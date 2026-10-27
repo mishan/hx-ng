@@ -424,7 +424,7 @@ keeps elsewhere, kept off the main entry because it reads files.
 (`device.key`, `cert.bin`, `card.bin`) and refuses, with a
 `DeviceError` naming the file, a key the certificate does not certify,
 a certificate expired or without login, or another identity's card;
-and, as `unsafe`, a link or anything but a regular file, or a
+as `too-large`, a file past its size; and, as `unsafe`, a link or anything but a regular file, or a
 `device.key` that group or others can reach or another user owns
 (`{ owner: false }` allows the last, for a key another user provisioned).
 On Windows the mode is not checked, and the files' ACLs are what protect
@@ -442,7 +442,8 @@ sent, as a `ServerKeyError`; once an operator has judged the change,
 retry go on. `FilePinStore` keeps the pins in a JSON file,
 replaced atomically and mode 0600 under a lock file beside it, so a
 restart is not a first contact. Its directory must exist, and it and
-the file must be yours and writable by nobody else:
+the file must be yours and writable by nobody else; the directories
+above it are not checked, so keep it somewhere only you can rename:
 
 ```ts
 import { Connection, ServerTrust, wsToHttp } from '@hotline-ng/client';

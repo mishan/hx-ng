@@ -134,7 +134,7 @@ describe('loadDevice', () => {
     ['a certificate that expires as it is issued', async () => ({ 'cert.bin': await certWith({ expires: issued }) }), issued, 'cert.bin', 'not-yet-valid'],
     ['a certificate without login', async () => ({ 'cert.bin': await certWith({ caps: 2 }) }), during.now, 'cert.bin', 'capability-missing'],
     ['a card of another identity', async () => ({ 'card.bin': await otherCard() }), during.now, 'card.bin', 'cert-mismatch'],
-    ['a key file group or others can read', () => ({ 'device.key': (p) => writeFile(p, keys.device.seed_hex, { mode: 0o644 }) }), during.now, 'device.key', 'unsafe'],
+    ['a key file group or others can read', () => ({ 'device.key': (p) => writeFile(p, keys.device.seed_hex).then(() => chmod(p, 0o644)) }), during.now, 'device.key', 'unsafe'],
     ['a key file that is a symbolic link', () => ({ 'device.key': (p) => writeFile(`${p}.real`, keys.device.seed_hex, { mode: 0o600 }).then(() => symlink(`${p}.real`, p)) }), during.now, 'device.key', 'unsafe'],
     ['a key file that is a FIFO', () => ({ 'device.key': async (p) => execFileSync('mkfifo', ['-m', '600', p]) }), during.now, 'device.key', 'unsafe'],
     ['a certificate that is a directory', () => ({ 'cert.bin': (p) => mkdir(p) }), during.now, 'cert.bin', 'unsafe'],

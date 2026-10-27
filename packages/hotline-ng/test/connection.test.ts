@@ -702,7 +702,7 @@ describe('rooms', () => {
     expect(server.sent(req).map((f) => f.params)).toEqual([params]);
   });
 
-  it('keeps manage_rooms across a resume whose self does not say, and drops it when the account loses it', async () => {
+  it('keeps manage_rooms across a resume whose self does not say, and takes it and moderator from account_changed', async () => {
     server.on('login', () => ({ ok: loginOk({ self: { ...me(1, 'Alice'), manage_rooms: true } }) }));
     await connect();
     server.on('resume', () => ({ ok: { replay: 0, self: me(1, 'Alice') } }));
@@ -710,9 +710,11 @@ describe('rooms', () => {
     const resumed = new Connection(CREDS);
     await resumed.start();
     expect(resumed.manageRooms).toBe(true);
-    server.event('account_changed', { access: [], raw_bits: [] });
+    // The powers that are not bits ride on account_changed, each said
+    // only while held.
+    server.event('account_changed', { access: [], raw_bits: [], moderator: true });
     await settle();
-    expect(resumed.manageRooms).toBe(false);
+    expect([resumed.manageRooms, resumed.moderator]).toEqual([false, true]);
   });
 
   it('answers a join with what the server said, and refuses with its error', async () => {
@@ -725,17 +727,15 @@ describe('rooms', () => {
     await expect(conn.roomJoin(7)).rejects.toMatchObject({ wire: { code: 'no_such_room' } });
   });
 
-  it('delivers the room events', async () => {
+  it('forgets a room’s cursor when this session is parted from it, and not when someone else is', async () => {
     const conn = await connect();
-    const heard: unknown[] = [];
-    conn.on('room_added', (d) => heard.push(d.room.may_post));
-    conn.on('room_member_parted', (d) => heard.push(d.reason));
-    conn.on('subject', (d) => heard.push(d.room));
-    server.event('room_added', { room: LOUNGE });
-    server.event('room_member_parted', { room: LOUNGE.id, uid: 1, reason: 'archived' });
-    server.event('subject', { subject: 'new', room: LOUNGE.id });
+    server.on('room_join', () => ({ ok: { members: [1, 2], topic: '', may_post: true, last_id: 5 } }));
+    await conn.roomJoin(7);
+    await conn.roomJoin(8);
+    server.event('room_member_parted', { room: 7, uid: 2 });
+    server.event('room_member_parted', { room: 8, uid: 1, reason: 'archived' });
     await settle();
-    expect(heard).toEqual([false, 'archived', LOUNGE.id]);
+    expect(Object.fromEntries(conn.roomHistoryIds)).toEqual({ 7: 5 });
   });
 });
 

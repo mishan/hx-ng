@@ -803,6 +803,7 @@ export class Connection {
   private adoptAccess(set: SelfAccess): void {
     this.accounts = set;
     this.manageRooms = set.manage_rooms === true;
+    this.moderator = set.moderator === true;
     if (this.files?.writable) {
       this.files = { ...this.files, may: FILES_ACTS.filter((act) => set.access.includes(act)) };
     }

@@ -652,7 +652,9 @@ export interface RoomJoinOk {
 }
 
 /** `room_create`, which needs `manage_rooms`. `signed` is refused
- *  `bad_request` by a server that carries no signed lines. */
+ *  `bad_request` by a server that carries no signed lines. No `secure`
+ *  yet: the server does not take it and drops unknown fields, so the
+ *  room would silently not be secure. */
 export interface RoomCreateParams {
   name: string;
   topic?: string;
@@ -1826,11 +1828,14 @@ export const ERROR_TEXT: Record<string, string> = {
   // Rooms. `no_such_room` is also a room this session may not see, so
   // it must not suggest the room was ever there.
   no_such_room: 'There is no such room.',
-  not_a_member: 'Join that room first.',
+  // `voice_join` answers it too, for a private chat.
+  not_a_member: 'You are not in that room or chat.',
   too_many_rooms: 'You are in as many rooms as this server allows. Leave one first.',
   rooms_full: 'This server has as many rooms as it allows.',
   signature_required: 'That room takes signed lines only.',
   encryption_required: 'That needs an encrypted connection.',
+  // No `read_only`: a room, the file area and news all answer it, and
+  // the server's own text says which.
   server_error: 'The server had a problem with that. It has been logged.',
 };
 

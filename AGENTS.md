@@ -64,6 +64,12 @@ npm run test:e2e     # playwright; needs ../hxd-ng and cargo, else skips
 Before calling anything done, run what CI runs — `npm run typecheck`,
 `npm test`, `npm run check:package` and `npx vite build`, in that order.
 
+`@hotline-ng/client` is published to npm by `.github/workflows/publish.yml`
+from a `client-vX.Y.Z` tag: bump `packages/hotline-ng/package.json`'s
+version in a PR, merge it, then tag that commit on main. The run waits for
+approval in the `npm` environment, and npm trusts the workflow itself, so
+no token is kept anywhere.
+
 `dist/` is a build artefact and is not committed. `public/icons.png` and
 `public/icons.json` are, because they change only when gtkhx's
 `icons.rsrc` does.

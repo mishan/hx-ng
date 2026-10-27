@@ -42,11 +42,14 @@ jobs:
           version=$(node -p "require('./packages/hotline-ng/package.json').version")
           test "client-v$version" = "$GITHUB_REF_NAME"
       - run: npm ci
+      # The library's own tests, which need nothing the app's wasm build
+      # makes, against the very commit being published.
+      - run: npx vitest run packages/hotline-ng
       - run: npm run check:package
-      # Only the built output, the sources its maps point into, the README
-      # and the license. npm's JSON is a list or a map by name, by version.
+      # Only the built output, the sources its maps point into, the README,
+      # the changelog and the license. npm's JSON is a list or a map by name, by version.
       - name: contents
         run: |
           npm pack -w @hotline-ng/client --dry-run --json \
-            | node -e "const j = JSON.parse(require('fs').readFileSync(0)); const p = Array.isArray(j) ? j[0] : Object.values(j)[0]; const bad = p.files.map(f => f.path).filter(f => !/^(dist\/|src\/|README\.md$|package\.json$|LICENSE)/.test(f)); if (bad.length) { console.error(bad); process.exit(1); }"
+            | node -e "const j = JSON.parse(require('fs').readFileSync(0)); const p = Array.isArray(j) ? j[0] : Object.values(j)[0]; const bad = p.files.map(f => f.path).filter(f => !/^(dist\/|src\/|README\.md$|CHANGELOG\.md$|package\.json$|LICENSE)/.test(f)); if (bad.length) { console.error(bad); process.exit(1); }"
       - run: npm publish -w @hotline-ng/client --provenance

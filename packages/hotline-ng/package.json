@@ -1,6 +1,6 @@
 {
   "name": "@hotline-ng/client",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "A TypeScript client for the Hotline-ng wire: one session across however many WebSockets it takes, plus the voice and video the SFU serves.",
   "license": "Apache-2.0",
   "type": "module",
@@ -17,8 +17,12 @@
   "files": [
     "dist",
     "src",
-    "README.md"
+    "README.md",
+    "CHANGELOG.md"
   ],
+  "engines": {
+    "node": ">=22"
+  },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {

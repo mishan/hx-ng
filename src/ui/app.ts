@@ -128,6 +128,7 @@ import { renderRoster } from './roster';
 import { openSettings, type Theme } from './settings';
 import { Tiles } from './tiles';
 import { BannerStrip } from './banner';
+import { INTERVAL_MS, UpdateCheck } from '../update';
 import { MediaCache } from './media';
 import { avatars, face } from './avatar';
 import { closedForReporter, ModerationView, problem as moderationProblem } from './moderation';
@@ -361,6 +362,11 @@ export class App {
 
   // Long-lived DOM.
   private shell = h('div', { class: 'app', hidden: true });
+  /** Above the connect form and the shell alike: a page left open on
+   *  either is the one still running an old build. Always in the tree,
+   *  and empty with no banner, so a screen reader hears it filled. */
+  private updateBar = h('div', { role: 'status' });
+  private updates = new UpdateCheck(__BUILD__.id, (url, init) => fetch(url, init), Date.now);
   private serverName = h('h1', { class: 'server-name' });
   private subject = h('span', { class: 'subject' });
   private pill = h('button', { class: 'pill', title: 'Connection state' });
@@ -561,7 +567,8 @@ export class App {
       this.connectForm.fill({ url: this.pendingOpen.server, login: this.pendingOpen.account });
     }
     const screen = this.connectForm.el;
-    this.root.append(screen, this.shell, this.debug.el, this.identityPanel.el);
+    this.root.append(this.updateBar, screen, this.shell, this.debug.el, this.identityPanel.el);
+    this.watchForUpdates();
 
     // After the shell is in the document: the tiler finds its panes with
     // getElementById, so nothing it is given may still be detached.
@@ -609,7 +616,7 @@ export class App {
     if (hasSavedSession(saved.url)) {
       screen.hidden = true;
       const splash = h('div', { class: 'connect' }, h('p', { class: 'muted' }, 'Resuming your session…'));
-      this.root.prepend(splash);
+      screen.before(splash);
       this.connect(saved, { resumeOnly: true })
         .catch((e: Error) => {
           screen.hidden = false;
@@ -672,6 +679,7 @@ export class App {
         (await ask({ title: 'Agreement', body: text, fields: [], ok: 'Agree', signal })) !== null,
       onTrace: (e) => this.debug.push(e),
       onState: (s, detail) => this.onState(s, detail),
+      onModuleFailed: () => this.checkForUpdate(true),
       onLogin: (ok) => {
         this.store.server = ok.server;
         this.store.forgetPmUids();
@@ -3258,6 +3266,50 @@ export class App {
     document.body.classList.toggle('show-drawer', open);
     this.menuBtn.classList.toggle('on', open);
     this.menuBtn.setAttribute('aria-expanded', String(open));
+  }
+
+  /** Ask now, on coming back to the page, and every so often while it
+   *  stays in front; a hidden page asks when it is next shown. */
+  private watchForUpdates(): void {
+    document.addEventListener('visibilitychange', () => this.checkForUpdate());
+    window.setInterval(() => this.checkForUpdate(), INTERVAL_MS);
+    this.checkForUpdate();
+  }
+
+  /** Not under the dev server, which has no `version.json` to ask. */
+  private checkForUpdate(urgent = false): void {
+    if (import.meta.env.DEV || document.visibilityState !== 'visible') return;
+    void this.updates.check(urgent).then((build) => {
+      if (build) this.offerUpdate();
+    });
+  }
+
+  /** Offered, never done: a reload takes a half-typed line, or a call,
+   *  with it. */
+  private offerUpdate(): void {
+    const said = h('span', {}, 'A new version of the client is available.');
+    const reload = h('button', { class: 'primary', type: 'button' }, 'Reload');
+    reload.onclick = async () => {
+      reload.disabled = true;
+      // A reload revalidates the page itself, but a Home Screen app's
+      // next cold launch opens its start URL from the HTTP cache, which
+      // may hold the old `index.html` for as long as the host allows.
+      // `reload` fetches past it and stores the new one there. And it
+      // is the proof the server is reachable: an app offline would
+      // reload onto an error page with no way back.
+      const ok = await fetch('./', { cache: 'reload', signal: AbortSignal.timeout(5000) })
+        .then((r) => r.ok)
+        .catch(() => false);
+      if (ok) {
+        location.reload();
+        return;
+      }
+      reload.disabled = false;
+      said.textContent = 'A new version of the client is available, but it could not be reached. Check the connection and try again.';
+    };
+    const hide = h('button', { class: 'ghost', type: 'button', title: 'Dismiss', ariaLabel: 'Dismiss' }, '×');
+    hide.onclick = () => this.updateBar.replaceChildren();
+    this.updateBar.replaceChildren(h('div', { class: 'update-banner' }, said, reload, hide));
   }
 
   private openSettings(): void {

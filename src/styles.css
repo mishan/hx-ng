@@ -253,6 +253,22 @@ img.avatar {
   line-height: 1.4;
 }
 
+/* A newer build, offered above whatever is on screen. */
+.update-banner {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  align-items: center;
+  gap: 0.5rem;
+  flex: none;
+  padding: 0.35rem max(0.75rem, env(safe-area-inset-right)) 0.35rem max(0.75rem, env(safe-area-inset-left));
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
+  font-size: 0.85rem;
+}
+.update-banner button.primary { margin-top: 0; padding: 0.2rem 0.6rem; }
+.update-banner button.ghost { color: var(--muted); padding: 0 0.4rem; }
+
 /* The less-used buttons: part of the row where there is room for them,
    at the foot of the drawer where there is not (below). */
 .topbar-extras { display: contents; }
@@ -908,6 +924,7 @@ button.call:disabled { opacity: 0.45; cursor: default; }
   margin-top: 0.5rem;
 }
 .connect-card > p { margin: 0 0 0.6rem; font-size: 0.85rem; }
+.connect-card > p.build-stamp { margin: 0; font-size: 0.72rem; text-align: right; }
 
 .row { display: grid; grid-template-columns: 5.5rem 1fr; align-items: center; gap: 0.6rem; }
 .row > span { color: var(--muted); font-size: 0.82rem; }
@@ -1763,6 +1780,7 @@ dialog.picker.settings { width: min(32rem, 100vw - 1.5rem); }
 .setting-label { font-weight: 560; }
 .setting-detail { font-size: 0.8rem; color: var(--muted); }
 .setting-row { display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap; }
+.settings-body p.setting-detail { margin: 0.5rem 0 0; }
 dialog.settings button.ghost {
   padding: 0.3rem 0.6rem;
   border-radius: 7px;

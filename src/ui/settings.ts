@@ -155,6 +155,7 @@ export function openSettings(s: Settings): void {
           debug,
           h('span', { class: 'setting-detail' }, 'The wire trace and session state. Also ⇧⌘D, or the status dot.'),
         ),
+        h('p', { class: 'setting-detail' }, `Build ${__BUILD__.id} (${__BUILD__.date})`),
       ),
     ),
     h('footer', {}, ok),

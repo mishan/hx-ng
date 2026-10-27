@@ -1,11 +1,47 @@
+import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { defineConfig } from 'vite';
+import { defineConfig, type Plugin } from 'vite';
+
+/** Which build this is, so a page left open can tell when a newer one
+ *  has been published (`src/update.ts`). `HX_BUILD` first, for testing
+ *  the check by hand; then the commit, from git or, in a checkout
+ *  without its history, from Actions; "dev" when neither knows, which
+ *  the check takes as a build never to compare. */
+function buildStamp(): { id: string; date: string } {
+  const git = (...args: string[]) => {
+    try {
+      return execFileSync('git', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    } catch {
+      return '';
+    }
+  };
+  const id = process.env.HX_BUILD || git('rev-parse', '--short', 'HEAD') || process.env.GITHUB_SHA?.slice(0, 7) || 'dev';
+  const date = git('log', '-1', '--format=%cs') || new Date().toISOString().slice(0, 10);
+  return { id, date };
+}
+
+const build = buildStamp();
+
+/** `version.json` beside `index.html`: what the check fetches to learn
+ *  which build is published now. Only in a build; the dev server never
+ *  asks for it. */
+function versionFile(): Plugin {
+  return {
+    name: 'hx-version',
+    apply: 'build',
+    generateBundle() {
+      this.emitFile({ type: 'asset', fileName: 'version.json', source: JSON.stringify({ build: build.id }) });
+    },
+  };
+}
 
 // `base: './'` so a built `dist/` works from any path a static server
 // happens to mount it at — including straight out of the repo with
 // `python3 -m http.server`, which is how most people will run this.
 export default defineConfig({
   base: './',
+  define: { __BUILD__: JSON.stringify(build) },
+  plugins: [versionFile()],
   resolve: {
     alias: {
       // The client eats its own dog food: it imports the library by the

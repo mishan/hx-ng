@@ -17,12 +17,13 @@
  * certificate arrives later, pasted in from `hlid` (§7.1).
  */
 
-import { bytesToHex } from '@hotline-ng/client';
+import { bytesToHex, type ServerPin, type ServerPinStore } from '@hotline-ng/client';
 
 const DB_NAME = 'hxd-ng.identity';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 const DEVICES_STORE = 'devices';
 const META_STORE = 'meta';
+const SERVER_PINS_STORE = 'serverPins';
 const ACTIVE_KEY = 'active';
 /** The identity this browser has enrolled with before, in `meta` rather
  *  than on the device record: it has to outlive "forget this device", or
@@ -74,6 +75,9 @@ function openDb(): Promise<IDBDatabase> {
       }
       if (!db.objectStoreNames.contains(META_STORE)) {
         db.createObjectStore(META_STORE); // out-of-line keys: just `{ active: devicePub }`
+      }
+      if (!db.objectStoreNames.contains(SERVER_PINS_STORE)) {
+        db.createObjectStore(SERVER_PINS_STORE); // keyed by host
       }
     };
     req.onsuccess = () => resolve(req.result);
@@ -226,3 +230,17 @@ export async function forgetActiveDevice(): Promise<void> {
     meta.delete(ACTIVE_KEY);
   });
 }
+
+/** The server keys this browser has pinned, per host (hxd-ng's
+ *  `server-key-handover.md` §5), for `ServerTrust`. A store of their
+ *  own, so forgetting a device does not forget the servers it met. */
+export const serverPins: ServerPinStore = {
+  get: (host) =>
+    withDb(SERVER_PINS_STORE, 'readonly', (tx) =>
+      requestResult<ServerPin | undefined>(tx.objectStore(SERVER_PINS_STORE).get(host)),
+    ),
+  put: (host, pin) =>
+    withDb(SERVER_PINS_STORE, 'readwrite', (tx) => {
+      tx.objectStore(SERVER_PINS_STORE).put(pin, host);
+    }),
+};

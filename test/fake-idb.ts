@@ -144,17 +144,19 @@ class FakeDatabase {
  *  `beforeEach`. */
 export function installFakeIndexedDB(): void {
   const databases = new Map<string, Map<string, FakeObjectStore>>();
+  const versions = new Map<string, number>();
 
   (globalThis as any).indexedDB = {
-    open(name: string, _version: number) {
+    open(name: string, version: number) {
       const req = new FakeRequest<FakeDatabase>();
       queueMicrotask(() => {
-        const isNew = !databases.has(name);
+        const upgrade = (versions.get(name) ?? 0) < version;
+        if (upgrade) versions.set(name, version);
         const stores = databases.get(name) ?? new Map<string, FakeObjectStore>();
         databases.set(name, stores);
         const db = new FakeDatabase(stores);
         req.result = db;
-        if (isNew) (req as any).onupgradeneeded?.();
+        if (upgrade) (req as any).onupgradeneeded?.();
         req.onsuccess?.();
       });
       return req;

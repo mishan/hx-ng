@@ -171,7 +171,7 @@ describe('verifyServerChallenge', () => {
     ['at its expiry', signed, given, sc.fields.expires],
     ['inside the skew past it', signed, given, sc.fields.expires + SERVER_CHALLENGE_SKEW_SECONDS],
   ])('accepts the vector %s', async (_, bytes, g, now) => {
-    await expect(verifyServerChallenge(bytes, g, now)).resolves.toBeUndefined();
+    await expect(verifyServerChallenge(bytes, g, now)).resolves.toMatchObject({ host: g.host, next: undefined });
   });
 
   it.each([
@@ -367,12 +367,12 @@ describe('decodeBundle / openBundle', () => {
 describe('fetchDiscovery', () => {
   afterEach(() => vi.unstubAllGlobals());
 
-  const reply = (identity: unknown) => {
+  const reply = (identity: unknown, extra: object = {}) => {
     vi.stubGlobal(
       'fetch',
       vi.fn(async () => ({
         ok: true,
-        json: async () => ({ v: 1, name: 'x', ng: { ws: '/ng' }, identity }),
+        json: async () => ({ v: 1, name: 'x', ng: { ws: '/ng' }, identity, ...extra }),
       })),
     );
   };
@@ -393,6 +393,17 @@ describe('fetchDiscovery', () => {
     const d = await fetchDiscovery('https://hl.example');
     if (!d.identity.enabled) return;
     expect(d.identity.web).toBe('https://hl.example/app/');
+  });
+
+  it('decodes `server_handovers` in order, keeping the place of one that does not decode', async () => {
+    reply({ enabled: false }, { server_handovers: [bytesToBase64url(Uint8Array.of(1, 2, 3)), '!', 7] });
+    expect((await fetchDiscovery('https://hl.example')).serverHandovers).toEqual([
+      Uint8Array.of(1, 2, 3),
+      new Uint8Array(),
+      new Uint8Array(),
+    ]);
+    reply({ enabled: false });
+    expect((await fetchDiscovery('https://hl.example')).serverHandovers).toEqual([]);
   });
 });
 

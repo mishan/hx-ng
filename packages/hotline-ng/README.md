@@ -202,6 +202,34 @@ event, not once per id.
 `no_such_user` from these means nobody by that name, not nobody who can
 be messaged, so `moderationErrorText` is the wording to show for them.
 
+### Server keys
+
+A server key is pinned per host, and follows the server's handovers to
+a key it committed to in advance (hxd-ng's `docs/server-key-handover.md`
+§5), so a rotation warns nobody and what was signed under the old key
+stays in scope. `ServerTrust` keeps the pins in a `ServerPinStore` the
+caller supplies (`MemoryServerPinStore` in memory, or one of your own
+on disk) and decides from discovery's `serverHandovers` and a verified
+challenge, with the time passed in:
+
+```ts
+const trust = new ServerTrust(store);
+const discovery = await fetchDiscovery(base);
+const challenge = await fetchChallenge(`${base}${discovery.identity.endpoints.challenge}`);
+const now = Math.floor(Date.now() / 1000);
+const r = await trust.check(challenge.host, discovery.serverHandovers, challenge, now);
+if (r.outcome === 'warn' && (await userAccepts(r.warning))) {
+  await trust.accept(challenge.host, r.warning, discovery.serverHandovers, challenge, now);
+}
+// Later, for a signed line whose in.server is not the current key:
+const inScope = await trust.covers(challenge.host, line.in.server, line.sent);
+```
+
+A warning stores nothing. Accepting a changed key or commitment pins it
+again without taking aliases from the chain served then, and accepting
+a fork does the same and never warns of that handover again. `checkServerKey`, `pinServerKey`, `repinServerKey` and
+`aliasCovers` are the same decisions without the store.
+
 ### `VoiceSession` — the SFU
 
 Layered on a `Connection`, because video is layered on the voice session

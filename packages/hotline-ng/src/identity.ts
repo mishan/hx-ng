@@ -203,6 +203,17 @@ function reqUint(v: CborValue, key: string): number {
   return bigintToSafeNumber(f.v, key);
 }
 
+/** A uint read as at most `Number.MAX_SAFE_INTEGER`, for a time that
+ *  only ever has to compare as later than any clock: refusing a larger
+ *  one would leave its object unverified, and so unseen by a check that
+ *  must see it, where hl-identity reads it as the u64 it is. */
+function reqUintSaturating(v: CborValue, key: string): number {
+  const f = mapGet(v, key);
+  if (f === undefined) throw new IdentityError('missing-field', key);
+  if (f.t !== 'uint') throw new IdentityError('bad-field', key);
+  return f.v > BigInt(Number.MAX_SAFE_INTEGER) ? Number.MAX_SAFE_INTEGER : Number(f.v);
+}
+
 function optUint(v: CborValue, key: string): number | undefined {
   const f = mapGet(v, key);
   if (f === undefined) return undefined;
@@ -215,6 +226,10 @@ function reqBytesN(v: CborValue, key: string, n: number): Uint8Array {
   if (f === undefined) throw new IdentityError('missing-field', key);
   if (f.t !== 'bytes' || f.v.length !== n) throw new IdentityError('bad-field', key);
   return f.v;
+}
+
+function optBytesN(v: CborValue, key: string, n: number): Uint8Array | undefined {
+  return mapGet(v, key) === undefined ? undefined : reqBytesN(v, key, n);
 }
 
 function reqBytes(v: CborValue, key: string): Uint8Array {
@@ -644,6 +659,10 @@ export interface Discovery {
    *  frames, with `htxf` for its transfers. */
   ng: { ws?: string; trtp?: string; htxf?: string };
   identity: DiscoveryIdentity;
+  /** The handovers that led to `serverKey`, oldest first, as served
+   *  (`server-key-handover.md` §4), for `ServerTrust`; empty when
+   *  there are none. */
+  serverHandovers: Uint8Array[];
 }
 
 export async function fetchDiscovery(httpBase: string): Promise<Discovery> {
@@ -667,8 +686,23 @@ export async function fetchDiscovery(httpBase: string): Promise<Discovery> {
         ...(typeof ri.web === 'string' ? { web: ri.web } : {}),
       }
     : { enabled: false };
-  return { v: raw.v, name: raw.name, serverKey: raw.server_key ?? null, ng: raw.ng, identity };
+  // An entry that does not decode keeps its place as bytes no handover
+  // parses from, so the chain fails as served rather than discovery.
+  const handover = (s: unknown) => {
+    try {
+      return base64urlToBytes(s as string);
+    } catch {
+      return new Uint8Array();
+    }
+  };
+  const serverHandovers = Array.isArray(raw.server_handovers) ? raw.server_handovers.map(handover) : [];
+  return { v: raw.v, name: raw.name, serverKey: raw.server_key ?? null, ng: raw.ng, identity, serverHandovers };
 }
+
+declare const verified: unique symbol;
+/** A challenge `verifyServerChallenge` passed, which only it and
+ *  `fetchChallenge` return. */
+export type Verified<T> = T & { readonly [verified]: true };
 
 export interface Challenge {
   challenge: Uint8Array;
@@ -677,6 +711,9 @@ export interface Challenge {
    *  proof names and `auth` must be sent to. */
   host: string;
   expiresIn: number;
+  /** The commitment to the key that will follow `serverKey`
+   *  (`server-key-handover.md` §2), as the server challenge signed it. */
+  next: Uint8Array | undefined;
 }
 
 export interface ServerChallenge {
@@ -685,6 +722,9 @@ export interface ServerChallenge {
   host: string;
   /** Unix seconds. */
   expires: number;
+  /** SHA-256 of the key that will follow `serverKey`
+   *  (`server-key-handover.md` §2). */
+  next: Uint8Array | undefined;
 }
 
 /** Shape only, `host` in canonical form included; the signature is
@@ -698,6 +738,7 @@ export function decodeServerChallenge(bytes: Uint8Array): ServerChallenge {
     serverKey: reqBytesN(value, 'server_key', 32),
     host,
     expires: reqUint(value, 'expires'),
+    next: optBytesN(value, 'next', 32),
   };
 }
 
@@ -710,13 +751,14 @@ export function decodeServerChallenge(bytes: Uint8Array): ServerChallenge {
  * server's challenge and spend the proof there (hxd-ng's
  * `docs/hotline-ng-auth-rationale.md` §5). Every failure, a missing
  * `server_challenge` included, is the same refusal: there is no `v = 1`
- * to fall back to, or a relaying server need only strip it.
+ * to fall back to, or a relaying server need only strip it. Returns the
+ * challenge it verified, whose `next` a server key pin remembers.
  */
 export async function verifyServerChallenge(
   serverChallenge: unknown,
   given: { challenge: Uint8Array; serverKey: Uint8Array; host: string },
   now: number,
-): Promise<void> {
+): Promise<Verified<ServerChallenge>> {
   const refuse = (why: string) =>
     new AuthError(SERVER_CHALLENGE_REFUSED, `The server at ${given.host} did not vouch for its challenge (${why}).`);
   if (serverChallenge === undefined || serverChallenge === null) {
@@ -736,9 +778,40 @@ export async function verifyServerChallenge(
   }
   if (sc.host !== given.host) throw refuse(`signed for ${sc.host}`);
   if (sc.expires + SERVER_CHALLENGE_SKEW_SECONDS < now) throw refuse('expired');
+  return sc as Verified<ServerChallenge>;
 }
 
-export async function fetchChallenge(endpoint: string): Promise<Challenge> {
+// --- server key handover (hxd-ng's docs/server-key-handover.md §3) -------
+
+export const SERVER_HANDOVER_DOMAIN = 'hl-identity/server-handover/v1';
+
+/** A server key's signature over its successor, as `handover.rs`'s
+ *  `Handover` parses it. */
+export interface Handover {
+  old: Uint8Array;
+  new: Uint8Array;
+  /** `new`'s own commitment. Without it no later handover can be
+   *  followed (§5.3). */
+  next: Uint8Array | undefined;
+  /** Unix seconds, when `new` took over. */
+  time: number;
+}
+
+/** Decode and verify, strictly, under `old`. */
+export async function parseHandover(bytes: Uint8Array): Promise<Handover> {
+  const { value } = openEnvelope(bytes);
+  const h: Handover = {
+    old: reqBytesN(value, 'old', 32),
+    new: reqBytesN(value, 'new', 32),
+    next: optBytesN(value, 'next', 32),
+    time: reqUintSaturating(value, 'time'),
+  };
+  if (bytesToHex(h.new) === bytesToHex(h.old)) throw new IdentityError('bad-field', 'new');
+  await verifyEnvelope(bytes, h.old, SERVER_HANDOVER_DOMAIN);
+  return h;
+}
+
+export async function fetchChallenge(endpoint: string): Promise<Verified<Challenge>> {
   const host = addressedHost(endpoint);
   const res = await fetch(endpoint, { method: 'POST' });
   if (!res.ok) throw new IdentityError('server-error', `challenge: HTTP ${res.status}`);
@@ -749,8 +822,8 @@ export async function fetchChallenge(endpoint: string): Promise<Challenge> {
     host,
     expiresIn: raw.expires_in,
   };
-  await verifyServerChallenge(raw.server_challenge, challenge, Math.floor(Date.now() / 1000));
-  return challenge;
+  const { next } = await verifyServerChallenge(raw.server_challenge, challenge, Math.floor(Date.now() / 1000));
+  return { ...challenge, next } as Verified<Challenge>;
 }
 
 export interface AuthRequest {

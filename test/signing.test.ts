@@ -26,7 +26,7 @@ import {
 
 import { cBytes, cOptMap, cUint, encode, type CborValue } from '../packages/hotline-ng/src/cbor';
 import { sealedReplay } from '../src/identity/storage';
-import { ArticleReader, LineReader, MessageReader, heldGuids, signsFor, type PinnedKey } from '../src/signing';
+import { ArticleReader, LineReader, MessageReader, beforeUnsigned, heldGuids, signsFor, type PinnedKey } from '../src/signing';
 import { installFakeIndexedDB } from './fake-idb';
 import vectors from '../packages/hotline-ng/test/identity-vectors.json';
 
@@ -90,6 +90,21 @@ describe('signsFor', () => {
 
   it('says nothing without a certificate', () => {
     expect(signsFor(undefined, true)).toBeUndefined();
+  });
+});
+
+describe('beforeUnsigned', () => {
+  it.each([
+    ['signing every lobby line, as the server has it', true, 'default', 'default', 'ask'],
+    ['signing every lobby line, asked and not yet answered', true, 'default', 'able', 'ask'],
+    ['turned off, the server not yet told', false, 'default', 'default', 'tell'],
+    ['turned off, asked and not yet answered', false, 'able', 'default', 'tell'],
+    ['turned off just as on was asked', false, 'default', 'able', 'tell'],
+    ['signing every lobby line, the server not told', true, 'able', 'able', 'send'],
+    ['on a server that carries none from this session', true, 'default', null, 'send'],
+    ['not signing them, as the server has it', false, 'able', 'able', 'send'],
+  ] as const)('%s', (_, on, signs, signing, want) => {
+    expect(beforeUnsigned(on, { signs, signing })).toBe(want);
   });
 });
 
@@ -179,6 +194,12 @@ describe('LineReader', () => {
     const expected = { state: 'unsigned', signatureExpected: true, sentAtAnotherTime: false, signer: null };
     const signs = row({ identity: { fingerprint: OTHER, handle: null, signs: true } });
     expect((await lines.live(event(signs, 'hi'), signs)).signature).toEqual(expected);
+    // A linked user whose home server says it signs every lobby line.
+    const linked = row({
+      remote: { server: 'Far', tag: 'far', tagged: false, server_key: bytesToBase64url(LINKED) },
+      identity: { fingerprint: OTHER, handle: null, signs: true },
+    });
+    expect((await lines.live(event(linked, 'hi'), linked)).signature).toEqual(expected);
     // An image alone, which nobody can sign.
     expect((await lines.live(event(signs, ''), signs)).signature).toBeNull();
 

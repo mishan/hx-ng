@@ -125,6 +125,19 @@ export function signsFor(cert: Uint8Array | undefined, lobby: boolean): Signs | 
   return lobby ? 'default' : 'able';
 }
 
+/** What a lobby line about to go unsigned needs first (§4.6). While
+ *  the server says this session signs every one, or may since it was
+ *  asked to, its row says `signs` and an unsigned line would read as one
+ *  a server stripped: so the user is asked to stop signing them, or,
+ *  once they have, the server is told before the line goes. */
+export function beforeUnsigned(
+  signLobby: boolean,
+  session: { signs: Signs | null; signing: Signs | null },
+): 'send' | 'tell' | 'ask' {
+  if (session.signing === null || (session.signing !== 'default' && session.signs !== 'default')) return 'send';
+  return signLobby ? 'ask' : 'tell';
+}
+
 /** Whether a session proving this certificate says `sealed` (§4.1): it
  *  can open them exactly where it can sign. */
 export function sealedFor(cert: Uint8Array | undefined): boolean {

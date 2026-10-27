@@ -1,4 +1,5 @@
-import { mkdtemp, readdir, readFile, rm, stat, unlink, writeFile } from 'node:fs/promises';
+import { execFileSync } from 'node:child_process';
+import { chmod, mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, unlink, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -53,11 +54,13 @@ afterEach(async () => {
   await Promise.all(tmp.splice(0).map((d) => rm(d, { recursive: true, force: true })));
 });
 
-type Files = Record<string, string | Uint8Array | null>;
+/** A file's content, `null` to leave it out, or a function that puts
+ *  something else at its path. */
+type Files = Record<string, string | Uint8Array | null | ((path: string) => Promise<unknown>)>;
 
 /** What `hlid init` writes, from hl-identity's own vectors: the seed in
- *  hex with its newline, and the signed certificate and card. `null`
- *  leaves a file out. */
+ *  hex with its newline, mode 0600, and the signed certificate and
+ *  card. */
 async function deviceDir(files: Files = {}): Promise<string> {
   const dir = await tempDir();
   const all: Files = {
@@ -67,7 +70,9 @@ async function deviceDir(files: Files = {}): Promise<string> {
     ...files,
   };
   for (const [name, content] of Object.entries(all)) {
-    if (content !== null) await writeFile(join(dir, name), content);
+    const path = join(dir, name);
+    if (typeof content === 'function') await content(path);
+    else if (content !== null) await writeFile(path, content, { mode: name === 'device.key' ? 0o600 : 0o644 });
   }
   return dir;
 }
@@ -129,6 +134,13 @@ describe('loadDevice', () => {
     ['a certificate that expires as it is issued', async () => ({ 'cert.bin': await certWith({ expires: issued }) }), issued, 'cert.bin', 'not-yet-valid'],
     ['a certificate without login', async () => ({ 'cert.bin': await certWith({ caps: 2 }) }), during.now, 'cert.bin', 'capability-missing'],
     ['a card of another identity', async () => ({ 'card.bin': await otherCard() }), during.now, 'card.bin', 'cert-mismatch'],
+    ['a key file group or others can read', () => ({ 'device.key': (p) => writeFile(p, keys.device.seed_hex, { mode: 0o644 }) }), during.now, 'device.key', 'unsafe'],
+    ['a key file that is a symbolic link', () => ({ 'device.key': (p) => writeFile(`${p}.real`, keys.device.seed_hex, { mode: 0o600 }).then(() => symlink(`${p}.real`, p)) }), during.now, 'device.key', 'unsafe'],
+    ['a key file that is a FIFO', () => ({ 'device.key': async (p) => execFileSync('mkfifo', ['-m', '600', p]) }), during.now, 'device.key', 'unsafe'],
+    ['a certificate that is a directory', () => ({ 'cert.bin': (p) => mkdir(p) }), during.now, 'cert.bin', 'unsafe'],
+    ['a key file too large for a seed', () => ({ 'device.key': `${keys.device.seed_hex}${' '.repeat(100)}` }), during.now, 'device.key', 'too-large'],
+    ['a certificate past its size limit', () => ({ 'cert.bin': new Uint8Array(4 * 1024 + 1) }), during.now, 'cert.bin', 'too-large'],
+    ['a card past its size limit', () => ({ 'card.bin': new Uint8Array(16 * 1024 + 1) }), during.now, 'card.bin', 'too-large'],
   ])('refuses %s', async (_, files, now, file, kind) => {
     const failure = await loadDevice(await deviceDir(await files()), { now }).catch((e: unknown) => e);
     expect(failure).toBeInstanceOf(DeviceError);
@@ -213,6 +225,13 @@ describe('identityToken', () => {
     expect(vi.mocked(fetch).mock.calls.map(([url]) => String(url))).toEqual([`${base}/.well-known/hotline`]);
   });
 
+  it('refuses to prove a certificate that expired since it was loaded, before any request', async () => {
+    const device = await loadDevice(await deviceDir());
+    vi.setSystemTime((expires + 301) * 1000);
+    await expect(identityToken(base, device)).rejects.toMatchObject({ file: 'cert.bin', kind: 'expired' });
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
   it('refuses a login placed in another account', async () => {
     const device = await loadDevice(await deviceDir());
     await expect(identityToken(base, device, { account: 'bob' })).rejects.toMatchObject({ code: WRONG_ACCOUNT });
@@ -252,6 +271,39 @@ describe('FilePinStore', () => {
     expect(await again.get('other.example:5700')).toEqual(bare);
     expect((await stat(path)).mode & 0o777).toBe(0o600);
     expect(await readdir(dir)).toEqual(['pins.json']);
+  });
+
+  it('keeps every pin that stores on one file write at once, and takes over an abandoned lock', async () => {
+    const dir = await tempDir();
+    const path = join(dir, 'pins.json');
+    await writeFile(`${path}.lock`, '');
+    const old = new Date(Date.now() - 60_000);
+    await utimes(`${path}.lock`, old, old);
+    const store = new FilePinStore(path);
+    await store.put('first.example', pin);
+    const hosts = Array.from({ length: 8 }, (_, i) => `h${i}.example`);
+    await Promise.all(hosts.map((h) => new FilePinStore(path).put(h, bare)));
+    expect(await store.get('first.example')).toEqual(pin);
+    for (const h of hosts) expect(await store.get(h)).toEqual(bare);
+    expect(await readdir(dir)).toEqual(['pins.json']);
+  });
+
+  it.each<[string, (dir: string, path: string) => Promise<unknown>]>([
+    ['a directory others can write', (dir) => chmod(dir, 0o777)],
+    ['a pin file others can write', (_, path) => writeFile(path, JSON.stringify({ v: 1, pins: {} }), { mode: 0o666 }).then(() => chmod(path, 0o666))],
+    ['a pin file that is a symbolic link', (dir, path) => writeFile(join(dir, 'real.json'), JSON.stringify({ v: 1, pins: {} })).then(() => symlink(join(dir, 'real.json'), path))],
+  ])('refuses %s', async (_, place) => {
+    const dir = await tempDir();
+    const path = join(dir, 'pins.json');
+    await place(dir, path);
+    const store = new FilePinStore(path);
+    await expect(store.get('h')).rejects.toThrow('cannot be trusted');
+    await expect(store.put('h', bare)).rejects.toThrow('cannot be trusted');
+  });
+
+  it('refuses a pin file in a directory that does not exist', async () => {
+    const store = new FilePinStore(join(await tempDir(), 'missing', 'pins.json'));
+    await expect(store.put('h', bare)).rejects.toThrow('ENOENT');
   });
 
   it.each([

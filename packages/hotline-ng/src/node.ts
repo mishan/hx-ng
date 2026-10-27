@@ -6,8 +6,10 @@
  * entry imports nothing from `node:`.
  */
 
-import { open, readFile, rename, unlink } from 'node:fs/promises';
+import { constants } from 'node:fs';
+import { lstat, open, readFile, rename, stat, unlink, type FileHandle } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
+import { setTimeout as sleep } from 'node:timers/promises';
 
 import { CborError } from './cbor.js';
 import { verifyStrict } from './ed25519.js';
@@ -17,7 +19,9 @@ import {
   AuthError,
   CAPS,
   CARD_DOMAIN,
+  CARD_MAX_BYTES,
   DEVICE_CERT_DOMAIN,
+  DEVICE_CERT_MAX_BYTES,
   IdentityError,
   SERVER_CHALLENGE_SKEW_SECONDS,
   bytesToHex,
@@ -50,6 +54,14 @@ function concat(a: Uint8Array, b: Uint8Array): Uint8Array<ArrayBuffer> {
 
 const unixNow = () => Math.floor(Date.now() / 1000);
 
+/** This process's uid, where the platform has one. */
+const ownUid = (): number | undefined => (typeof process.getuid === 'function' ? process.getuid() : undefined);
+
+/** Whether a file's mode says who may reach it. Windows reports group
+ *  and other bits that mirror the owner's, whatever its ACLs allow, so
+ *  there the ACLs are what protect a key or a pin file. */
+const POSIX_MODES = process.platform !== 'win32';
+
 // --- a device hlid wrote ---------------------------------------------------
 
 /** The names `hlid init` writes, and every other `hlid` command reads. */
@@ -76,7 +88,9 @@ export interface Device {
   card: Card;
 }
 
-export type DeviceErrorKind = IdentityErrorKind | 'unreadable';
+/** `unsafe` is a file this process should not trust with a key: not a
+ *  regular file, or a key file others can reach or another user owns. */
+export type DeviceErrorKind = IdentityErrorKind | 'unreadable' | 'unsafe';
 
 /** What `loadDevice` refused, and in which of the directory's files. */
 export class DeviceError extends Error {
@@ -91,11 +105,100 @@ export class DeviceError extends Error {
   }
 }
 
-async function readDeviceFile(dir: string, file: string): Promise<Uint8Array> {
+/** A seed in hex, with room for the whitespace around it. */
+const DEVICE_KEY_MAX_BYTES = 128;
+
+/**
+ * Read at most `max` bytes of `file`, refusing a symbolic link and
+ * anything but a regular file, and opened without blocking so that a
+ * FIFO in its place is refused rather than waited on. A `secret` file
+ * is refused, too, if group or others have any access to it, or if
+ * `owner` is set and another user owns it.
+ */
+async function readDeviceFile(
+  dir: string,
+  file: string,
+  max: number,
+  check: { secret?: boolean; owner?: boolean } = {},
+): Promise<Uint8Array> {
+  const unsafe = (why: string) => new DeviceError(file, 'unsafe', why);
+  const unreadable = (e: unknown) =>
+    new DeviceError(file, 'unreadable', e instanceof Error ? e.message : String(e), { cause: e });
+  const path = join(dir, file);
+  let f: FileHandle;
   try {
-    return new Uint8Array(await readFile(join(dir, file)));
+    // Without O_NOFOLLOW, as on Windows, a link is looked for first.
+    if (constants.O_NOFOLLOW === undefined && (await lstat(path)).isSymbolicLink()) throw unsafe('is a symbolic link');
+    f = await open(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0));
   } catch (e) {
-    throw new DeviceError(file, 'unreadable', e instanceof Error ? e.message : String(e), { cause: e });
+    if (e instanceof DeviceError) throw e;
+    // ELOOP is O_NOFOLLOW's refusal of a link; FreeBSD's is EMLINK.
+    const code = (e as { code?: unknown }).code;
+    if (code === 'ELOOP' || code === 'EMLINK') throw unsafe('is a symbolic link');
+    throw unreadable(e);
+  }
+  try {
+    const st = await f.stat();
+    if (!st.isFile()) throw unsafe('is not a regular file');
+    if (check.secret && POSIX_MODES && (st.mode & 0o077) !== 0) {
+      throw unsafe(`is open to group or others (mode ${(st.mode & 0o777).toString(8)}); chmod 600 it`);
+    }
+    const uid = ownUid();
+    if (check.secret && check.owner && uid !== undefined && st.uid !== uid) throw unsafe('is owned by another user');
+    const tooLarge = () => new DeviceError(file, 'too-large', `is larger than ${max} bytes`);
+    if (st.size > max) throw tooLarge();
+    // One byte past `max`, so a file that grew since `stat` is still
+    // seen to be too large.
+    const buf = new Uint8Array(max + 1);
+    let n = 0;
+    for (let got = -1; got !== 0 && n < buf.length; n += got) {
+      got = (await f.read(buf, n, buf.length - n, n)).bytesRead;
+    }
+    if (n > max) {
+      buf.fill(0);
+      throw tooLarge();
+    }
+    const out = buf.slice(0, n);
+    buf.fill(0);
+    return out;
+  } finally {
+    await f.close();
+  }
+}
+
+const isSpace = (b: number) => b === 0x20 || (b >= 0x09 && b <= 0x0d);
+const nibble = (b: number) =>
+  b >= 0x30 && b <= 0x39 ? b - 0x30 : b >= 0x61 && b <= 0x66 ? b - 0x57 : b >= 0x41 && b <= 0x46 ? b - 0x37 : -1;
+
+/** `device.key`'s seed, parsed from the bytes rather than through a
+ *  string, which could not be zeroed after. */
+function parseSeed(raw: Uint8Array): Uint8Array | null {
+  let start = 0;
+  let end = raw.length;
+  while (start < end && isSpace(raw[start]!)) start++;
+  while (end > start && isSpace(raw[end - 1]!)) end--;
+  if (end - start !== 64) return null;
+  const seed = new Uint8Array(32);
+  for (let i = 0; i < 32; i++) {
+    const hi = nibble(raw[start + 2 * i]!);
+    const lo = nibble(raw[start + 2 * i + 1]!);
+    if (hi < 0 || lo < 0) {
+      seed.fill(0);
+      return null;
+    }
+    seed[i] = (hi << 4) | lo;
+  }
+  return seed;
+}
+
+/** The window hl-identity's `check_window` holds a certificate to,
+ *  under a server's default skew: what the server would refuse. */
+function checkWindow(cert: DeviceCert, now: number): void {
+  if (cert.expires <= cert.issued || cert.issued > now + SERVER_CHALLENGE_SKEW_SECONDS) {
+    throw new DeviceError(CERT_FILE, 'not-yet-valid', `valid from ${cert.issued} until ${cert.expires}`);
+  }
+  if (cert.expires + SERVER_CHALLENGE_SKEW_SECONDS < now) {
+    throw new DeviceError(CERT_FILE, 'expired', `expired at ${cert.expires}`);
   }
 }
 
@@ -123,20 +226,30 @@ async function openSigned<T extends { identity: Uint8Array }>(
  * certificate; `card.bin`, the identity's card. Refused unless the
  * certificate is signed by its identity, certifies both keys the seed
  * derives, is valid at `now` (Unix seconds) and allows login, and the
- * card is signed by the same identity. The keys are imported
- * non-extractable; the seed is not kept.
+ * card is signed by the same identity. Every file must be a regular
+ * one, and `device.key` open to its owner alone, who must be this
+ * process's user unless `owner` is false. The keys are imported
+ * non-extractable; the seed and what was derived from it are zeroed.
  */
-export async function loadDevice(dir: string, options: { now?: number } = {}): Promise<Device> {
+export async function loadDevice(dir: string, options: { now?: number; owner?: boolean } = {}): Promise<Device> {
   const now = options.now ?? unixNow();
-  const seedHex = new TextDecoder().decode(await readDeviceFile(dir, DEVICE_KEY)).trim();
-  if (!/^[0-9a-fA-F]{64}$/.test(seedHex)) throw new DeviceError(DEVICE_KEY, 'bad-field', 'not a 32-byte seed in hex');
-  const seed = hexToBytes(seedHex);
+  const raw = await readDeviceFile(dir, DEVICE_KEY, DEVICE_KEY_MAX_BYTES, { secret: true, owner: options.owner ?? true });
+  const seed = parseSeed(raw);
+  raw.fill(0);
+  if (seed === null) throw new DeviceError(DEVICE_KEY, 'bad-field', 'not a 32-byte seed in hex');
+  try {
+    return await fromSeed(dir, seed, now);
+  } finally {
+    seed.fill(0);
+  }
+}
 
-  const cert = await openSigned(CERT_FILE, await readDeviceFile(dir, CERT_FILE), decodeDeviceCert, DEVICE_CERT_DOMAIN);
+async function fromSeed(dir: string, seed: Uint8Array, now: number): Promise<Device> {
+  const certBytes = await readDeviceFile(dir, CERT_FILE, DEVICE_CERT_MAX_BYTES);
+  const cert = await openSigned(CERT_FILE, certBytes, decodeDeviceCert, DEVICE_CERT_DOMAIN);
 
-  const sign = await crypto.subtle.importKey('pkcs8', concat(PKCS8_ED25519_PREFIX, seed), { name: 'Ed25519' }, false, [
-    'sign',
-  ]);
+  const pkcs8 = concat(PKCS8_ED25519_PREFIX, seed);
+  const sign = await crypto.subtle.importKey('pkcs8', pkcs8, { name: 'Ed25519' }, false, ['sign']).finally(() => pkcs8.fill(0));
   // A non-extractable key will not say what its public half is, so it
   // is asked to sign something instead. The probe has no NUL, so it can
   // be no domain-separated object, and its signature goes nowhere.
@@ -145,27 +258,19 @@ export async function loadDevice(dir: string, options: { now?: number } = {}): P
   if (!(await verifyStrict(cert.device, probe, sig))) {
     throw new DeviceError(DEVICE_KEY, 'key-mismatch', `not the device key ${CERT_FILE} certifies`);
   }
-  const encSecret = new Uint8Array(
-    await crypto.subtle.digest('SHA-256', concat(textEncoder.encode(DEVICE_ENC_DERIVATION), seed)),
-  );
-  const enc = await importX25519Secret(encSecret);
+  const encInput = concat(textEncoder.encode(DEVICE_ENC_DERIVATION), seed);
+  const encSecret = new Uint8Array(await crypto.subtle.digest('SHA-256', encInput).finally(() => encInput.fill(0)));
+  const enc = await importX25519Secret(encSecret).finally(() => encSecret.fill(0));
   if (bytesToHex(await x25519PublicKey(enc)) !== bytesToHex(cert.deviceEnc)) {
     throw new DeviceError(DEVICE_KEY, 'key-mismatch', `derives another device_enc than ${CERT_FILE} certifies`);
   }
 
-  // The window hl-identity's `check_window` holds a certificate to,
-  // under a server's default skew: what the server would refuse.
-  if (cert.expires <= cert.issued || cert.issued > now + SERVER_CHALLENGE_SKEW_SECONDS) {
-    throw new DeviceError(CERT_FILE, 'not-yet-valid', `valid from ${cert.issued} until ${cert.expires}`);
-  }
-  if (cert.expires + SERVER_CHALLENGE_SKEW_SECONDS < now) {
-    throw new DeviceError(CERT_FILE, 'expired', `expired at ${cert.expires}`);
-  }
+  checkWindow(cert, now);
   if (cert.caps !== undefined && (cert.caps & CAPS.LOGIN) === 0) {
     throw new DeviceError(CERT_FILE, 'capability-missing', 'does not allow login');
   }
 
-  const card = await openSigned(CARD_FILE, await readDeviceFile(dir, CARD_FILE), decodeCard, CARD_DOMAIN);
+  const card = await openSigned(CARD_FILE, await readDeviceFile(dir, CARD_FILE, CARD_MAX_BYTES), decodeCard, CARD_DOMAIN);
   if (bytesToHex(card.identity) !== bytesToHex(cert.identity)) {
     throw new DeviceError(CARD_FILE, 'cert-mismatch', `names another identity than ${CERT_FILE}`);
   }
@@ -228,6 +333,9 @@ function endpointOn(origin: string, path: string): string {
  * login is needed.
  */
 export async function identityToken(httpBase: string, device: Device, options: IdentityTokenOptions = {}): Promise<string> {
+  // A long-running process outlives its certificate: say so, rather
+  // than leave it to the server's `bad_cert`.
+  checkWindow(device.cert, unixNow());
   const origin = new URL(httpBase).origin;
   const host = canonicalHost(new URL(origin).host);
   const discovery = await fetchDiscovery(origin);
@@ -305,15 +413,32 @@ function decodePin(raw: any): ServerPin {
   };
 }
 
+/** How old a pin file's lock must be to be taken as left by a writer
+ *  that died holding it, and how long one is waited for. A write holds
+ *  it for milliseconds, so the first is generous; the second is longer
+ *  than it, so a put meeting a dead writer's lock outlasts it and takes
+ *  it over rather than failing. */
+const PIN_LOCK_STALE_MS = 10_000;
+const PIN_LOCK_WAIT_MS = 15_000;
+
 /**
  * A `ServerPinStore` in one JSON file, for a program that must not meet
  * every server for the first time again at each restart. Each write
  * replaces the file whole, by renaming over it a temporary file in the
  * same directory, created mode 0600. A missing file holds no pins; one
  * that does not parse is refused, on reading and on writing alike,
- * rather than read as empty and its pins forgotten. Writes through one
- * store run one at a time; two stores, or two processes, on one file
- * would lose each other's.
+ * rather than read as empty and its pins forgotten.
+ *
+ * The directory must exist, and it and the file must be this user's
+ * and writable by nobody else, or anyone who could write them could
+ * pin a key of their choosing; either is refused otherwise. On Windows
+ * only the file's being a regular one is checked, and its ACLs are
+ * what protect it. A write
+ * reads, changes and replaces the file under `<path>.lock`, created
+ * exclusively beside it, so stores in several processes do not lose
+ * each other's pins. A lock older than `PIN_LOCK_STALE_MS` is taken
+ * as abandoned and removed, which is simple rather than airtight: two
+ * writers that find the same abandoned lock at once can both proceed.
  */
 export class FilePinStore implements ServerPinStore {
   private writes: Promise<unknown> = Promise.resolve();
@@ -321,17 +446,78 @@ export class FilePinStore implements ServerPinStore {
   constructor(readonly path: string) {}
 
   async get(host: string): Promise<ServerPin | undefined> {
+    await this.checkPlace();
     return (await this.read()).get(host);
   }
 
   put(host: string, pin: ServerPin): Promise<void> {
     const run = this.writes.then(async () => {
-      const pins = await this.read();
-      pins.set(host, pin);
-      await this.write(pins);
+      await this.checkPlace();
+      await this.locked(async () => {
+        const pins = await this.read();
+        pins.set(host, pin);
+        await this.write(pins);
+      });
     });
     this.writes = run.catch(() => undefined);
     return run;
+  }
+
+  private async locked(fn: () => Promise<void>): Promise<void> {
+    const lock = `${this.path}.lock`;
+    // Released only while it still holds this token, so a writer whose
+    // lock was taken over as stale does not release its successor's.
+    const token = crypto.randomUUID();
+    const deadline = Date.now() + PIN_LOCK_WAIT_MS;
+    for (;;) {
+      try {
+        const h = await open(lock, 'wx', 0o600);
+        try {
+          await h.writeFile(token);
+        } finally {
+          await h.close();
+        }
+        break;
+      } catch (e) {
+        if ((e as { code?: unknown }).code !== 'EEXIST') throw e;
+      }
+      const held = await stat(lock).then(
+        (st) => Date.now() - st.mtimeMs,
+        () => 0,
+      );
+      if (held > PIN_LOCK_STALE_MS) {
+        await unlink(lock).catch(() => undefined);
+      } else if (Date.now() > deadline) {
+        throw new Error(`${lock} has been held for longer than ${PIN_LOCK_WAIT_MS} ms`);
+      } else {
+        await sleep(20);
+      }
+    }
+    try {
+      await fn();
+    } finally {
+      if ((await readFile(lock, 'utf8').catch(() => '')) === token) await unlink(lock).catch(() => undefined);
+    }
+  }
+
+  /** Refuses a directory or file that another user owns, or that group
+   *  or others can write. */
+  private async checkPlace(): Promise<void> {
+    const uid = ownUid();
+    const refuse = (what: string, why: string) => new Error(`${what} ${why}, so the pins in it cannot be trusted`);
+    const dir = dirname(this.path);
+    const d = await stat(dir);
+    if (!d.isDirectory()) throw refuse(dir, 'is not a directory');
+    if (POSIX_MODES && (d.mode & 0o022) !== 0) throw refuse(dir, 'is writable by group or others');
+    if (uid !== undefined && d.uid !== uid) throw refuse(dir, 'is owned by another user');
+    const f = await lstat(this.path).catch((e: { code?: unknown }) => {
+      if (e.code === 'ENOENT') return undefined;
+      throw e;
+    });
+    if (f === undefined) return;
+    if (!f.isFile()) throw refuse(this.path, 'is not a regular file');
+    if (POSIX_MODES && (f.mode & 0o022) !== 0) throw refuse(this.path, 'is writable by group or others');
+    if (uid !== undefined && f.uid !== uid) throw refuse(this.path, 'is owned by another user');
   }
 
   private async read(): Promise<Map<string, ServerPin>> {

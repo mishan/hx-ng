@@ -278,6 +278,41 @@ describe('the fake server', () => {
     expect(defaults.caps).toContain('identity');
   });
 
+  it('kicks a session, which ends it on the client, and ends one it removes the same way', async () => {
+    const server = new FakeServer({ accounts: ACCOUNTS });
+    const ended: string[] = [];
+    const alice = await connect(server, 'alice', { onEnded: (why) => ended.push(why) });
+    const bob = await connect(server, 'bob', { onEnded: (why) => ended.push(why) });
+    const parted = heard(bob, 'user_parted');
+    server.kick(alice.self!.uid);
+    await waitFor('the kick', () => ended.length === 1 && parted.length === 1);
+    expect([alice.state, ended[0]]).toEqual(['offline', 'You were disconnected by an administrator.']);
+    expect(parted).toEqual([{ uid: alice.self!.uid }]);
+
+    server.removeUser(bob.self!.uid);
+    await waitFor('the removal', () => ended.length === 2);
+    expect(bob.state).toBe('offline');
+    expect(() => server.uidOf('bob')).toThrow();
+  });
+
+  it('shows a test what it kept, and takes accounts added later', async () => {
+    const server = new FakeServer({ rooms: [{ name: 'lounge' }] });
+    server.addAccount({ login: 'alice', password: 'pw' });
+    server.addAccount({ login: 'bob', password: 'pw' });
+    const alice = await connect(server, 'alice');
+    const lounge = alice.login!.rooms!.list[0]!.id;
+    await alice.roomJoin(lounge);
+    await alice.chat({ text: 'lobby' });
+    await alice.chat({ text: 'room', room: lounge });
+    await alice.msg({ to_login: 'bob', text: 'later' });
+    expect(server.lines().map((l) => l.text)).toEqual(['lobby']);
+    expect(server.lines(lounge).map((l) => l.text)).toEqual(['room']);
+    const kept = server.mail('bob');
+    expect(kept).toMatchObject([{ text: 'later', read: false, from: { login: 'alice' } }]);
+    kept[0]!.read = true;
+    expect(server.mail('bob')[0]?.read).toBe(false);
+  });
+
   it('refuses the next request as told, then serves again', async () => {
     const server = new FakeServer({ accounts: ACCOUNTS });
     const alice = await connect(server, 'alice');

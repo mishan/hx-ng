@@ -93,8 +93,10 @@ export interface FakeServerOptions {
   grace?: number;
   /** The families served, as the login reply's `caps` lists them: of
    *  these, `history`, `inbox`, `rooms` and `chat_guid` change what the
-   *  server does. `identity` says the identity endpoints exist, which
-   *  this server does not serve: `identityToken` stands in for them. */
+   *  server does. `identity` says the server has the identity
+   *  endpoints, and is listed to every session however it logged in, as
+   *  the spec has it; this server does not serve them, and
+   *  `identityToken` stands in for them. */
   caps?: string[];
 }
 
@@ -242,8 +244,8 @@ export class FakeServer {
   private readonly caps: Set<string>;
   private readonly sessions = new Map<number, Session>();
   private readonly rooms = new Map<number, FakeRoom>();
-  private readonly lines = new Map<number, HistoryLine[]>([[0, []]]);
-  private readonly mail: Mail[] = [];
+  private readonly kept = new Map<number, HistoryLine[]>([[0, []]]);
+  private readonly stored: Mail[] = [];
   private readonly guids = new Map<string, number>();
   private readonly mailGuids = new Map<string, Mail>();
   private readonly handlers = new Map<string, FakeHandler>();
@@ -345,9 +347,38 @@ export class FakeServer {
     return uid;
   }
 
-  /** A session leaves the server, as at logout. */
+  /** A user the test plays leaves the server. Any other session is
+   *  kicked, the one way a server ends a session that is not ending its
+   *  own. */
   removeUser(uid: number): void {
-    this.end(this.live(uid));
+    const s = this.live(uid);
+    if (s.scripted) this.end(s);
+    else this.kick(uid);
+  }
+
+  /** Kick a session: `kicked`, then the connection closed with reason
+   *  `kicked` (hotline-ng.md §5); a detached one just ends (§2). */
+  kick(uid: number): void {
+    const s = this.live(uid);
+    this.emit(s, 'kicked', {});
+    this.end(s, 'kicked');
+  }
+
+  /** Add an account, or replace the one with its login. */
+  addAccount(account: FakeAccount): void {
+    this.accounts.set(account.login, account);
+  }
+
+  /** The public lines kept in `room`, the lobby by default, oldest first. */
+  lines(room = 0): HistoryLine[] {
+    const lines = this.kept.get(room);
+    if (!lines) throw new Error(`no room ${room}`);
+    return structuredClone(lines);
+  }
+
+  /** The messages stored for `login`, oldest first. */
+  mail(login: string): StoredMessage[] {
+    return this.stored.filter((m) => m.to === login).map(({ id, from, text, at, read }) => structuredClone({ id, from, text, at, read }));
   }
 
   /** A line of public chat from `uid`, which must be in `room` if one
@@ -374,7 +405,7 @@ export class FakeServer {
       archived: false,
     };
     this.rooms.set(r.id, r);
-    this.lines.set(r.id, []);
+    this.kept.set(r.id, []);
     for (const s of this.aware()) this.emit(s, 'room_added', { room: this.view(r) });
     return r.id;
   }
@@ -448,8 +479,7 @@ export class FakeServer {
       if (custom) return answer(custom);
       if (req === 'logout') {
         answer({ ok: {} });
-        this.end(s);
-        return sock.shut(1000, 'logout');
+        return this.end(s, 'logout');
       }
       if (req === 'sync') {
         answer({ ok: this.sync(s) });
@@ -619,7 +649,7 @@ export class FakeServer {
     const id = ++this.nextLine;
     const at = now();
     // Without `history` nothing is kept, and a line has no id.
-    if (this.caps.has('history')) this.lines.get(room)!.push({ id, at, from: { nick: s.user.nick, icon: s.user.icon }, text, style });
+    if (this.caps.has('history')) this.kept.get(room)!.push({ id, at, from: { nick: s.user.nick, icon: s.user.icon }, text, style });
     const data: Events['chat'] = {
       from: { uid: s.uid, nick: s.user.nick },
       text,
@@ -640,7 +670,7 @@ export class FakeServer {
     if (!Number.isInteger(limit) || limit < 1 || limit > 200) throw refuse('bad_request', 'limit is 1 to 200.');
     const after = p.after ?? 0;
     const before = p.before ?? 0;
-    const rows = this.lines.get(room)!.filter((l) => l.id > after && (!before || l.id < before));
+    const rows = this.kept.get(room)!.filter((l) => l.id > after && (!before || l.id < before));
     // Forward from `after` when there is one, else back from the newest.
     const lines = after ? rows.slice(0, limit) : rows.slice(-limit);
     return { lines, has_more: rows.length > limit };
@@ -696,7 +726,7 @@ export class FakeServer {
       fromUid: s.uid,
       pending: !attached.length,
     };
-    this.mail.push(m);
+    this.stored.push(m);
     if (key) this.mailGuids.set(key, m);
     for (const x of attached) this.emit(x, 'msg', { from, text: m.text, at, queued: false, id: m.id });
     return this.msgOk(s, m);
@@ -833,7 +863,9 @@ export class FakeServer {
 
   /** Leaving the server says so once, as `user_parted`, and parts no
    *  room on its own (chat-rooms.md §7.3). */
-  private end(s: Session): void {
+  private end(s: Session, close?: 'logout' | 'kicked'): void {
+    // Whatever is attached goes with it, after what it has been sent.
+    s.socket?.shut(1000, close ?? '');
     s.ended = true;
     this.sessions.delete(s.uid);
     for (const r of this.rooms.values()) r.members.delete(s.uid);
@@ -911,12 +943,12 @@ export class FakeServer {
   }
 
   private lastId(room: number): { last_id?: number } {
-    const last = this.lines.get(room)!.at(-1)?.id;
+    const last = this.kept.get(room)!.at(-1)?.id;
     return last === undefined ? {} : { last_id: last };
   }
 
   private mailOf(s: Session): Mail[] {
-    return s.mailbox ? this.mail.filter((m) => m.to === s.mailbox) : [];
+    return s.mailbox ? this.stored.filter((m) => m.to === s.mailbox) : [];
   }
 
   private counts(s: Session): InboxCounts {

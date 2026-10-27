@@ -397,6 +397,8 @@ export interface ChatParams {
   /** A handle from `POST /media`, which must be this session's own
    *  upload and still live. */
   media?: string;
+  /** The room, with `rooms`; absent or 0 is the lobby. */
+  room?: number;
   /** The client's own id for the line, honored with `chat_guid`: a
    *  retry under it is the same line. */
   guid?: string;
@@ -524,6 +526,8 @@ export interface HistoryParams {
   after?: number;
   /** 1–200, default 50. Both cursors define an exclusive range. */
   limit?: number;
+  /** The room, with `rooms`; absent or 0 is the lobby. */
+  room?: number;
 }
 
 export interface HistoryOk {
@@ -1413,6 +1417,8 @@ export interface Events {
     at: number;
     /** The image this line carried, when it carried one. */
     media?: Media;
+    /** The room, with `rooms`; never present for the lobby. */
+    room?: number;
     /** The `guid` it was sent with, on the sender's own copy alone. */
     guid?: string;
     /** A signed line's detached form, or its link form, base64url. */

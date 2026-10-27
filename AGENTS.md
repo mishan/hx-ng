@@ -66,7 +66,8 @@ Before calling anything done, run what CI runs — `npm run typecheck`,
 
 `@hotline-ng/client` is published to npm by `.github/workflows/publish.yml`
 from a `client-vX.Y.Z` tag: bump `packages/hotline-ng/package.json`'s
-version in a PR, merge it, then tag that commit on main. The run waits for
+version and add its entry to `packages/hotline-ng/CHANGELOG.md` in a PR,
+merge it, then tag that commit on main. The run waits for
 approval in the `npm` environment, and npm trusts the workflow itself, so
 no token is kept anywhere.
 

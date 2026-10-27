@@ -14,6 +14,7 @@
  * name repeated eleven times.
  */
 
+import { signerLabel, type ContactOf } from '../contacts';
 import { lineReport } from '../moderation';
 import type { LineSignature } from '../signing';
 import { continuesRun, type Conversation, type Line } from '../state';
@@ -36,6 +37,8 @@ export interface TranscriptOptions {
   /** This session may redact public lines, so a line with an id offers
    *  to. Anyone may report. */
   moderator?: boolean;
+  /** The contact pinned to a signer, which names what it signed. */
+  contact?: ContactOf;
 }
 
 /** The line each drawn row is, for a click on one of its buttons to
@@ -176,7 +179,7 @@ function chatLine(
     : opts.markdown
       ? chatNodes(line.text)
       : { nodes: linkify(line.text), block: false };
-  const who = speaker(line);
+  const who = speaker(line, opts.contact);
 
   return h(
     'div',
@@ -197,7 +200,7 @@ function chatLine(
     h(
       'span',
       {
-        class: who.signed ? 'name signer' : 'name',
+        class: `name${who.cls}`,
         title: who.title || (from?.login ?? (from?.uid !== undefined ? `uid ${from.uid}` : '')),
       },
       sameSpeaker ? '' : who.name,
@@ -215,6 +218,7 @@ function chatLine(
       line.queued ? h('span', { class: 'tag', title: 'Held by the server until you came back' }, 'queued') : null,
       sealedTag(line),
       ...signatureTag(line.signature),
+      sameSpeaker ? null : who.compared,
       sameSpeaker ? null : who.aside,
       ...body.nodes,
       // An image is a block under the text, not a word in it: a line
@@ -254,34 +258,46 @@ function sealedTag(line: Line): HTMLElement | null {
     : h('span', { class: 'sig sig-clear', title: 'Sent in the clear: the servers on its way could read it' }, 'not sealed');
 }
 
-/** How much of a fingerprint names a signed line: enough that nobody
- *  makes another key to match it. */
-const SIGNER_CHARS = 16;
-
 /** Who a line is shown as from. */
-function speaker(line: Line): { name: string; title: string; signed: boolean; aside: HTMLElement | null } {
-  return signedName(line.signature, line.from?.nick ?? '');
+function speaker(line: Line, contact?: ContactOf): Signed {
+  return signedName(line.signature, line.from?.nick ?? '', contact);
 }
 
-/** Who a line, a message or an article is shown as from. A signed one is
- *  named by its signer's fingerprint (§8), whatever nick the server put
- *  on it, and the nick goes beside the text as an aside the signature
- *  does not cover. */
-export function signedName(
-  sig: LineSignature | undefined,
-  nick: string,
-): { name: string; title: string; signed: boolean; aside: HTMLElement | null } {
-  if (!signedBy(sig)) return { name: nick, title: '', signed: false, aside: null };
+type Signed = {
+  name: string;
+  title: string;
+  /** Named by a key, or by the name the user compared it as. */
+  cls: '' | ' signer' | ' contact';
+  aside: HTMLElement | null;
+  /** The tag, and whether it says compared. */
+  compared: HTMLElement | null;
+  isCompared: boolean;
+};
+
+/** Who a line, a message or an article is shown as from, as
+ *  `signerLabel` has it, and the nick the server put on a signed one as
+ *  an aside the signature does not cover. */
+export function signedName(sig: LineSignature | undefined, nick: string, contact?: ContactOf): Signed {
+  if (!signedBy(sig)) return { name: nick, title: '', cls: '', aside: null, compared: null, isCompared: false };
+  const label = signerLabel(sig, nick, contact);
   const title =
     sig.state === 'deniable'
       ? `Sealed deniably by ${sig.signer}${sig.senderKey ? `, under the device key beginning ${sig.senderKey}` : ''}${sig.to ? `, to ${sig.to}` : ''}`
       : sig.signer
         ? `Signed by ${sig.signer}${sig.home ? `, a user of ${sig.home}` : ''}${sig.to ? `, to ${sig.to}` : ''}`
         : 'Signed by a key that could not be checked';
-  const aside = nick
-    ? h('span', { class: 'sig-nick', title: "The server's name for them, which the signature does not cover" }, `as ${nick}`)
+  // Quoted, so a nick can never read as the tag beside it.
+  const aside = label.nick
+    ? h('span', { class: 'sig-nick', title: "The server's name for them, which the signature does not cover" }, `as "${label.nick}"`)
     : null;
-  return { name: sig.signer ? sig.signer.slice(0, SIGNER_CHARS) : 'unknown key', title, signed: true, aside };
+  const compared =
+    label.compared === null
+      ? null
+      : label.compared
+        ? h('span', { class: 'sig sig-compared', title: 'You compared this fingerprint with them out of band' }, 'compared')
+        : h('span', { class: 'sig sig-uncompared', title: 'You have not compared this fingerprint with them out of band' }, 'not compared');
+  const cls = label.byKey ? ' signer' : label.compared ? ' contact' : '';
+  return { name: label.name, title, cls, aside, compared, isCompared: label.compared === true };
 }
 
 const STATE_WORDS = {
@@ -295,12 +311,18 @@ const STATE_WORDS = {
 
 /** A line as the live region says it: by the name the transcript shows
  *  and with its signature's state, and a bad signature's by no name. */
-export function spoken(line: Line): string {
+export function spoken(line: Line, contact?: ContactOf): string {
   const sig = line.signature;
   const text = line.hidden ? 'text hidden' : line.text;
   if (sig?.state === 'invalid') return `Bad signature: ${text}`;
-  const name = speaker(line).name;
-  const state = [line.sealed ? 'sealed' : line.sealed === false ? 'not sealed' : '', sig ? STATE_WORDS[sig.state] : '']
+  const who = speaker(line, contact);
+  const name = who.name;
+  const state = [
+    line.sealed ? 'sealed' : line.sealed === false ? 'not sealed' : '',
+    sig ? STATE_WORDS[sig.state] : '',
+    // Said where it was, but not for every stranger's line.
+    who.isCompared ? 'compared' : '',
+  ]
     .filter(Boolean)
     .map((w) => `, ${w}`)
     .join('');
@@ -364,13 +386,13 @@ export function signatureTag(sig: LineSignature | undefined): HTMLElement[] {
 /** Actions, notices, broadcasts and this client's own remarks all read
  *  as one column of asides rather than as chat with a strange name. */
 function eventLine(line: Line, prev: Line | undefined, media: MediaCache, opts: TranscriptOptions): HTMLElement {
-  const who = line.kind === 'action' ? speaker(line) : null;
+  const who = line.kind === 'action' ? speaker(line, opts.contact) : null;
   const prefix = line.kind === 'broadcast' ? `${line.from?.nick ?? 'server'}: ` : '';
   const text = prefix + line.text;
   // The actor is a name, apart from the words: a bad signature strikes
   // it, as it strikes a chat line's nick.
   const actor = who
-    ? [h('span', { class: `actor${who.signed ? ' signer' : ''}`, title: who.title }, who.name), ' ']
+    ? [h('span', { class: `actor${who.cls}`, title: who.title }, who.name), ' ']
     : [];
   // GtkHx's rule: only a body somebody typed, in one voice, is read as
   // markdown. A `/me` and a broadcast are that — a person's words behind
@@ -393,6 +415,7 @@ function eventLine(line: Line, prev: Line | undefined, media: MediaCache, opts: 
       { class: body?.block ? 'text md-blocks' : 'text' },
       ...(who ? signatureTag(line.signature) : []),
       ...actor,
+      who?.compared ?? null,
       who?.aside ?? null,
       // A news notice is one link to the article it is about; the shell
       // handles the click, since only it can open the reader.

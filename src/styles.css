@@ -664,6 +664,8 @@ button.call:disabled { opacity: 0.45; cursor: default; }
 .sig.sig-foreign, .sig.sig-apart { color: var(--warn); }
 .sig.sig-sealed, .sig.sig-deniable { color: var(--ok); }
 .sig.sig-clear, .sig.sig-unopened { color: var(--warn); }
+.sig.sig-compared { color: var(--ok); }
+.sig.sig-uncompared { color: var(--muted); }
 .line.sig-invalid .name, .line.sig-invalid .actor, .news .sig-invalid .news-author,
 .news .sig-invalid .news-thread-author { text-decoration: line-through; }
 /* A fingerprint is read, not skimmed: whole, in a face that tells its
@@ -673,6 +675,8 @@ button.call:disabled { opacity: 0.45; cursor: default; }
   font-size: 0.72rem;
   overflow: visible;
 }
+/* The user's own name for a key they compared: not a nick. */
+.line .name.contact, .line .actor.contact, .news-author.contact, .news-thread-author.contact { color: var(--ok); font-weight: 650; }
 .line .text > .sig-nick, .news .sig-nick { margin-right: 0.4rem; color: var(--muted); font-size: 0.8rem; }
 .line .text > .sig-note, .news .sig-note { display: block; color: var(--muted); font-size: 0.75rem; font-style: italic; }
 .line.notice .text, .line.system .text { color: var(--muted); font-style: italic; }
@@ -779,7 +783,7 @@ button.call:disabled { opacity: 0.45; cursor: default; }
 }
 
 /* A conversation sent deniably says so on its switch and in the rail. */
-.deniable-switch { padding-bottom: 0.45rem; font-size: 0.75rem; white-space: nowrap; }
+.deniable-switch, .compare-switch { padding-bottom: 0.45rem; font-size: 0.75rem; white-space: nowrap; }
 .deniable-switch[aria-pressed="true"], .rail-tag { color: var(--warn); }
 .rail-tag { margin-left: 0.3rem; font-size: 0.65rem; text-transform: uppercase; letter-spacing: 0.03em; }
 .attach {
@@ -1789,6 +1793,17 @@ dialog.settings button.ghost {
   font-size: 0.82rem;
 }
 dialog.settings button.ghost:hover { background: var(--surface-2); color: var(--text); }
+
+/* --- contacts --------------------------------------------------------- */
+
+.contacts-list { display: flex; flex-direction: column; gap: 0.75rem; }
+.contact { display: flex; flex-direction: column; gap: 0.35rem; padding-top: 0.75rem; border-top: 1px solid var(--line); }
+.contact h3 { margin: 0; font-size: 0.95rem; overflow-wrap: anywhere; }
+.contact p { margin: 0; }
+/* Read aloud a group at a time, so the groups are what the eye finds. */
+.contact-fp { font: 0.95rem/1.6 var(--mono); word-spacing: 0.4em; overflow-wrap: anywhere; }
+.contact-seen { margin: 0; padding-left: 1.1rem; overflow-wrap: anywhere; }
+.contacts-said { margin: 0; }
 
 /* --- accounts --------------------------------------------------------- */
 

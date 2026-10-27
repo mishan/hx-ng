@@ -79,6 +79,7 @@ import {
   trailTo,
   type DraftAttachment,
 } from '../news';
+import type { ContactOf } from '../contacts';
 import { unreadable, type ArticleRead, type ArticleReader } from '../signing';
 import { ask } from './ask';
 import { badge, fill, h, linkify } from './dom';
@@ -145,6 +146,8 @@ export interface NewsHooks {
    *  into `category` under `parent`. `note` says once why an article
    *  went unsigned. */
   post: (params: NewsPostParams, category: NewsNode) => Promise<{ id: number; note?: string }>;
+  /** The contact pinned to a signer, which names an article it signed. */
+  contact: ContactOf;
 }
 
 /** The largest thread page the wire allows. */
@@ -927,9 +930,10 @@ export class NewsView {
   /** Who an article is shown as from, and the state its signature is in. */
   private author(a: NewsArticle, cls: string): (HTMLElement | null)[] {
     const sig = this.reads.get(a.id)?.signature ?? undefined;
-    const who = signedName(sig, a.from.nick || 'guest');
+    const who = signedName(sig, a.from.nick || 'guest', this.hooks.contact);
     return [
-      h('span', { class: `${cls}${who.signed ? ' signer' : ''}`, title: who.title }, who.name),
+      h('span', { class: `${cls}${who.cls}`, title: who.title }, who.name),
+      who.compared,
       who.aside,
       ...signatureTag(sig),
     ];

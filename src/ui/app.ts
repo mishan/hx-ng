@@ -78,6 +78,8 @@ import {
 } from '../state';
 import { ask, choose, type Field } from './ask';
 import { connectScreen, remembered, type ConnectScreen, type Details } from './connect';
+import { openContacts } from './contacts';
+import { canonicalFingerprint, contactLookup, contactName, contactOf, type ContactOf } from '../contacts';
 import { DebugPanel } from './debug';
 import { badge, clock, fill, h } from './dom';
 import { FilesView } from './files';
@@ -136,7 +138,7 @@ import { closedForReporter, ModerationView, problem as moderationProblem } from 
 import { AccountsView } from './accounts';
 import { mayAdminister } from '../accounts';
 import { NewsView } from './news';
-import { appendLine, isAtBottom, keepingPlace, lineOf, renderTranscript, scrollToEnd, signedName, spoken } from './transcript';
+import { appendLine, isAtBottom, keepingPlace, lineOf, renderTranscript, scrollToEnd, signedName, spoken, type TranscriptOptions } from './transcript';
 import { wrapSelection } from './markdown';
 import { contentWords, disablePush, enablePush, pushEnabled, pushSupported, refreshPush } from '../push/client';
 import { awayCount, clearAway, showBadge } from '../push/badge';
@@ -388,6 +390,9 @@ export class App {
   private composerHint = h('span', { class: 'composer-hint' });
   /** This conversation's sealed messages go deniably, or signed. */
   private deniableBtn = h('button', { type: 'button', class: 'ghost deniable-switch', hidden: true }, 'deniable');
+  /** This conversation's fingerprint, compared or not, and the way to
+   *  compare it. */
+  private compareBtn = h('button', { type: 'button', class: 'ghost compare-switch', hidden: true });
   private attachBtn = h(
     'button',
     { class: 'ghost attach', title: 'Attach an image', ariaLabel: 'Attach an image', hidden: true },
@@ -442,6 +447,7 @@ export class App {
     onUnread: () => this.renderRail(),
     articles: () => this.articles,
     post: (params, category) => this.postNews(params, category),
+    contact: (fp) => this.contactOf()(fp),
   });
   private panes: Panes | null = null;
   /** Where the tiler draws, when it is on. Its own box inside `.panes`
@@ -1558,9 +1564,11 @@ export class App {
    *  moved there on a yes, its choice of deniable with it; not sent on a
    *  no. The user's word alone moves a conversation to another identity. */
   private async acceptIdentity(conv: Conversation, changed: string, was: string, how: 'sealed' | 'signed'): Promise<void> {
+    const compared = this.comparedWarning(conv, was);
     const yes = await ask({
-      title: how === 'sealed' ? 'Seal to another identity?' : 'Sign to another identity?',
+      title: compared ? 'Not the fingerprint you compared' : how === 'sealed' ? 'Seal to another identity?' : 'Sign to another identity?',
       body:
+        compared +
         `${conv.title} was last under the identity ${was.slice(0, 16)} here, but the server now shows ${changed.slice(0, 16)} for them, ` +
         (how === 'sealed'
           ? 'and no session with the first. Sealed to the second, only whoever holds it can read this. '
@@ -1573,6 +1581,13 @@ export class App {
     const deniable = conv.deniable ?? this.peerMemory.get(this.keyUrl, was)?.deniable;
     conv.verified = changed;
     void this.peerMemory.note(changed, this.keyUrl, { login: conv.peer.login, nick: conv.title }, { accepted: true, ...(deniable === undefined ? {} : { deniable }) });
+  }
+
+  /** Said first, where the identity a conversation is leaving is one
+   *  the user compared: that is the change comparing exists to catch. */
+  private comparedWarning(conv: Conversation, was: string): string {
+    if (!this.peerMemory.compared(was)) return '';
+    return `You compared ${contactName(contactOf(this.peerMemory, was)) ?? conv.title}'s fingerprint; this one is different. `;
   }
 
   private rosterFingerprint(conv: Conversation): string | null {
@@ -2315,8 +2330,10 @@ export class App {
     // user beyond a report or a purge here, which cannot cross the link.
     const mayKick = !conn.classic && !u.system && (conn.moderator || this.store.self?.admin === true);
     const local = !conn.classic && !u.system && !u.remote;
+    const fp = u.identity?.fingerprint && fingerprintFromString(u.identity.fingerprint) ? u.identity.fingerprint : null;
     const choice = await choose(u.nick, [
       ['message', 'Send a private message'],
+      ...(fp ? [['compare', 'Compare fingerprint'] as ['compare', string]] : []),
       ...(local ? [['report', 'Report to the moderators…'] as ['report', string]] : []),
       ...(mayKick ? [['kick', 'Disconnect…', true] as ['kick', string, boolean]] : []),
       ...(local && conn.moderator ? [['purge', 'Purge recent output…', true] as ['purge', string, boolean]] : []),
@@ -2325,7 +2342,8 @@ export class App {
       if (choice === 'message') {
         this.select(this.store.openPm({ uid: u.uid, nick: u.nick }).id);
         this.showRoster(false);
-      } else if (choice === 'report') await this.reportPerson(u.nick, { uid: u.uid });
+      } else if (choice === 'compare') await this.openContacts({ fingerprint: fp!, nick: u.nick });
+      else if (choice === 'report') await this.reportPerson(u.nick, { uid: u.uid });
       else if (choice === 'kick') await this.kick(u);
       else if (choice === 'purge') await this.purge(u.nick, { uid: u.uid });
     } catch (e) {
@@ -2704,7 +2722,7 @@ export class App {
       else appendLine(this.transcript, line, conv, this.store, this.images, this.transcriptOptions());
       const mine = line.from?.uid !== undefined && line.from.uid === this.store.self?.uid;
       if (fresh && !mine && !this.store.covered) {
-        this.heard.append(h('p', {}, spoken(line)));
+        this.heard.append(h('p', {}, spoken(line, this.contactOf())));
         while (this.heard.childElementCount > 20) this.heard.firstElementChild?.remove();
       }
     }
@@ -2729,6 +2747,7 @@ export class App {
       kind: 'system',
       local: true,
       text:
+        this.comparedWarning(conv, was) +
         `${conv.title} was last seen here under the identity ${was.slice(0, 16)}, but that message is under ${fp.slice(0, 16)}. ` +
         'Nothing is sealed or signed to the second unless you agree to it when you next send one. If you did not expect a new key, check it with them another way.',
     });
@@ -2965,8 +2984,37 @@ export class App {
     this.drawnRevision = this.store.revision;
   }
 
-  private transcriptOptions(): { markdown: boolean; moderator: boolean } {
-    return { markdown: this.markdown, moderator: this.conn?.moderator ?? false };
+  private transcriptOptions(): TranscriptOptions {
+    return { markdown: this.markdown, moderator: this.conn?.moderator ?? false, contact: this.contactOf() };
+  }
+
+  private contactOf(): ContactOf {
+    return contactLookup(this.peerMemory, this.proved);
+  }
+
+  /** The fingerprint a conversation is under, or with none known, the
+   *  one its row shows. */
+  private conversationFingerprint(conv: Conversation): string | null {
+    return this.verifiedUnder(conv) ?? this.rosterFingerprint(conv);
+  }
+
+  /** Contacts, or the one to compare with someone, read afresh so what
+   *  another tab marked or forgot shows. */
+  private async openContacts(only?: { fingerprint: string; nick: string }): Promise<void> {
+    await this.peerMemory.load().catch(() => {});
+    const self = this.proved ?? (await getActiveDevice().catch(() => null))?.fingerprint ?? null;
+    const fp = only && canonicalFingerprint(only.fingerprint);
+    openContacts(
+      {
+        memory: this.peerMemory,
+        self,
+        changed: () => {
+          keepingPlace(this.transcript, () => this.renderTranscript());
+          this.renderComposerHint();
+        },
+      },
+      only && fp ? { ...only, fingerprint: fp } : undefined,
+    );
   }
 
   private renderComposerHint(): void {
@@ -2993,6 +3041,17 @@ export class App {
             ? 'private message — sealed deniably'
             : 'private message';
     this.composerHint.classList.toggle('warn', !!peer && transport !== 'encrypted');
+    const shown = pm ? this.conversationFingerprint(conv) : null;
+    const fp = shown && canonicalFingerprint(shown);
+    this.compareBtn.hidden = !fp;
+    if (pm && fp) {
+      const compared = this.peerMemory.compared(fp);
+      this.compareBtn.textContent = compared ? 'compared' : 'not compared';
+      this.compareBtn.ariaLabel = `Compare fingerprints with ${conv.title}: ${this.compareBtn.textContent}`;
+      this.compareBtn.title = compared
+        ? `You compared ${conv.title}'s fingerprint out of band. Click to see it.`
+        : `You have not compared ${conv.title}'s fingerprint out of band. Click to compare it.`;
+    }
     this.deniableBtn.hidden = !pm || !(this.conn instanceof Connection && this.conn.sealing && this.sealPms);
     this.deniableBtn.setAttribute('aria-pressed', String(deniable));
     this.deniableBtn.title = deniable
@@ -3127,7 +3186,10 @@ export class App {
     const settingsBtn = h('button', { class: 'ghost', title: 'Theme, markdown, video and debugging' }, 'Settings');
     settingsBtn.onclick = () => this.openSettings();
 
-    this.extras.append(this.notifyBtn, installButton(), identityBtn, settingsBtn);
+    const contactsBtn = h('button', { class: 'ghost', title: 'Who you have messaged under a key, and their fingerprints to compare' }, 'Contacts');
+    contactsBtn.onclick = () => void this.openContacts();
+
+    this.extras.append(this.notifyBtn, installButton(), identityBtn, contactsBtn, settingsBtn);
 
     // On a phone the rail is a drawer from the left, and ☰ opens it.
     // Anything picked in it — a conversation, a reader, a button at its
@@ -3195,6 +3257,11 @@ export class App {
       void chooseDeniable(conv, this.peerMemory, this.keyUrl, !this.deniable(conv));
       this.renderRail();
       this.renderComposerHint();
+    };
+    this.compareBtn.onclick = () => {
+      const conv = this.store.conversation(this.store.active);
+      const fp = conv?.kind === 'pm' ? this.conversationFingerprint(conv) : null;
+      if (fp) void this.openContacts({ fingerprint: fp, nick: conv!.title });
     };
     this.filePicker.onchange = () => {
       const file = this.filePicker.files?.[0];
@@ -3269,7 +3336,7 @@ export class App {
       // composer is one row of controls, and an attachment is a thing
       // already sent to the server that the next line will carry.
       this.attachChip,
-      h('div', { class: 'composer' }, this.attachBtn, this.composer, this.deniableBtn, this.composerHint, this.filePicker),
+      h('div', { class: 'composer' }, this.attachBtn, this.composer, this.compareBtn, this.deniableBtn, this.composerHint, this.filePicker),
     );
 
     this.shell.append(

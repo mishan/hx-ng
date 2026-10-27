@@ -15,6 +15,7 @@
  */
 
 import { lineReport } from '../moderation';
+import type { LineSignature } from '../signing';
 import { continuesRun, type Conversation, type Line } from '../state';
 import type { Store } from '../state';
 import { clock, fill, h, linkify } from './dom';
@@ -171,11 +172,12 @@ function chatLine(
   // whoever reads them; what stays literal is this client's own notices
   // and status lines, which are drawn in `eventLine`.
   const body = opts.markdown ? chatNodes(line.text) : { nodes: linkify(line.text), block: false };
+  const who = speaker(line);
 
   return h(
     'div',
     {
-      class: `line chat${sameSpeaker ? ' cont' : ''}${me ? ' mine' : ''}${line.queued ? ' queued' : ''}`,
+      class: `line chat${sameSpeaker ? ' cont' : ''}${me ? ' mine' : ''}${line.queued ? ' queued' : ''}${line.signature ? ` sig-${line.signature.state}` : ''}`,
       title: new Date(line.t).toLocaleString(),
     },
     h('span', { class: 'time' }, stamp(line, prev)),
@@ -191,10 +193,10 @@ function chatLine(
     h(
       'span',
       {
-        class: 'name',
-        title: from?.login ?? (from?.uid !== undefined ? `uid ${from.uid}` : ''),
+        class: who.signed ? 'name signer' : 'name',
+        title: who.title || (from?.login ?? (from?.uid !== undefined ? `uid ${from.uid}` : '')),
       },
-      sameSpeaker ? '' : (from?.nick ?? ''),
+      sameSpeaker ? '' : who.name,
     ),
     // A `div`, because a body may hold blocks: a quote, a code block, an
     // image. A phone runs the body on beside the nick, so one with a
@@ -207,25 +209,117 @@ function chatLine(
       // beside the text and the timestamp is already the line's own, in
       // the reader's timezone rather than in UTC.
       line.queued ? h('span', { class: 'tag', title: 'Held by the server until you came back' }, 'queued') : null,
+      ...signatureTag(line.signature),
+      sameSpeaker ? null : who.aside,
       ...body.nodes,
       // An image is a block under the text, not a word in it: a line
       // may carry one with nothing said at all, which is a picture
       // posted rather than an empty message.
+      uncovered(line),
       line.media ? mediaEl(line.media, media) : null,
     ),
   );
 }
 
+/** Whether a line carries a signature that parsed, which names it. */
+function signedBy(sig: LineSignature | undefined): sig is LineSignature {
+  return sig !== undefined && (sig.state === 'verified' || sig.state === 'elsewhere' || sig.state === 'unverified');
+}
+
+/** How much of a fingerprint names a signed line: enough that nobody
+ *  makes another key to match it. */
+const SIGNER_CHARS = 16;
+
+/** Who a line is shown as from. A signed one is named by its signer's
+ *  fingerprint (§8), whatever nick the server put on it, and the nick
+ *  goes beside the text as an aside the signature does not cover. */
+function speaker(line: Line): { name: string; title: string; signed: boolean; aside: HTMLElement | null } {
+  const sig = line.signature;
+  const nick = line.from?.nick ?? '';
+  if (!signedBy(sig)) return { name: nick, title: '', signed: false, aside: null };
+  const title = sig.signer
+    ? `Signed by ${sig.signer}${sig.home ? `, a user of ${sig.home}` : ''}`
+    : 'Signed by a key that could not be checked';
+  const aside = nick
+    ? h('span', { class: 'sig-nick', title: "The server's name for them, which the signature does not cover" }, `as ${nick}`)
+    : null;
+  return { name: sig.signer ? sig.signer.slice(0, SIGNER_CHARS) : 'unknown key', title, signed: true, aside };
+}
+
+const STATE_WORDS = {
+  verified: 'signed',
+  elsewhere: 'signed elsewhere',
+  unverified: 'unverified',
+  unsigned: 'signature expected',
+} as const;
+
+/** A line as the live region says it: by the name the transcript shows
+ *  and with its signature's state, and a bad signature's by no name. */
+export function spoken(line: Line): string {
+  const sig = line.signature;
+  if (sig?.state === 'invalid') return `Bad signature: ${line.text}`;
+  const name = speaker(line).name;
+  const state = sig ? `, ${STATE_WORDS[sig.state]}` : '';
+  return name ? `${name}${state}: ${line.text}` : line.text;
+}
+
+/** A signed time, with its date unless it is today's. */
+function signedAt(sent: number): string {
+  const t = sent * 1000;
+  const day = new Date(t).toDateString() === new Date().toDateString();
+  return day ? clock(t) : `${new Date(t).toLocaleDateString()} ${clock(t)}`;
+}
+
+/** An image rides beside a signed line, outside what was signed. */
+function uncovered(line: Line): HTMLElement | null {
+  if (!line.media || !signedBy(line.signature)) return null;
+  return h('span', { class: 'sig-note' }, 'The image is not covered by the signature.');
+}
+
+/** §8's state of a signed line, or of an unsigned one where a signature
+ *  was expected: tags that outweigh the nick beside it. */
+function signatureTag(sig: LineSignature | undefined): HTMLElement[] {
+  if (!sig) return [];
+  const by = sig.signer ? ` by ${sig.signer}` : '';
+  const at = sig.sent !== undefined ? ` ${signedAt(sig.sent)}` : '';
+  const on = sig.home ? ` on ${sig.home}` : '';
+  const [label, title] = {
+    verified: [`signed${at}${on}`, `Signed${by}.`],
+    elsewhere: [
+      `signed elsewhere${at}: ${sig.signedFor ?? 'another scope'}`,
+      `Signed${by} for ${sig.signedFor ?? 'another scope'}, so not said here.`,
+    ],
+    unverified: [`unverified${on}`, `Signed${by || ' by a key that could not be checked'}, with nothing to check it against: not shown as from this nick.`],
+    invalid: ['bad signature', 'The signature does not check: this line is not from the user named.'],
+    unsigned: ['signature expected', 'Unsigned, from someone seen to sign here: a signature may have been removed.'],
+  }[sig.state];
+  const tags = [h('span', { class: `sig sig-${sig.state}`, title }, label)];
+  if (sig.foreignKey && sig.state !== 'invalid') {
+    tags.push(
+      h(
+        'span',
+        { class: 'sig sig-foreign', title: "Checked against the key this server gave for their home server, not against this server's own" },
+        "another server's key",
+      ),
+    );
+  }
+  if (sig.sentAtAnotherTime) {
+    tags.push(h('span', { class: 'sig sig-apart', title: 'Signed long before or after this server received it' }, 'sent at another time'));
+  }
+  return tags;
+}
+
 /** Actions, notices, broadcasts and this client's own remarks all read
  *  as one column of asides rather than as chat with a strange name. */
 function eventLine(line: Line, prev: Line | undefined, media: MediaCache, opts: TranscriptOptions): HTMLElement {
-  const prefix =
-    line.kind === 'action'
-      ? `${line.from?.nick ?? ''} `
-      : line.kind === 'broadcast'
-        ? `${line.from?.nick ?? 'server'}: `
-        : '';
+  const who = line.kind === 'action' ? speaker(line) : null;
+  const prefix = line.kind === 'broadcast' ? `${line.from?.nick ?? 'server'}: ` : '';
   const text = prefix + line.text;
+  // The actor is a name, apart from the words: a bad signature strikes
+  // it, as it strikes a chat line's nick.
+  const actor = who
+    ? [h('span', { class: `actor${who.signed ? ' signer' : ''}`, title: who.title }, who.name), ' ']
+    : [];
   // GtkHx's rule: only a body somebody typed, in one voice, is read as
   // markdown. A `/me` and a broadcast are that — a person's words behind
   // a name this client puts there, and the name is left alone. A notice
@@ -238,13 +332,16 @@ function eventLine(line: Line, prev: Line | undefined, media: MediaCache, opts: 
     line.kind === 'broadcast' ? 'broadcast' : line.kind === 'deleted' ? 'deleted' : '';
   return h(
     'div',
-    { class: `line ${line.kind}`, title: new Date(line.t).toLocaleString() },
+    { class: `line ${line.kind}${line.signature ? ` sig-${line.signature.state}` : ''}`, title: new Date(line.t).toLocaleString() },
     h('span', { class: 'time' }, stamp(line, prev)),
     h('span', { class: 'gutter' }),
     h('span', { class: 'name' }, label),
     h(
       'div',
       { class: body?.block ? 'text md-blocks' : 'text' },
+      ...(who ? signatureTag(line.signature) : []),
+      ...actor,
+      who?.aside ?? null,
       // A news notice is one link to the article it is about; the shell
       // handles the click, since only it can open the reader.
       ...(line.article !== undefined
@@ -257,6 +354,7 @@ function eventLine(line: Line, prev: Line | undefined, media: MediaCache, opts: 
       // other way would leave that state with no renderer at all — and
       // would say "image removed" in two visual languages depending on
       // which kind of line it landed on.
+      who ? uncovered(line) : null,
       line.media ? mediaEl(line.media, media) : null,
     ),
   );

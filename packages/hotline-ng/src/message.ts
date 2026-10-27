@@ -32,6 +32,9 @@ import {
   CAPS,
   DEVICE_CERT_DOMAIN,
   IdentityError,
+  base64urlToBytes,
+  bytesToBase64url,
+  bytesToHex,
   decodeDeviceCert,
   fingerprintFromString,
   fingerprintToString,
@@ -714,6 +717,86 @@ export const signedChatLines: SignedKind<SignedChatLine, ChatScope, readonly [te
 export const signedArticles: SignedKind<SignedArticle, ArticleScope, readonly [subject: string, body: string]> = new Kind(
   articleSpec,
 );
+
+// --- on the wire (§4.7) -----------------------------------------------------
+
+/** A line ready to send: `chat`'s `text`, canonical, and the `guid` and
+ *  `signed` that go beside it. */
+export interface SignedChatRequest {
+  text: string;
+  guid: string;
+  signed: string;
+}
+
+/** Sign a line for `chat`. Its random `id` is the request's `guid`,
+ *  hyphenated as the server echoes it, so a retry sends this request
+ *  again, unchanged. */
+export async function signChatRequest(
+  deviceSignKey: CryptoKey,
+  line: Omit<SignedChatLine, 'id' | 'sent'>,
+  sent = Math.floor(Date.now() / 1000),
+): Promise<SignedChatRequest> {
+  const id = crypto.getRandomValues(new Uint8Array(16));
+  const text = canonicalText(line.text);
+  const whole = await signedChatLines.sign(deviceSignKey, { ...line, id, sent, text });
+  const detached = (await signedChatLines.parse(whole, sent)).detached();
+  const hex = bytesToHex(id);
+  const guid = `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+  return { text, guid, signed: bytesToBase64url(detached) };
+}
+
+/** What a reader makes of a line's `signed`: its state, and for one
+ *  that parsed, the line as signed, whose `id`, `sent` and `act` are
+ *  the signer's word rather than the server's. */
+export interface SignedChatRead {
+  outcome: SignedOutcome;
+  line: SignedChatLine | null;
+  /** A link form's id and the hash it names its certificate by, which
+   *  tell it apart before the certificate is held. */
+  link?: { id: Uint8Array; certSha256: Uint8Array };
+}
+
+/** Read a `chat` event's or a history line's `signed` beside its text
+ *  and whether it came as an action, which its `act` must say (§4.7):
+ *  its detached form, or its link form, which names `cert_sha256` in
+ *  place of `cert` and is unverified until its certificate is held. A
+ *  check this runtime cannot make is unverified, never thrown. */
+export async function readSignedChat(
+  signed: string,
+  text: string,
+  act: boolean,
+  ctx: SignedContext<ChatScope>,
+): Promise<SignedChatRead> {
+  const invalid = (error: Error): SignedChatRead => ({ outcome: { state: 'invalid', error }, line: null });
+  let bytes: Uint8Array;
+  let value: CborValue | undefined;
+  try {
+    bytes = base64urlToBytes(signed);
+  } catch (error) {
+    return invalid(error as Error);
+  }
+  try {
+    value = decodeCanonical(bytes);
+  } catch {
+    // Refused below, as a detached form.
+  }
+  try {
+    const hash = value && mapGet(value, 'cert_sha256');
+    if (value && hash) {
+      const outcome = await signedChatLines.read({ form: 'link', bytes, texts: [text] }, ctx);
+      const id = mapGet(value, 'id');
+      if (outcome.state === 'invalid' || hash.t !== 'bytes' || id?.t !== 'bytes') return { outcome, line: null };
+      if ((mapGet(value, 'act')?.v === true) !== act) return invalid(new IdentityError('bad-field', 'act'));
+      return { outcome, line: null, link: { id: id.v, certSha256: hash.v } };
+    }
+    const parsed = await signedChatLines.parseDetached(bytes, [text], ctx.at);
+    if (parsed.message.act !== act) return invalid(new IdentityError('bad-field', 'act'));
+    return { outcome: parsed.check(ctx), line: parsed.message };
+  } catch (error) {
+    if (error instanceof IdentityError || error instanceof CborError) return invalid(error);
+    return { outcome: { state: 'unverified', signer: null }, line: null };
+  }
+}
 
 // --- §8 ---------------------------------------------------------------------
 

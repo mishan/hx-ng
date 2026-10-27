@@ -328,6 +328,24 @@ describe('public chat history', () => {
     expect(s.newestHistoryId).toBe(2800);
   });
 
+  it('pages past lines it left out, and forgets them with the window they fell in', () => {
+    const s = new Store();
+    s.skipHistory([4000]);
+    expect(s.oldestHistoryId).toBe(4000);
+
+    // An older page trims the newest end: a left-out id above what is
+    // kept must not hold the catch-up cursor there.
+    s.add(LOBBY, chat(10_000, 'live', { id: 5000 }));
+    s.skipHistory([6000]);
+    s.mergeHistory(
+      Array.from({ length: 2000 }, (_, n) => chat(1_000 + n, `old ${n}`, { id: 1 + n })),
+      true,
+      'older',
+    );
+    expect(s.newestHistoryId).toBe(2000);
+    expect(s.hasHistory(6000)).toBe(false);
+  });
+
   it('keeps chat ids separate from private-mail ids and records exhaustion', () => {
     const s = new Store();
     s.mergeHistory([chat(1, 'history', { id: 7 })], false, 'older');

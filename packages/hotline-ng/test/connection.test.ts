@@ -706,3 +706,47 @@ describe('identity login', () => {
     expect(conn.state).toBe('offline');
   });
 });
+
+describe('signs', () => {
+  it.each([
+    ['echoed', 'default', 'default'],
+    ['not echoed', 'able', undefined],
+  ] as const)('says it at an identity login and on every resume, and signs only while %s', async (_, signs, echo) => {
+    server.on('login', () => ({ ok: loginOk(echo ? { signs: echo } : {}) }));
+    // Nothing for a resume to say, as when the saved session proved no
+    // device: the login says what its token's device does.
+    const conn = new Connection({ ...CREDS, identity: { getToken: async () => 'tok', signs: () => signs } }, {});
+    await conn.start();
+    expect(server.sent('login')[0]?.params.signs).toBe(signs);
+    expect(conn.signing).toBe(echo ?? null);
+
+    // A change is said on the next resume, and its echo is what counts.
+    conn.signs = 'able';
+    server.on('resume', (params) => ({ ok: { replay: 0, self: me(1, 'Alice'), ...(echo ? { signs: params.signs } : {}) } }));
+    conn.drop();
+    // The first retry's backoff.
+    await new Promise((resolve) => setTimeout(resolve, 700));
+    expect(server.sent('resume')[0]?.params.signs).toBe('able');
+    expect(conn.signing).toBe(echo ? 'able' : null);
+  });
+
+  it('says the identity login\'s own, not what a resume would have, after the resume fails', async () => {
+    await connect();
+    server.on('resume', () => ({ error: { code: 'session_expired', text: 'gone' } }));
+    const conn = new Connection({ ...CREDS, signs: 'able', identity: { getToken: async () => 'tok', signs: () => 'default' } }, {});
+    await conn.start();
+    expect(server.sent('resume')[0]?.params.signs).toBe('able');
+    expect(server.sent('login')[1]?.params.signs).toBe('default');
+    expect(conn.signs).toBe('default');
+  });
+
+  it.each([
+    ['with no certificate to sign with', {}],
+    ['logging in with a password, which proves no device', { signs: 'default' as const }],
+  ])('says nothing of signing at a login %s', async (_, over) => {
+    const conn = new Connection({ ...CREDS, ...over }, {});
+    await conn.start();
+    expect(server.sent('login')[0]?.params).not.toHaveProperty('signs');
+    expect(conn.signing).toBeNull();
+  });
+});

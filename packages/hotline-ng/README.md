@@ -243,6 +243,25 @@ sign, whose row says `signs`, or in a room that requires signing.
 `contentSha256` is what tells a message signed again from another under
 the same id (§3.6); remembering which ones were seen is the caller's.
 
+On the wire, `signChatRequest` signs a line into the `text`, `guid` and
+`signed` a `chat` request carries, and `readSignedChat` reads a `chat`
+event's or a history line's `signed` beside its text and style,
+detached or in its link form, and hands back the line as signed, whose
+`id` and `sent` are what to name and dedupe it by. A server that offers
+`chat_guid` honors `guid`, and one that offers `signed` carries the
+line. An identity login says the `signs` its `identity.signs` gives,
+every resume says `Connection.signs`, and `signing` is the server's
+echo, without which nothing may be sent signed.
+
+```ts
+// serverKey: the key pinned for this host first, as Server keys below has it.
+const conn = new Connection({ ...creds, identity: { getToken, signs: () => 'able' } });
+await conn.start();
+if (conn.hasCap(CAP_SIGNED) && conn.hasCap(CAP_CHAT_GUID) && conn.signing) {
+  await conn.chat(await signChatRequest(deviceSignKey, { cert, server: serverKey, room: 0, text }));
+}
+```
+
 ### Server keys
 
 A server key is pinned per host, and follows the server's handovers to

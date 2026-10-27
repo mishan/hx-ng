@@ -77,6 +77,10 @@ export interface RosterIdentity {
   fingerprint: string;
   /** `alice@hl.example`, or null when no attestation was accepted. */
   handle: string | null;
+  /** The client signs public lines by default (hxd-ng's
+   *  `docs/e2e-messages.md` §4.6): a hint for spotting a stripped
+   *  signature, never a promise that every line is signed. */
+  signs?: true;
 }
 
 export interface User {
@@ -112,6 +116,9 @@ export interface RemoteServer {
   tag: string;
   /** Whether this server already puts `tag` in the user's nick. */
   tagged: boolean;
+  /** The home server's key, base64url, which its users' signed lines
+   *  are scoped to; absent when it said none over the link. */
+  server_key?: string;
 }
 
 /** A reference to an avatar's canonical bytes. The id is the SHA-256 of
@@ -171,6 +178,8 @@ export interface Sender {
   uid: number;
   nick: string;
   login?: string;
+  /** A linked server's user, as their roster row's `remote`. */
+  remote?: RemoteServer;
 }
 
 // --- Inline media (docs/inline-media.md §8) -----------------------------
@@ -265,11 +274,17 @@ export type ChatStyle = 'normal' | 'action';
 
 // --- Handshake ----------------------------------------------------------
 
+/** What a session says of its signing (hxd-ng's `docs/e2e-messages.md`
+ *  §4.6): `default` when its user signs public lines by default, `able`
+ *  when only where asked or required. */
+export type Signs = 'default' | 'able';
+
 export interface LoginParams {
   login?: string;
   password?: string;
   nick?: string;
   icon?: number;
+  signs?: Signs;
 }
 
 export interface VideoLimits {
@@ -331,17 +346,22 @@ export interface LoginOk {
   accounts?: AccessSet;
   /** Present exactly when `caps` lists `files`. */
   files?: FilesConfig;
+  /** The request's `signs`, echoed when the server will carry this
+   *  session's signed lines; absent, it will not. */
+  signs?: Signs;
 }
 
 export interface ResumeParams {
   session: string;
   token: string;
   last_seq: number;
+  signs?: Signs;
 }
 
 export interface ResumeOk {
   replay: number;
   self: SelfUser;
+  signs?: Signs;
 }
 
 export interface SyncOk {
@@ -377,6 +397,17 @@ export interface ChatParams {
   /** A handle from `POST /media`, which must be this session's own
    *  upload and still live. */
   media?: string;
+  /** The client's own id for the line, honored with `chat_guid`: a
+   *  retry under it is the same line. */
+  guid?: string;
+  /** The detached form, base64url, with `signed` (`signChatRequest`). */
+  signed?: string;
+}
+
+export interface ChatOk {
+  /** The line's id, with `history`: the one its `chat` event carries,
+   *  and a retry's answer is the original's. */
+  id?: number;
 }
 
 /**
@@ -460,6 +491,9 @@ export interface HistorySender {
   /** Absent on a deleted row. */
   nick?: string;
   icon: number;
+  /** A linked server's user's signed line: the key it was checked
+   *  against, base64url, if one was. */
+  remote?: { server_key?: string };
 }
 
 /** Metadata that remains after the image bytes or handle disappear. */
@@ -479,6 +513,8 @@ export interface HistoryLine {
   style: ChatStyle;
   deleted?: boolean;
   media?: HistoryMedia;
+  /** A signed line's detached form, or its link form, base64url. */
+  signed?: string;
 }
 
 export interface HistoryParams {
@@ -1377,6 +1413,10 @@ export interface Events {
     at: number;
     /** The image this line carried, when it carried one. */
     media?: Media;
+    /** The `guid` it was sent with, on the sender's own copy alone. */
+    guid?: string;
+    /** A signed line's detached form, or its link form, base64url. */
+    signed?: string;
   };
   notice: { text: string };
   subject: { subject: string };
@@ -1498,6 +1538,8 @@ export const CAP_MEDIA = 'media';
 export const CAP_NEWS = 'news';
 export const CAP_FILES = 'files';
 export const CAP_PUSH = 'push';
+export const CAP_CHAT_GUID = 'chat_guid';
+export const CAP_SIGNED = 'signed';
 
 /**
  * `resync_required` is not a failure: the session is still alive and the
@@ -1515,6 +1557,10 @@ export const TOO_MANY_CONNECTIONS = 'too_many_connections';
 /** Fatal, unlike `rate_limited`: the `kicked` that follows is the
  *  server's, not an administrator's. */
 export const FLOODING = 'flooding';
+/** A signed line, message or article failed a check the server makes
+ *  (hxd-ng's `docs/e2e-messages.md` §4.11), among them one signed under
+ *  a server key it no longer has. */
+export const BAD_SIGNATURE = 'bad_signature';
 
 /** Human wording for the codes a person can actually act on. Anything
  *  not listed falls back to the server's own `text`, which is always

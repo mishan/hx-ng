@@ -12,6 +12,8 @@ import type {
   User,
 } from '@hotline-ng/client';
 
+import type { LineSignature } from './signing';
+
 export type LineKind =
   /** Public chat, or a private message inside a PM conversation. */
   | 'chat'
@@ -50,6 +52,9 @@ export interface Line {
   /** A news article this line announces. The transcript draws the line
    *  as a link, and following it opens the article where it sits. */
   article?: number;
+  /** A public line's signature, once read, or the mark an unsigned one
+   *  gets where a signature was expected. */
+  signature?: LineSignature;
 }
 
 export type ConvId = string;
@@ -193,6 +198,8 @@ export class Store {
   newestHistoryId?: number;
   historyExhausted = false;
   private seenHistory = new Set<number>();
+  /** Ids of lines a page carried and this client left out (`skipHistory`). */
+  private skippedHistory = new Set<number>();
   /**
    * Stored message ids this client has already placed. Mail arrives
    * twice by design — the login flush pushes `msg` events for what is
@@ -467,9 +474,27 @@ export class Store {
     if (excess <= 0) return;
     const dropped = from === 'oldest' ? lobby.lines.splice(0, excess) : lobby.lines.splice(MAX_LINES, excess);
     for (const line of dropped) if (line.id !== undefined) this.seenHistory.delete(line.id);
+    // A line left out goes with the window it fell in, or the cursor
+    // would stand on it, past lines no longer held.
+    const kept = lobby.lines.flatMap((line) => (line.id === undefined ? [] : [line.id]));
+    const [lo, hi] = [Math.min(...kept), Math.max(...kept)];
+    for (const id of this.skippedHistory) {
+      if (id >= lo && id <= hi) continue;
+      this.skippedHistory.delete(id);
+      this.seenHistory.delete(id);
+    }
     this.oldestHistoryId = undefined;
     this.newestHistoryId = undefined;
     for (const id of this.seenHistory) this.recordHistoryId(id);
+  }
+
+  /** Ids of a page's lines this client leaves out, which paging still
+   *  moves past. */
+  skipHistory(ids: readonly number[]): void {
+    for (const id of ids) {
+      this.skippedHistory.add(id);
+      this.recordHistoryId(id);
+    }
   }
 
   private recordHistoryId(id: number): void {
@@ -560,6 +585,7 @@ function blank(line: Line): string | undefined {
   line.deleted = true;
   line.text = 'Message deleted.';
   line.from = undefined;
+  line.signature = undefined;
   if (line.media) {
     const { id: _gone, ...rest } = line.media;
     line.media = { ...rest, removed: true };
@@ -594,6 +620,8 @@ export function continuesRun(prev: Line | undefined, line: Line): boolean {
     prev.from?.login === line.from?.login &&
     !!prev.local === !!line.local &&
     !!prev.queued === !!line.queued &&
+    // A signed line is named by its key, not its nick.
+    prev.signature?.signer === line.signature?.signer &&
     line.t - prev.t < RUN_GAP_MS
   );
 }

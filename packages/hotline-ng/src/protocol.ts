@@ -166,6 +166,10 @@ export interface SelfUser extends User {
    *  present only when true. The login reply carries it and the resume
    *  reply does not, so `Connection.moderator` is what to read. */
   moderator?: boolean;
+  /** This session may create, edit and archive rooms, and is shown
+   *  their gates. Present only when true; the resume reply's `self` does
+   *  not say, so `Connection.manageRooms` is what to read. */
+  manage_rooms?: true;
 }
 
 /** The `from` object on chat, msg and broadcast events: a uid and the
@@ -358,6 +362,9 @@ export interface LoginOk {
   accounts?: AccessSet;
   /** Present exactly when `caps` lists `files`. */
   files?: FilesConfig;
+  /** Present exactly when `caps` lists `rooms`: the rooms as they stood
+   *  at login, kept current only once the session is rooms-aware. */
+  rooms?: RoomsConfig;
   /** The request's `signs`, echoed when the server will carry this
    *  session's signed lines; absent, it will not. */
   signs?: Signs;
@@ -386,7 +393,8 @@ export interface SyncOk {
   users: User[];
   seq: number;
   /** As the login reply's: an `account_changed` the gap swallowed. */
-  accounts?: AccessSet;
+  accounts?: SelfAccess;
+  rooms?: SyncRooms;
 }
 
 // --- Private messages (docs/private-messages.md §7) ---------------------
@@ -578,6 +586,98 @@ export interface HistoryOk {
   /** More rows exist in the direction of this request. */
   has_more: boolean;
 }
+
+// --- Rooms (hxd-ng's docs/chat-rooms.md §7) ----------------------------
+
+/**
+ * A room as this session is shown it: in the login reply's list,
+ * `rooms`, `room_added` and `room_changed`. The lobby is never one of
+ * these; it is room 0 everywhere a `room` is taken.
+ */
+export interface Room {
+  id: number;
+  /** Drawn after a `#`, which is never part of it. */
+  name: string;
+  topic: string;
+  position: number;
+  members: number;
+  /** The newest line's id, absent without history. Not pushed: a client
+   *  badging rooms it is not in asks `rooms` again. */
+  last_id?: number;
+  /** Whether this session may send there, its ability to sign included
+   *  in a `signed` room. */
+  may_post: boolean;
+  /** Every line in it must be signed (hxd-ng's `docs/e2e-messages.md`
+   *  §4.8). Fixed when the room is made. */
+  signed?: true;
+  /** Only an encrypted connection may join or read it. */
+  secure?: true;
+  /** This room's own retention, over the server's. */
+  max_lines?: number;
+  max_days?: number;
+  /** The gates, logins and `@role`s, shown only to a manager; empty
+   *  leaves it to the access bits. */
+  read?: string[];
+  post?: string[];
+  /** To a manager, who still pages an archived room by its id. */
+  archived?: true;
+}
+
+/** The login reply's `rooms` block. */
+export interface RoomsConfig {
+  lobby: { id: 0; name: string; last_id?: number };
+  list: Room[];
+  /** How many rooms one session may be in at once. */
+  max_joined: number;
+}
+
+/** `sync`'s `rooms` block: the listing, and the rooms this session is
+ *  in with the newest line in each, to page `history` from. */
+export type SyncRooms = Omit<RoomsConfig, 'lobby'> & { joined: { id: number; last_id?: number }[] };
+
+export interface RoomsOk {
+  list: Room[];
+}
+
+export interface RoomJoinOk {
+  /** The uids in the room, this session's included. */
+  members: number[];
+  topic: string;
+  topic_by?: string;
+  /** Unix seconds. */
+  topic_at?: number;
+  last_id?: number;
+  may_post: boolean;
+  signed?: true;
+}
+
+/** `room_create`, which needs `manage_rooms`. `signed` is refused
+ *  `bad_request` by a server that carries no signed lines. No `secure`
+ *  yet: the server does not take it and drops unknown fields, so the
+ *  room would silently not be secure. */
+export interface RoomCreateParams {
+  name: string;
+  topic?: string;
+  position?: number;
+  /** Replace the gate; `[]` clears it. */
+  read?: string[];
+  post?: string[];
+  signed?: boolean;
+  /** `null` clears the room's own retention, leaving the server's. */
+  max_lines?: number | null;
+  max_days?: number | null;
+}
+
+/** `room_edit`: what is left out stays as it was. `signed` other than
+ *  the room's own is `bad_request`. */
+export type RoomEditParams = { room: number } & Partial<RoomCreateParams>;
+
+export interface RoomOk {
+  room: Room;
+}
+
+/** Why the server parted this session from a room, told to it alone. */
+export type RoomPartReason = 'access' | 'archived' | 'insecure';
 
 /** Who to block. Exactly one of the three, and `fingerprint` only
  *  unblocks: it names a block, not a person. */
@@ -1364,6 +1464,10 @@ export interface AccessSet {
   raw_bits: number[];
 }
 
+/** This session's own `AccessSet`, as `account_changed` and `sync` say
+ *  it, with the powers that are not bits. */
+export type SelfAccess = AccessSet & { manage_rooms?: true; moderator?: true };
+
 /** An account as `account_get` and the writes answer it. */
 export interface AccountInfo extends AccessSet {
   login: string;
@@ -1480,8 +1584,22 @@ export interface Events {
     /** A signed line's detached form, or its link form, base64url. */
     signed?: string;
   };
-  notice: { text: string };
-  subject: { subject: string };
+  /** `room`, with `rooms`, is never present for the lobby. */
+  notice: { text: string; room?: number };
+  subject: { subject: string; room?: number };
+  /** Someone joined a room this session is in. */
+  room_member_joined: { room: number; user: User };
+  /** Someone left a room this session is in, or this session was
+   *  parted, which alone is told `reason`. Leaving the server is
+   *  `user_parted` instead. */
+  room_member_parted: { room: number; uid: number; reason?: RoomPartReason };
+  /** A room became visible: created, unarchived, or let in to. */
+  room_added: { room: Room };
+  /** A visible room changed, `may_post` included; its topic alone only
+   *  to those not in it, who hear no `subject`. */
+  room_changed: { room: Room };
+  /** Archived, or no longer visible; a member was parted first. */
+  room_removed: { room: number };
   /** A private message. `id` is absent when nothing durable was stored
    *  — a message between live sessions on a server with no inbox, or one
    *  from a guest — and it is the handle `msg_read` takes. `at` is when
@@ -1509,7 +1627,7 @@ export interface Events {
   /** An administrator changed the account this session is logged in as;
    *  this is what it may do now. `Connection.accounts` is already
    *  updated when a handler hears it. */
-  account_changed: AccessSet;
+  account_changed: SelfAccess;
   voice_offer: { cid: number; sdp: string };
   voice_ice: { cid: number; candidate: RTCIceCandidateInit | null };
   voice_status: { cid: number; participants: VoiceParticipant[] };
@@ -1522,12 +1640,13 @@ export interface Events {
   /** A moderator redacted a public line. It keeps its id and place and
    *  loses its words; a client blanks it where it is drawn, and
    *  `history` answers it as a tombstone from now on. */
-  chat_redacted: { id: number };
+  chat_redacted: { id: number; room?: number };
   /** A moderator's purge blanked many public lines at once: each id
    *  exactly as `chat_redacted` would have, batched. A small purge is
    *  still told one `chat_redacted` per line, and how many ids one event
-   *  carries is the server's choice. */
-  chat_purged: { ids: number[] };
+   *  carries is the server's choice. One that touched rooms is told
+   *  once per room, each with that room's ids. */
+  chat_purged: { ids: number[]; room?: number };
   /** A report was filed. Moderators only. */
   report: Report;
   /** A report was closed. It reaches the reporter, with `yours` true,
@@ -1618,6 +1737,7 @@ export const CAP_FILES = 'files';
 export const CAP_PUSH = 'push';
 export const CAP_CHAT_GUID = 'chat_guid';
 export const CAP_SIGNED = 'signed';
+export const CAP_ROOMS = 'rooms';
 
 /**
  * `resync_required` is not a failure: the session is still alive and the
@@ -1705,6 +1825,17 @@ export const ERROR_TEXT: Record<string, string> = {
   no_such_account: 'There is no such account.',
   already_exists: 'That already exists.',
   invalid_login: 'A login is up to 31 letters, digits and _ - . @, not starting with a dot.',
+  // Rooms. `no_such_room` is also a room this session may not see, so
+  // it must not suggest the room was ever there.
+  no_such_room: 'There is no such room.',
+  // `voice_join` answers it too, for a private chat.
+  not_a_member: 'You are not in that room or chat.',
+  too_many_rooms: 'You are in as many rooms as this server allows. Leave one first.',
+  rooms_full: 'This server has as many rooms as it allows.',
+  signature_required: 'That room takes signed lines only.',
+  encryption_required: 'That needs an encrypted connection.',
+  // No `read_only`: a room, the file area and news all answer it, and
+  // the server's own text says which.
   server_error: 'The server had a problem with that. It has been logged.',
 };
 

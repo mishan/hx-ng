@@ -98,9 +98,16 @@ import {
   type ReportsOk,
   type ReportsParams,
   type ResumeOk,
+  type RoomCreateParams,
+  type RoomEditParams,
+  type RoomJoinOk,
+  type RoomOk,
+  type RoomsOk,
+  type SelfAccess,
   type SelfUser,
   type ServerFrame,
   type SyncOk,
+  type SyncRooms,
   type BannerInfo,
   bannerIsHeld,
   type Avatar,
@@ -211,10 +218,12 @@ interface Saved {
   grace: number | null;
   video: VideoConfig | null;
   historyId: number;
+  roomHistoryIds?: [number, number][];
   media: MediaLimits | null;
   news: NewsConfig | null;
   push?: PushConfig | null;
   moderator?: boolean;
+  manageRooms?: boolean;
   moderation?: ModerationCounts | null;
   banner?: BannerInfo | null;
   avatars?: AvatarLimits | null;
@@ -292,8 +301,10 @@ export interface ConnectionHooks {
   onState?: (state: ConnState, detail?: string) => void;
   onTrace?: (entry: TraceEntry) => void;
   /** A full roster replacement: the login snapshot, or a `sync` after
-   *  the outbox overflowed. Everything else arrives as events. */
-  onSnapshot?: (ok: { self: SelfUser; users: User[]; server: SyncOk['server'] }) => void;
+   *  the outbox overflowed. Everything else arrives as events. A `sync`
+   *  also restates the rooms, and which of them this session is in; the
+   *  login's are in `onLogin`'s reply. */
+  onSnapshot?: (ok: { self: SelfUser; users: User[]; server: SyncOk['server']; rooms?: SyncRooms }) => void;
   onLogin?: (ok: LoginOk) => void;
   /** Resume succeeded; `replay` events are about to arrive. */
   onResumed?: (replay: number) => void;
@@ -311,9 +322,10 @@ export interface ConnectionHooks {
    * on `id` rather than appending blindly.
    */
   onMissedMail?: (ok: InboxOk) => void;
-  /** Public-chat pages recovered after an unreplayable outbox gap.
-   *  They may overlap live events already handled; deduplicate by id. */
-  onMissedHistory?: (ok: HistoryOk) => void;
+  /** Public-chat pages recovered after an unreplayable outbox gap,
+   *  with the room they are from, 0 for the lobby. They may overlap
+   *  live events already handled; deduplicate by id within a room. */
+  onMissedHistory?: (ok: HistoryOk, room: number) => void;
   /** The session is gone for good — kicked, logged out, banned, or the
    *  grace window lapsed. No further reconnection will be attempted. */
   onEnded?: (reason: string) => void;
@@ -354,6 +366,10 @@ export class Connection {
   video: VideoConfig | null = null;
   /** Highest durable public-chat id observed on an event or page. */
   lastHistoryId = 0;
+  /** The same per joined room, since one room's ids say nothing about
+   *  another's. Seeded by `roomJoin`, so a room joined before any line
+   *  is said in it is caught up from its start. */
+  roomHistoryIds = new Map<number, number>();
   /** What this server takes as an image, from the same two places.
    *  `null` means it takes none: no paperclip. */
   media: MediaLimits | null = null;
@@ -367,6 +383,10 @@ export class Connection {
   /** May this session moderate? From the login reply's `self`, and
    *  kept here because the resume reply's `self` does not say. */
   moderator = false;
+  /** May this session create, edit and archive rooms? From the login
+   *  reply's `self` and `account_changed`, and kept for a resume, whose
+   *  `self` does not say. */
+  manageRooms = false;
   /** Open reports as the login reply counted them, for a moderator on
    *  a server that keeps reports; `null` otherwise. A starting point:
    *  `report` and `report_closed` move it from there, and nothing here
@@ -433,10 +453,12 @@ export class Connection {
       this.grace = saved.grace ?? null;
       this.video = saved.video ?? null;
       this.lastHistoryId = saved.historyId ?? 0;
+      this.roomHistoryIds = new Map(saved.roomHistoryIds ?? []);
       this.media = saved.media ?? null;
       this.news = saved.news ?? null;
       this.push = saved.push ?? null;
       this.moderator = saved.moderator ?? false;
+      this.manageRooms = saved.manageRooms ?? false;
       this.moderation = saved.moderation ?? null;
       this.banner = saved.banner ?? null;
       this.avatars = saved.avatars ?? null;
@@ -583,6 +605,9 @@ export class Connection {
     this.news = ok.news ?? null;
     this.push = ok.push ?? null;
     this.moderator = ok.self.moderator === true;
+    this.manageRooms = ok.self.manage_rooms === true;
+    // A fresh session is in no room.
+    this.roomHistoryIds.clear();
     this.moderation = ok.moderation ?? null;
     this.banner = ok.banner ?? null;
     this.avatars = ok.avatars ?? null;
@@ -650,6 +675,7 @@ export class Connection {
       this.signing = this.signing && this.signs;
       this.sealing &&= this.sealed;
       const historyAfter = this.lastHistoryId;
+      const roomsAfter = new Map(this.roomHistoryIds);
       // The session lives; only the replay is unrecoverable. Take a
       // fresh snapshot and continue from the seq it reports.
       //
@@ -666,7 +692,7 @@ export class Connection {
       this.retry = 0;
       this.setState('online');
       await this.pullMissedMail();
-      void this.pullMissedHistory(historyAfter);
+      void this.pullMissedRooms(historyAfter, roomsAfter, ok.rooms?.joined ?? []);
       return true;
     }
   }
@@ -708,14 +734,14 @@ export class Connection {
    *  captured when `resync_required` arrives: live chat can continue
    *  while `sync` and these pages are in flight, and using the moving
    *  highest id would skip the missing range. */
-  private async pullMissedHistory(after: number): Promise<void> {
-    if (!this.hooks.onMissedHistory || after === 0) return;
+  private async pullMissedHistory(after: number, room = 0): Promise<void> {
+    if (!this.hooks.onMissedHistory || (after === 0 && room === 0)) return;
     let cursor = after;
     let refusals = 0;
     for (let fetched = 0; fetched < HISTORY_CATCHUP_PAGES; ) {
       let page: HistoryOk;
       try {
-        page = await this.history({ after: cursor, limit: 200 });
+        page = await this.history({ after: cursor, limit: 200, ...(room ? { room } : {}) });
       } catch (e) {
         // `rate_limited` is the server pacing this loop, not the end of
         // the log — the spec says back off and ask again, and taking it
@@ -730,7 +756,7 @@ export class Connection {
       }
       refusals = 0;
       fetched++;
-      this.hooks.onMissedHistory(page);
+      this.hooks.onMissedHistory(page, room);
       const next = page.lines.at(-1)?.id;
       if (!page.has_more || next === undefined || next <= cursor) return;
       cursor = next;
@@ -738,20 +764,46 @@ export class Connection {
     this.trace('in', 'missed-history-stopped', `gap still open at ${cursor}`, true);
   }
 
+  /** The lobby, then each joined room `sync` says is past the cursor
+   *  this session had for it. A room with no cursor was joined where
+   *  this record was not kept, and is the caller's to page; `snapshot`
+   *  has given it one from here on. */
+  private async pullMissedRooms(
+    lobby: number,
+    cursors: Map<number, number>,
+    joined: { id: number; last_id?: number }[],
+  ): Promise<void> {
+    await this.pullMissedHistory(lobby);
+    for (const { id, last_id } of joined) {
+      const after = cursors.get(id);
+      if (after !== undefined && last_id !== undefined && last_id > after) await this.pullMissedHistory(after, id);
+    }
+  }
+
   /** `sync`: the roster and server info, without disturbing the session. */
   private async snapshot(): Promise<SyncOk> {
     const ok = await this.request<SyncOk>('sync', {});
     this.gotSnapshot = true;
     if (ok.accounts) this.adoptAccess(ok.accounts);
-    if (this.self) this.hooks.onSnapshot?.({ self: this.self, users: ok.users, server: ok.server });
+    if (ok.rooms) {
+      // The server's word on which rooms this session is in. A room new
+      // to the record starts at its newest line: what came before is the
+      // caller's to page, and later gaps are covered.
+      const joined = new Map(ok.rooms.joined.map((r) => [r.id, r.last_id ?? 0]));
+      for (const id of this.roomHistoryIds.keys()) if (!joined.has(id)) this.roomHistoryIds.delete(id);
+      for (const [id, last] of joined) if (!this.roomHistoryIds.has(id)) this.roomHistoryIds.set(id, last);
+    }
+    if (this.self) this.hooks.onSnapshot?.({ self: this.self, users: ok.users, server: ok.server, rooms: ok.rooms });
     return ok;
   }
 
   /** What this session's account may do now. The `files` block's `may`
    *  is some of the same bits, and the server judges each change by them
    *  as they are now, not as they were at login. */
-  private adoptAccess(set: AccessSet): void {
+  private adoptAccess(set: SelfAccess): void {
     this.accounts = set;
+    this.manageRooms = set.manage_rooms === true;
+    this.moderator = set.moderator === true;
     if (this.files?.writable) {
       this.files = { ...this.files, may: FILES_ACTS.filter((act) => set.access.includes(act)) };
     }
@@ -868,7 +920,7 @@ export class Connection {
   async history(params: HistoryParams = {}): Promise<HistoryOk> {
     const page = await this.request<HistoryOk>('history', params);
     let advanced = false;
-    for (const line of page.lines) advanced = this.noteHistoryId(line.id) || advanced;
+    for (const line of page.lines) advanced = this.noteHistoryId(line.id, params.room) || advanced;
     if (advanced) this.persist();
     return page;
   }
@@ -1321,6 +1373,59 @@ export class Connection {
     return this.request<BlocksOk>('blocks', {});
   }
 
+  // --- rooms (hxd-ng's docs/chat-rooms.md §7) ---------------------------
+  //
+  // A session hears no `room_*` event until it sends one of these, or a
+  // `chat` or `history` naming a room: that is what tells the server it
+  // knows rooms exist. `roomTopic` of the lobby alone does not. So a
+  // client that wants the login reply's list kept current asks `rooms()`
+  // once, and one that never asks sees the protocol as it was before.
+  // `chat` and `history` take a `room` of their own.
+
+  rooms(): Promise<RoomsOk> {
+    return this.request<RoomsOk>('rooms', {});
+  }
+
+  /** Join a room. Joining one already joined answers as the first join
+   *  did; what a client rejoins after a fresh login is its own to keep. */
+  async roomJoin(room: number): Promise<RoomJoinOk> {
+    const ok = await this.request<RoomJoinOk>('room_join', { room });
+    if (!this.roomHistoryIds.has(room)) {
+      this.roomHistoryIds.set(room, ok.last_id ?? 0);
+      this.persist();
+    }
+    return ok;
+  }
+
+  async roomPart(room: number): Promise<Record<string, never>> {
+    const ok = await this.request<Record<string, never>>('room_part', { room });
+    this.roomHistoryIds.delete(room);
+    this.persist();
+    return ok;
+  }
+
+  /** Set a room's topic, or with room 0 the lobby's subject. */
+  roomTopic(room: number, topic: string): Promise<Record<string, never>> {
+    return this.request('room_topic', { room, topic });
+  }
+
+  roomCreate(params: RoomCreateParams): Promise<RoomOk> {
+    return this.request<RoomOk>('room_create', params);
+  }
+
+  roomEdit(params: RoomEditParams): Promise<RoomOk> {
+    return this.request<RoomOk>('room_edit', params);
+  }
+
+  /** Part its members and hide it; its log stays, under retention. */
+  roomArchive(room: number): Promise<Record<string, never>> {
+    return this.request('room_archive', { room });
+  }
+
+  roomUnarchive(room: number): Promise<Record<string, never>> {
+    return this.request('room_unarchive', { room });
+  }
+
   // --- news (hxd-ng's docs/news.md §9) ----------------------------------
   //
   // Thin on purpose: every one of these is one request and its reply.
@@ -1560,10 +1665,14 @@ export class Connection {
     // resume able to pick up exactly where we left off.
     this.seq = frame.seq;
     if (frame.ev === 'chat') {
-      const id = (frame.data as { id?: unknown } | null)?.id;
-      if (typeof id === 'number') this.noteHistoryId(id);
+      const { id, room } = (frame.data ?? {}) as { id?: unknown; room?: unknown };
+      if (typeof id === 'number') this.noteHistoryId(id, typeof room === 'number' ? room : 0);
     }
-    if (frame.ev === 'account_changed') this.adoptAccess(frame.data as AccessSet);
+    if (frame.ev === 'room_member_parted') {
+      const { room, uid } = frame.data as Events['room_member_parted'];
+      if (uid === this.self?.uid) this.roomHistoryIds.delete(room);
+    }
+    if (frame.ev === 'account_changed') this.adoptAccess(frame.data as SelfAccess);
     this.persist();
     const set = this.handlers.get(frame.ev);
     if (!set) return; // unknown `ev` values are ignored, per spec
@@ -1590,24 +1699,32 @@ export class Connection {
       grace: this.grace,
       video: this.video,
       historyId: this.lastHistoryId,
+      roomHistoryIds: [...this.roomHistoryIds],
       media: this.media,
       banner: this.banner,
       avatars: this.avatars,
       news: this.news,
       push: this.push,
       moderator: this.moderator,
+      manageRooms: this.manageRooms,
       moderation: this.moderation,
       accounts: this.accounts,
       files: this.files,
     });
   }
 
-  private noteHistoryId(id: number): boolean {
-    if (Number.isSafeInteger(id) && id > this.lastHistoryId) {
-      this.lastHistoryId = id;
+  private noteHistoryId(id: number, room = 0): boolean {
+    if (!Number.isSafeInteger(id)) return false;
+    if (room) {
+      // Only a joined room's, so the record stays as small as the joins.
+      const seen = this.roomHistoryIds.get(room);
+      if (seen === undefined || id <= seen) return false;
+      this.roomHistoryIds.set(room, id);
       return true;
     }
-    return false;
+    if (id <= this.lastHistoryId) return false;
+    this.lastHistoryId = id;
+    return true;
   }
 
   private trace(dir: 'out' | 'in', kind: string, raw: string, error = false): void {

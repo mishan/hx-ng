@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { Connection, type ConnectionHooks, type Credentials } from '../src/connection';
 import { AuthError, SERVER_CHALLENGE_REFUSED } from '../src/identity';
-import type { HistoryLine, InboxOk, LoginOk, SelfUser, User } from '../src/protocol';
+import type { HistoryLine, InboxOk, LoginOk, Room, SelfUser, User } from '../src/protocol';
 
 import { installFakeWire, settle, uninstallFakeWire, type FakeServer } from './fake-wire';
 
@@ -403,6 +403,49 @@ describe('resync recovery', () => {
     expect(recovered).toEqual([11, 12, 13]);
     expect(second.lastHistoryId).toBe(20);
   });
+  it('pages each joined room from its own cursor, apart from the lobby', async () => {
+    server.on('login', () => ({ ok: loginOk({ caps: ['history', 'rooms'] }) }));
+    const first = await connect();
+    server.on('room_join', ({ room }) => ({ ok: { members: [1], topic: '', may_post: true, last_id: room === 7 ? 50 : undefined } }));
+    await first.roomJoin(7);
+    await first.roomJoin(8);
+    await first.roomJoin(9);
+    const chat = (id: number, room?: number) => ({ from: { uid: 2, nick: 'Bob' }, text: '', style: 'normal', id, at: 1, room });
+    server.event('chat', chat(10));
+    // A room's ids are its own: a higher one must not move the lobby's.
+    server.event('chat', chat(60, 7));
+    await settle();
+    expect(first.lastHistoryId).toBe(10);
+
+    server.on('resume', () => ({ error: { code: 'resync_required', text: 'gap' } }));
+    server.on('sync', () => ({
+      ok: {
+        server: { name: 'Test', subject: 'hi' },
+        users: [user(1, 'Alice')],
+        seq: 977,
+        // 8 was left unseen; 9 was empty when joined, so it is caught up
+        // from its start; 10 was joined where this record was not kept.
+        rooms: { list: [], joined: [{ id: 7, last_id: 61 }, { id: 9, last_id: 3 }, { id: 10, last_id: 5 }], max_joined: 32 },
+      },
+    }));
+    server.on('history', ({ after }) => ({ ok: { lines: [historyLine(Number(after) + 1)], has_more: false } }));
+
+    const recovered: [number, number][] = [];
+    const second = new Connection(CREDS, {
+      onMissedHistory: (page, room) => recovered.push(...page.lines.map((line): [number, number] => [room, line.id])),
+    });
+    await second.start();
+    await settle(12);
+
+    expect(server.sent('history').map((frame) => frame.params)).toEqual([
+      { after: 10, limit: 200 },
+      { after: 60, limit: 200, room: 7 },
+      { after: 0, limit: 200, room: 9 },
+    ]);
+    expect(recovered).toEqual([[0, 11], [7, 61], [9, 1]]);
+    expect(second.lastHistoryId).toBe(11);
+    expect(Object.fromEntries(second.roomHistoryIds)).toEqual({ 7: 61, 9: 1, 10: 5 });
+  });
 });
 
 describe('chat history', () => {
@@ -629,6 +672,70 @@ describe('accounts', () => {
     expect(server.sent('account_create')[0]?.params).toEqual({ login: 'eve', password: 'pw', access: ['read_chat'] });
     expect(server.sent('account_update')[0]?.params).toEqual({ login: 'eve', name: 'Eve', access: [], raw_bits: [41] });
     expect(server.sent('account_delete')[0]?.params).toEqual({ login: 'eve' });
+  });
+});
+
+describe('rooms', () => {
+  const LOUNGE: Room = { id: 2754100983, name: 'lounge', topic: 'anything goes', position: 0, members: 4, may_post: false, signed: true };
+
+  it.each([
+    { call: (c: Connection) => c.rooms(), req: 'rooms', params: {} },
+    { call: (c: Connection) => c.roomJoin(LOUNGE.id), req: 'room_join', params: { room: LOUNGE.id } },
+    { call: (c: Connection) => c.roomPart(LOUNGE.id), req: 'room_part', params: { room: LOUNGE.id } },
+    { call: (c: Connection) => c.roomTopic(0, 'hi'), req: 'room_topic', params: { room: 0, topic: 'hi' } },
+    {
+      call: (c: Connection) => c.roomCreate({ name: 'staff', post: ['@moderators'], signed: true }),
+      req: 'room_create',
+      params: { name: 'staff', post: ['@moderators'], signed: true },
+    },
+    {
+      call: (c: Connection) => c.roomEdit({ room: LOUNGE.id, read: [], max_days: null }),
+      req: 'room_edit',
+      params: { room: LOUNGE.id, read: [], max_days: null },
+    },
+    { call: (c: Connection) => c.roomArchive(LOUNGE.id), req: 'room_archive', params: { room: LOUNGE.id } },
+    { call: (c: Connection) => c.roomUnarchive(LOUNGE.id), req: 'room_unarchive', params: { room: LOUNGE.id } },
+  ])('$req sends the frame the wire specifies', async ({ call, req, params }) => {
+    const conn = await connect();
+    server.on(req, () => ({ ok: {} }));
+    await call(conn);
+    expect(server.sent(req).map((f) => f.params)).toEqual([params]);
+  });
+
+  it('keeps manage_rooms across a resume whose self does not say, and takes it and moderator from account_changed', async () => {
+    server.on('login', () => ({ ok: loginOk({ self: { ...me(1, 'Alice'), manage_rooms: true } }) }));
+    await connect();
+    server.on('resume', () => ({ ok: { replay: 0, self: me(1, 'Alice') } }));
+    server.on('sync', () => ({ ok: { server: { name: 'Test', subject: 'hi' }, users: [], seq: 0 } }));
+    const resumed = new Connection(CREDS);
+    await resumed.start();
+    expect(resumed.manageRooms).toBe(true);
+    // The powers that are not bits ride on account_changed, each said
+    // only while held.
+    server.event('account_changed', { access: [], raw_bits: [], moderator: true });
+    await settle();
+    expect([resumed.manageRooms, resumed.moderator]).toEqual([false, true]);
+  });
+
+  it('answers a join with what the server said, and refuses with its error', async () => {
+    const conn = await connect();
+    const joined = { members: [1, 2], topic: 'anything goes', topic_by: 'bob', may_post: false, signed: true };
+    server.on('room_join', ({ room }) =>
+      room === LOUNGE.id ? { ok: joined } : { error: { code: 'no_such_room', text: 'No such room.' } },
+    );
+    expect(await conn.roomJoin(LOUNGE.id)).toEqual(joined);
+    await expect(conn.roomJoin(7)).rejects.toMatchObject({ wire: { code: 'no_such_room' } });
+  });
+
+  it('forgets a room’s cursor when this session is parted from it, and not when someone else is', async () => {
+    const conn = await connect();
+    server.on('room_join', () => ({ ok: { members: [1, 2], topic: '', may_post: true, last_id: 5 } }));
+    await conn.roomJoin(7);
+    await conn.roomJoin(8);
+    server.event('room_member_parted', { room: 7, uid: 2 });
+    server.event('room_member_parted', { room: 8, uid: 1, reason: 'archived' });
+    await settle();
+    expect(Object.fromEntries(conn.roomHistoryIds)).toEqual({ 7: 5 });
   });
 });
 

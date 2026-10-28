@@ -8,19 +8,49 @@
  * read-only, since the server refuses either as `outranked`. The server
  * also ranks accounts by settings of their files this client cannot see;
  * an account it refuses for those is shown read-only from then on.
+ *
+ * On a server with roles, what the editor changes is an account's roles
+ * and its own keys over them, and each bit says which of the two it
+ * comes from. The role manager is reached from the head.
  */
 
-import { errorText, WireFailure, type AccountInfo } from '@hotline-ng/client';
+import { errorText, WireFailure, type AccountInfo, type Role, type RoleListOk } from '@hotline-ng/client';
 
-import { ACCESS_GROUPS, draftOf, editParams, grantable, powers, toggle, unknownNames, type Draft } from '../accounts';
+import {
+  ACCESS_GROUPS,
+  draftOf,
+  editParams,
+  gives,
+  grantable,
+  inherited,
+  isOn,
+  mayGive,
+  powers,
+  source,
+  toggle,
+  toggleOwn,
+  unknownNames,
+  type Draft,
+  type Source,
+} from '../accounts';
 import type { Session } from '../session';
 import { ask } from './ask';
 import { h } from './dom';
+import { RolesView } from './roles';
 import { Sight } from './sight';
 
 function problem(e: unknown): string {
   return e instanceof WireFailure ? errorText(e.wire) : e instanceof Error ? e.message : String(e);
 }
+
+const SOURCE: Record<Source, string> = {
+  role: 'from a role',
+  inherited: '',
+  granted: 'granted here',
+  denied: 'denied here',
+  follows: 'with Read chat',
+  off: '',
+};
 
 const isOutranked = (e: unknown) => e instanceof WireFailure && e.wire.code === 'outranked';
 
@@ -48,6 +78,15 @@ export class AccountsView {
    *  after another began is for a view that has moved on. */
   private generation = 0;
   private sight = new Sight();
+  /** What each role grants, for showing where an account's bits come
+   *  from; `null` without a list to read it from. */
+  private roleList: Role[] | null = null;
+  private rolesAsked = 0;
+  private roles = new RolesView(
+    () => this.connection(),
+    () => this.fetchRoles(),
+  );
+  private mode: 'accounts' | 'roles' = 'accounts';
 
   constructor(private connection: () => Session | null) {}
 
@@ -59,6 +98,13 @@ export class AccountsView {
   /** On screen or not, without touching `hidden`. See `NewsView.shown`. */
   shown(on: boolean): void {
     if (this.sight.set(on)) void this.load();
+    this.roles.shown(on && this.mode === 'roles');
+  }
+
+  /** `roles_changed`: a role was made, deleted or shown differently. */
+  rolesChanged(): void {
+    if (this.mode === 'roles') this.roles.changed();
+    else if (this.sight.on) void this.loadRoles();
   }
 
   reset(): void {
@@ -72,20 +118,71 @@ export class AccountsView {
     this.above.clear();
     this.writes++;
     this.busy = false;
+    this.roleList = null;
+    this.rolesAsked++;
+    this.roles.reset();
+    this.mode = 'accounts';
     this.el.replaceChildren();
   }
 
   /** What this session may do changed: draw again with it, and fetch the
    *  list if it may read one now and has none. */
   refresh(): void {
+    if (this.mode === 'roles' && !this.rolesOffered()) this.setMode('accounts');
     if (this.sight.on && !this.list.length && powers(this.connection()?.accounts ?? null).read) void this.load();
     else this.render();
+    this.roles.refresh();
+  }
+
+  private rolesOffered(): boolean {
+    const conn = this.connection();
+    return !!conn?.roles && powers(conn.accounts).read;
+  }
+
+  private setMode(mode: 'accounts' | 'roles'): void {
+    this.mode = mode;
+    this.roles.shown(this.sight.on && mode === 'roles');
+    this.render();
+  }
+
+  /** Every fetch of the role list, the manager's too, so the newest
+   *  answer is the one kept. Its own count rather than `generation`: an
+   *  editor open meanwhile wants it as much as the one that asked. A
+   *  failure keeps the list there was. */
+  private async fetchRoles(): Promise<RoleListOk['roles']> {
+    const conn = this.connection();
+    if (!conn) throw new Error('Not connected.');
+    const asked = ++this.rolesAsked;
+    const { roles } = await conn.roleList();
+    if (asked === this.rolesAsked) this.roleList = roles;
+    return roles;
+  }
+
+  /** Drawn after, list or not: `conn.roles` may have new titles. A list
+   *  refused for now is asked for again when the server says, while an
+   *  editor waits on it. */
+  private async loadRoles(): Promise<void> {
+    const asked = this.rolesAsked;
+    if (this.rolesOffered()) {
+      try {
+        await this.fetchRoles();
+      } catch (e) {
+        const wait = e instanceof WireFailure ? e.wire.retry_after : undefined;
+        if (wait !== undefined) {
+          setTimeout(() => {
+            if (this.rolesAsked === asked + 1 && this.draft?.own && !this.roleList) void this.loadRoles();
+          }, wait * 1000);
+        }
+      }
+    }
+    if (this.sight.on) this.render();
   }
 
   private async load(): Promise<void> {
     const conn = this.connection();
     if (!conn) return;
     const generation = ++this.generation;
+    if (this.mode === 'accounts') void this.loadRoles();
     try {
       const list = powers(conn.accounts).read ? (await conn.accountList()).accounts : [];
       if (generation !== this.generation) return;
@@ -104,7 +201,11 @@ export class AccountsView {
     const generation = ++this.generation;
     this.error = this.notice = null;
     try {
-      const { account } = await conn.accountGet(login);
+      // The list fresh with the account it is read against.
+      const [{ account }] = await Promise.all([
+        conn.accountGet(login),
+        this.rolesOffered() ? this.fetchRoles().catch(() => null) : null,
+      ]);
       if (generation !== this.generation) return;
       this.edit(account);
       this.el.querySelector('.accounts-editor')?.scrollIntoView({ block: 'nearest' });
@@ -117,14 +218,15 @@ export class AccountsView {
 
   private edit(account: AccountInfo | null): void {
     this.open = account;
-    this.draft = draftOf(account);
+    this.draft = draftOf(account, !!this.connection()?.roles);
     this.render();
   }
 
   private async save(): Promise<void> {
     const conn = this.connection();
     if (!conn || !this.draft || this.busy) return;
-    const params = editParams(this.open, this.draft);
+    const draft = this.draft;
+    const params = editParams(this.open, draft);
     if (!params) {
       this.notice = 'Nothing has changed.';
       return this.render();
@@ -148,7 +250,7 @@ export class AccountsView {
     } catch (e) {
       if (write === this.writes) this.busy = false;
       if (generation !== this.generation) return this.render();
-      if (existing && isOutranked(e)) {
+      if (existing && isOutranked(e) && !gives(existing, draft)) {
         this.above.add(existing.login);
         // Shown as it is, not as it was asked to be.
         this.draft = draftOf(existing);
@@ -196,12 +298,25 @@ export class AccountsView {
     const focused = (document.activeElement as HTMLElement | null)?.dataset?.key;
     const conn = this.connection();
     const may = powers(conn?.accounts ?? null);
-    const add = h('button', { class: 'ghost', disabled: !may.create, dataset: { key: 'new' } }, 'New account');
-    add.onclick = () => {
-      this.generation++;
-      this.error = this.notice = null;
-      this.edit(null);
-    };
+    const add =
+      this.mode === 'roles'
+        ? this.roles.addButton()
+        : h('button', { class: 'ghost', disabled: !may.create, dataset: { key: 'new' } }, 'New account');
+    if (this.mode === 'accounts' && add) {
+      add.onclick = () => {
+        this.generation++;
+        this.error = this.notice = null;
+        this.edit(null);
+        if (!this.roleList) void this.loadRoles();
+      };
+    }
+    const roles = this.rolesOffered()
+      ? h('button', { class: `ghost${this.mode === 'roles' ? ' on' : ''}`, dataset: { key: 'roles' } }, 'Roles')
+      : null;
+    if (roles) {
+      roles.setAttribute('aria-pressed', String(this.mode === 'roles'));
+      roles.onclick = () => this.setMode(this.mode === 'roles' ? 'accounts' : 'roles');
+    }
     const rows = this.list.map((a) => {
       const on = this.open?.login === a.login;
       const b = h(
@@ -214,13 +329,16 @@ export class AccountsView {
       b.onclick = () => void this.pick(a.login);
       return b;
     });
-    const head = h('div', { class: 'mod-head' }, h('h2', {}, 'Accounts'), add);
-    const body = h(
-      'div',
-      { class: 'accounts-body' },
-      may.read ? h('div', { class: 'accounts-list' }, ...rows) : null,
-      this.draft ? this.editor(this.draft) : null,
-    );
+    const head = h('div', { class: 'mod-head' }, h('h2', {}, this.mode === 'roles' ? 'Roles' : 'Accounts'), add, roles);
+    const body =
+      this.mode === 'roles'
+        ? this.roles.el
+        : h(
+            'div',
+            { class: 'accounts-body' },
+            may.read ? h('div', { class: 'accounts-list' }, ...rows) : null,
+            this.draft ? this.editor(this.draft) : null,
+          );
     if (!this.el.firstChild) this.el.append(head, this.errorEl, this.noticeEl, body);
     else {
       this.el.firstElementChild!.replaceWith(head);
@@ -230,6 +348,8 @@ export class AccountsView {
     // said again.
     if (this.errorEl.textContent !== (this.error ?? '')) this.errorEl.textContent = this.error ?? '';
     if (this.noticeEl.textContent !== (this.notice ?? '')) this.noticeEl.textContent = this.notice ?? '';
+    // The manager says its own.
+    this.errorEl.hidden = this.noticeEl.hidden = this.mode === 'roles';
     if (focused) {
       this.el.querySelector<HTMLElement>(`[data-key="${CSS.escape(focused)}"]`)?.focus();
       // Its button went with what it acted on, as Delete does.
@@ -285,6 +405,8 @@ export class AccountsView {
           return h('label', { class: 'ask-check' }, box, ' Remove the password');
         })()
       : null;
+    const own = draft.own;
+    const from = own ? inherited(own, this.roleList, account) : null;
     const group = (title: string, bits: [string, string][]) =>
       h(
         'fieldset',
@@ -292,25 +414,68 @@ export class AccountsView {
         h('legend', {}, title),
         ...bits.map(([name, label]) => {
           const yours = grantable(mine, name);
+          const state = own && from ? source(own, name, from) : null;
           const box = h('input', {
             type: 'checkbox',
-            checked: draft.access.has(name),
+            checked: state ? isOn(state) : draft.access.has(name),
             disabled: !writable || !yours,
             dataset: { key: `bit:${name}` },
           });
           box.onchange = () => {
-            toggle(draft, name, box.checked, mine);
+            if (own && from) toggleOwn(own, name, box.checked, from, account, mine);
+            else toggle(draft, name, box.checked, mine);
             this.render();
           };
-          return h(
+          const row = h(
             'label',
             { class: 'ask-check', title: yours ? name : `${name}: you do not hold this, so you cannot give it` },
             box,
             ` ${label}`,
             yours ? null : h('span', { class: 'sr-only' }, ': you do not hold this, so you cannot give it'),
           );
+          if (!state || !SOURCE[state]) return row;
+          // Beside the label rather than in it, so the box keeps its name.
+          const note = h('span', { class: 'muted', id: `bit-source-${name}` }, SOURCE[state]);
+          box.setAttribute('aria-describedby', note.id);
+          return h('span', { class: 'accounts-bit' }, row, note);
         }),
       );
+    // `everyone` is every account's, and not one an account can be given.
+    const shown = (this.connection()?.roles?.list ?? []).filter((r) => r.name !== 'everyone');
+    const named: [string, string][] = [
+      ...shown.map((r): [string, string] => [r.name, r.title]),
+      ...[...(own?.roles ?? [])].filter((n) => !shown.some((r) => r.name === n)).map((n): [string, string] => [n, n]),
+    ];
+    const roles =
+      own && named.length
+        ? h(
+            'fieldset',
+            { class: 'accounts-group' },
+            h('legend', {}, 'Roles'),
+            ...named.map(([name, title]) => {
+              const yours = own.roles.has(name) || mayGive(mine, this.roleList?.find((r) => r.name === name));
+              const box = h('input', {
+                type: 'checkbox',
+                checked: own.roles.has(name),
+                // Changed blind, what a role gives could not be shown.
+                disabled: !writable || !yours || !from?.sure,
+                dataset: { key: `holds:${name}` },
+              });
+              box.onchange = () => {
+                if (box.checked) own.roles.add(name);
+                else own.roles.delete(name);
+                this.render();
+              };
+              return h(
+                'label',
+                { class: 'ask-check', title: yours ? name : `${name}: it grants what you do not hold` },
+                box,
+                ` ${title}`,
+                yours ? null : h('span', { class: 'sr-only' }, ': it grants what you do not hold, so you cannot give it'),
+              );
+            }),
+          )
+        : null;
     const other = account ? unknownNames(account) : [];
     // Busy, the buttons stay focusable — the one pressed keeps the focus
     // through the redraw — and say they are unavailable; `save` and
@@ -347,6 +512,10 @@ export class AccountsView {
       h('label', {}, 'Password ', password),
       clear,
       account?.identity ? h('p', { class: 'muted' }, 'Linked to an identity key.') : null,
+      roles,
+      from && !from.sure
+        ? h('p', { class: 'muted' }, 'Without the role list, which privileges come from roles is not shown, and roles cannot be changed.')
+        : null,
       ...ACCESS_GROUPS.map((g) => group(g.title, g.bits)),
       other.length || account?.raw_bits.length
         ? h('p', { class: 'muted' }, `Also holds, kept as they are: ${[...other, ...(account?.raw_bits ?? []).map(String)].join(', ')}`)

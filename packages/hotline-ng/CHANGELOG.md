@@ -3,6 +3,32 @@
 While the version is 0.x, a minor version may break callers; each entry
 says how.
 
+## Unreleased
+
+### Changed
+
+- `onSnapshot` also fires when the server says `roster_stale`, with
+  `stale: true`: only the roster is new, so a caller that resets more
+  on a snapshot can skip it.
+- `outranked` reads "That account or role may do…".
+
+### Added
+
+- Roles (hxd-ng's `docs/roles.md` §7): `Connection.roles`, a
+  `RolesConfig` from the login reply and `sync`, kept current by
+  `roles_changed` and `account_changed` and saved with the session;
+  `User.roles`; `roleList`, `roleGet`, and a role manager's
+  `roleCreate`, `roleUpdate`, `roleDelete`, with the types `RoleShown`,
+  `Role`, `RoleListOk`, `RoleGetOk`, `RoleOk` and `RoleEditParams`;
+  `SelfAccess.manage_roles`; the codes `no_such_role` and
+  `role_in_use`.
+- `roles_changed` and `roster_stale` in `Events`. `roster_stale` is
+  answered with a `sync`, asked again after `rate_limited` and at the
+  next resume if the socket drops first.
+- `AccountInfo` carries an account's `roles` and its own keys, and
+  `AccountEditParams` takes `roles` and `grant`, `deny`, `raw_grant`,
+  `raw_deny` in place of `access`.
+
 ## 0.2.0
 
 ### Changed

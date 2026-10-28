@@ -98,6 +98,11 @@ import {
   type ReportsOk,
   type ReportsParams,
   type ResumeOk,
+  type RoleEditParams,
+  type RoleGetOk,
+  type RoleListOk,
+  type RoleOk,
+  type RolesConfig,
   type RoomCreateParams,
   type RoomEditParams,
   type RoomJoinOk,
@@ -262,6 +267,7 @@ interface Saved {
   banner?: BannerInfo | null;
   avatars?: AvatarLimits | null;
   accounts?: AccessSet | null;
+  roles?: RolesConfig | null;
   files?: FilesConfig | null;
 }
 
@@ -332,10 +338,18 @@ export interface ConnectionHooks {
   onState?: (state: ConnState, detail?: string) => void;
   onTrace?: (entry: TraceEntry) => void;
   /** A full roster replacement: the login snapshot, or a `sync` after
-   *  the outbox overflowed. Everything else arrives as events. A `sync`
+   *  the outbox overflowed. Everything else arrives as events. `stale`
+   *  marks one taken because the server said `roster_stale`: only the
+   *  roster is new, and nothing in between was lost. A `sync`
    *  also restates the rooms, and which of them this session is in; the
    *  login's are in `onLogin`'s reply. */
-  onSnapshot?: (ok: { self: SelfUser; users: User[]; server: SyncOk['server']; rooms?: SyncRooms }) => void;
+  onSnapshot?: (ok: {
+    self: SelfUser;
+    users: User[];
+    server: SyncOk['server'];
+    rooms?: SyncRooms;
+    stale?: true;
+  }) => void;
   onLogin?: (ok: LoginOk) => void;
   /** Resume succeeded; `replay` events are about to arrive. */
   onResumed?: (replay: number) => void;
@@ -373,6 +387,8 @@ export class Connection {
    *  replays events but never re-sends the user list, so a client that
    *  resumed into a session it did not itself log into has to ask. */
   private gotSnapshot = false;
+  /** Did the server say `roster_stale` since the last `sync`? */
+  private rosterStale = false;
   /** `ReturnType<typeof setTimeout>` rather than `number`: a browser
    *  hands one back and Node the other, and nothing here cares which. */
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
@@ -434,6 +450,10 @@ export class Connection {
    *  current by `account_changed` and saved with the session. `null`
    *  means the server administers no accounts: offer no editor. */
   accounts: AccessSet | null = null;
+  /** The roles a user list is drawn with, from the login reply, kept
+   *  current by `roles_changed`, `account_changed` and `sync`, and saved
+   *  with the session. `null` means the server has no roles. */
+  roles: RolesConfig | null = null;
   /** What this session may change in the file area, from the login reply
    *  or the saved session. `null` means no file area. */
   files: FilesConfig | null = null;
@@ -494,6 +514,7 @@ export class Connection {
       this.banner = saved.banner ?? null;
       this.avatars = saved.avatars ?? null;
       this.accounts = saved.accounts ?? null;
+      this.roles = saved.roles ?? null;
       this.files = saved.files ?? null;
     } else if (opts.resumeOnly) {
       throw new Error('no session to resume');
@@ -643,6 +664,7 @@ export class Connection {
     this.banner = ok.banner ?? null;
     this.avatars = ok.avatars ?? null;
     this.accounts = ok.accounts ?? null;
+    this.roles = ok.roles ?? null;
     this.files = ok.files ?? null;
     // Only a session that may detach is worth remembering: without the
     // permission a resume can only ever answer session_expired, and
@@ -682,8 +704,9 @@ export class Connection {
       // reload case — has a `self` and a replay but no user list. `sync`
       // is the spec's answer for exactly that, and asking for it costs
       // one round trip against re-typing a password.
-      if (!this.gotSnapshot) {
-        await this.snapshot();
+      // Nor is a `roster_stale` whose `sync` the drop cut short replayed.
+      if (!this.gotSnapshot || this.rosterStale) {
+        await this.snapshot(this.gotSnapshot);
         this.persist();
       }
       return true;
@@ -812,10 +835,12 @@ export class Connection {
   }
 
   /** `sync`: the roster and server info, without disturbing the session. */
-  private async snapshot(): Promise<SyncOk> {
+  private async snapshot(stale = false): Promise<SyncOk> {
     const ok = await this.request<SyncOk>('sync', {});
     this.gotSnapshot = true;
+    this.rosterStale = false;
     if (ok.accounts) this.adoptAccess(ok.accounts);
+    if (ok.roles) this.roles = ok.roles;
     if (ok.rooms) {
       // The server's word on which rooms this session is in. A room new
       // to the record starts at its newest line: what came before is the
@@ -824,8 +849,34 @@ export class Connection {
       for (const id of this.roomHistoryIds.keys()) if (!joined.has(id)) this.roomHistoryIds.delete(id);
       for (const [id, last] of joined) if (!this.roomHistoryIds.has(id)) this.roomHistoryIds.set(id, last);
     }
-    if (this.self) this.hooks.onSnapshot?.({ self: this.self, users: ok.users, server: ok.server, rooms: ok.rooms });
+    if (this.self) {
+      this.hooks.onSnapshot?.({
+        self: this.self,
+        users: ok.users,
+        server: ok.server,
+        rooms: ok.rooms,
+        ...(stale ? { stale: true as const } : {}),
+      });
+    }
     return ok;
+  }
+
+  /** Answer `roster_stale`. The server sent it in place of the rows, so
+   *  nothing else will correct them: a sync refused `rate_limited` is
+   *  tried again, and one a dropped socket cut short is the resume's. */
+  private async refreshRoster(): Promise<void> {
+    for (let refusals = 0; this.rosterStale && this.state === 'online'; ) {
+      try {
+        await this.snapshot(true);
+        this.persist();
+        return;
+      } catch (e) {
+        this.trace('in', 'roster-refresh-failed', String(e instanceof Error ? e.message : e), true);
+        if (!(e instanceof WireFailure) || e.wire.code !== RATE_LIMITED) return;
+        const after = e.wire.retry_after;
+        await sleep(after !== undefined ? after * 1000 : HISTORY_BACKOFF_MS * 2 ** refusals++);
+      }
+    }
   }
 
   /** What this session's account may do now. The `files` block's `may`
@@ -835,6 +886,9 @@ export class Connection {
     this.accounts = set;
     this.manageRooms = set.manage_rooms === true;
     this.moderator = set.moderator === true;
+    if (this.roles) {
+      this.roles = { list: this.roles.list, ...(set.manage_roles ? { manage_roles: true } : {}) };
+    }
     if (this.files?.writable) {
       this.files = { ...this.files, may: FILES_ACTS.filter((act) => set.access.includes(act)) };
     }
@@ -1658,6 +1712,34 @@ export class Connection {
     return this.request('account_delete', { login });
   }
 
+  // --- roles (hxd-ng's docs/roles.md §7.2) ----------------------------
+  //
+  // Reading needs read_users; writing needs `roles.manage_roles`, and a
+  // write is refused `outranked` when the role, or anyone holding it,
+  // may do what this session may not.
+
+  roleList(): Promise<RoleListOk> {
+    return this.request<RoleListOk>('role_list', {});
+  }
+
+  roleGet(name: string): Promise<RoleGetOk> {
+    return this.request<RoleGetOk>('role_get', { name });
+  }
+
+  roleCreate(params: RoleEditParams): Promise<RoleOk> {
+    return this.request<RoleOk>('role_create', params);
+  }
+
+  /** Change a role. Never makes one. */
+  roleUpdate(params: RoleEditParams): Promise<RoleOk> {
+    return this.request<RoleOk>('role_update', params);
+  }
+
+  /** Takes it from every account holding it, and what it gave with it. */
+  roleDelete(name: string): Promise<Record<string, never>> {
+    return this.request('role_delete', { name });
+  }
+
   async ping(): Promise<number> {
     const t0 = performance.now();
     await this.request('ping', {});
@@ -1704,6 +1786,14 @@ export class Connection {
       if (uid === this.self?.uid) this.roomHistoryIds.delete(room);
     }
     if (frame.ev === 'account_changed') this.adoptAccess(frame.data as SelfAccess);
+    if (frame.ev === 'roles_changed') {
+      this.roles = { ...this.roles, list: (frame.data as Events['roles_changed']).list };
+    }
+    if (frame.ev === 'roster_stale') {
+      this.rosterStale = true;
+      // Not awaited: events go on arriving meanwhile.
+      void this.refreshRoster();
+    }
     this.persist();
     const set = this.handlers.get(frame.ev);
     if (!set) return; // unknown `ev` values are ignored, per spec
@@ -1740,6 +1830,7 @@ export class Connection {
       manageRooms: this.manageRooms,
       moderation: this.moderation,
       accounts: this.accounts,
+      roles: this.roles,
       files: this.files,
     });
   }

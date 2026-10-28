@@ -676,6 +676,100 @@ describe('accounts', () => {
   });
 });
 
+describe('roles', () => {
+  const STAFF = { name: 'staff', title: 'Staff', position: 10 };
+  const EDITORS = { name: 'editors', title: 'Editors', position: 20, color: 0x112233 };
+
+  it('keeps the roles current, and saved for a resume', async () => {
+    server.on('login', () => ({
+      ok: loginOk({ caps: ['accounts', 'roles'], roles: { list: [STAFF], manage_roles: true } }),
+    }));
+    const conn = await connect();
+    expect(conn.roles).toEqual({ list: [STAFF], manage_roles: true });
+
+    let heard: unknown = null;
+    conn.on('roles_changed', () => (heard = conn.roles));
+    server.event('roles_changed', { list: [EDITORS, STAFF] });
+    await settle();
+    expect(heard).toEqual({ list: [EDITORS, STAFF], manage_roles: true });
+    // manage_roles rides on account_changed, said only while held.
+    server.event('account_changed', { access: [], raw_bits: [] });
+    await settle();
+    expect(conn.roles).toEqual({ list: [EDITORS, STAFF] });
+    const saved = JSON.parse(sessionStorage.getItem('hxd-ng.session')!) as { roles: unknown };
+    expect(saved.roles).toEqual({ list: [EDITORS, STAFF] });
+  });
+
+  it('asks again for a roster refused rate_limited', async () => {
+    let snapshot: { users: User[]; stale?: true } | null = null;
+    await connect({ onSnapshot: (ok) => (snapshot = ok) });
+    let asked = 0;
+    server.on('sync', () =>
+      ++asked === 1
+        ? { error: { code: 'rate_limited', text: 'slow down', retry_after: 0 } }
+        : { ok: { server: { name: 'Test', subject: 'hi' }, users: [user(2, 'Bob')], seq: 1 } },
+    );
+    server.event('roster_stale', {});
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(server.sent('sync')).toHaveLength(2);
+    expect(snapshot).toMatchObject({ users: [user(2, 'Bob')], stale: true });
+  });
+
+  it('asks at the resume for a roster a dropped socket cut short', async () => {
+    let snapshot: { users: User[]; stale?: true } | null = null;
+    const conn = await connect({ onSnapshot: (ok) => (snapshot = ok) });
+    server.on('sync', () => new Promise(() => {}));
+    server.event('roster_stale', {});
+    await settle();
+    server.on('resume', () => ({ ok: { replay: 0, self: me(1, 'Alice') } }));
+    server.on('sync', () => ({ ok: { server: { name: 'Test', subject: 'hi' }, users: [user(2, 'Bob')], seq: 1 } }));
+    conn.drop();
+    await new Promise((resolve) => setTimeout(resolve, 700));
+    expect(server.sent('sync')).toHaveLength(2);
+    expect(snapshot).toMatchObject({ users: [user(2, 'Bob')], stale: true });
+  });
+
+  it('answers roster_stale with a sync, and hands its roster on', async () => {
+    let snapshot: { users: User[] } | null = null;
+    const conn = await connect({ onSnapshot: (ok) => (snapshot = ok) });
+    const promoted = { ...user(2, 'Bob'), admin: true, roles: ['staff'] };
+    server.on('sync', () => ({
+      ok: { server: { name: 'Test', subject: 'hi' }, users: [user(1, 'Alice'), promoted], seq: 1, roles: { list: [STAFF] } },
+    }));
+    server.event('roster_stale', {});
+    await settle();
+    expect(server.sent('sync')).toHaveLength(1);
+    expect(snapshot!.users).toEqual([user(1, 'Alice'), promoted]);
+    expect(conn.roles).toEqual({ list: [STAFF] });
+  });
+
+  it.each([
+    { call: (c: Connection) => c.roleList(), req: 'role_list', params: {} },
+    { call: (c: Connection) => c.roleGet('staff'), req: 'role_get', params: { name: 'staff' } },
+    {
+      call: (c: Connection) => c.roleCreate({ name: 'helpers', color: 0x112233, access: ['read_users'] }),
+      req: 'role_create',
+      params: { name: 'helpers', color: 0x112233, access: ['read_users'] },
+    },
+    {
+      call: (c: Connection) => c.roleUpdate({ name: 'helpers', color: null }),
+      req: 'role_update',
+      params: { name: 'helpers', color: null },
+    },
+    { call: (c: Connection) => c.roleDelete('helpers'), req: 'role_delete', params: { name: 'helpers' } },
+    {
+      call: (c: Connection) => c.accountUpdate({ login: 'eve', roles: ['staff'], grant: ['send_chat'], deny: [] }),
+      req: 'account_update',
+      params: { login: 'eve', roles: ['staff'], grant: ['send_chat'], deny: [] },
+    },
+  ])('$req sends the frame the wire specifies', async ({ call, req, params }) => {
+    const conn = await connect();
+    server.on(req, () => ({ ok: {} }));
+    await call(conn);
+    expect(server.sent(req).map((f) => f.params)).toEqual([params]);
+  });
+});
+
 describe('rooms', () => {
   const LOUNGE: Room = { id: 2754100983, name: 'lounge', topic: 'anything goes', position: 0, members: 4, may_post: false, signed: true };
 

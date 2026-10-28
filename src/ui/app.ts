@@ -714,14 +714,17 @@ export class App {
           });
         }
       },
-      onSnapshot: ({ self, users, server }) => {
+      onSnapshot: ({ self, users, server, stale }) => {
         this.store.self = self;
         this.store.server = server;
         this.store.replaceRoster(users);
-        this.certs.clear();
+        if (!stale) this.certs.clear();
         this.sealedRows.clear();
         for (const u of users) this.noteSealed(u);
         this.renderAll();
+        // Only the roster: every client was told at once, and nothing
+        // else was missed.
+        if (stale) return;
         // A snapshot after the first is a resync or a fresh login on the
         // same socket, and either way the news events in between are gone
         // — and the counts beside what is followed are the server's to

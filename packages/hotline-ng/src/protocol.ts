@@ -114,6 +114,10 @@ export interface User {
   remote?: RemoteServer;
   /** The server's own account: never kicked, banned or reported. */
   system?: boolean;
+  /** The names of the roles the user holds, on a server with the
+   *  `roles` capability; absent when none. Drawn with
+   *  `Connection.roles`' list. */
+  roles?: string[];
 }
 
 export interface RemoteServer {
@@ -362,6 +366,8 @@ export interface LoginOk {
   /** Present exactly when `caps` lists `accounts`: what this session's
    *  account may do, so a client knows whether to offer an editor. */
   accounts?: AccessSet;
+  /** Present exactly when `caps` lists `roles`. */
+  roles?: RolesConfig;
   /** Present exactly when `caps` lists `files`. */
   files?: FilesConfig;
   /** Present exactly when `caps` lists `rooms`: the rooms as they stood
@@ -396,6 +402,8 @@ export interface SyncOk {
   seq: number;
   /** As the login reply's: an `account_changed` the gap swallowed. */
   accounts?: SelfAccess;
+  /** As the login reply's: a `roles_changed` the gap swallowed. */
+  roles?: RolesConfig;
   rooms?: SyncRooms;
 }
 
@@ -1467,8 +1475,10 @@ export interface AccessSet {
 }
 
 /** This session's own `AccessSet`, as `account_changed` and `sync` say
- *  it, with the powers that are not bits. */
-export type SelfAccess = AccessSet & { manage_rooms?: true; moderator?: true };
+ *  it, with the powers that are not bits. `manage_roles` comes on
+ *  `account_changed` alone; the login reply and `sync` say it in their
+ *  `roles` block, which `Connection.roles` follows. */
+export type SelfAccess = AccessSet & { manage_rooms?: true; moderator?: true; manage_roles?: true };
 
 /** An account as `account_get` and the writes answer it. */
 export interface AccountInfo extends AccessSet {
@@ -1478,6 +1488,14 @@ export interface AccountInfo extends AccessSet {
   password: boolean;
   /** The linked identity's fingerprint, when the account has one. */
   identity?: string;
+  /** With the `roles` capability: the account's roles, and the keys its
+   *  own record sets over them, true and false. `access` is what they
+   *  come to. */
+  roles?: string[];
+  grant?: string[];
+  deny?: string[];
+  raw_grant?: number[];
+  raw_deny?: number[];
 }
 
 export interface AccountListOk {
@@ -1490,10 +1508,17 @@ export interface AccountOk {
 
 /**
  * `account_create` and `account_update`. What is left out stays as it
- * was; a new account takes its login as its name, no password and no
- * access. `access` replaces the whole bitmap, `raw_bits` included — empty
- * when omitted, so an editor sends back the `raw_bits` it was shown.
- * `password: ""` clears the password.
+ * was; a new account takes its login as its name, no password, and what
+ * its roles grant. `access` replaces the whole bitmap, `raw_bits`
+ * included — empty when omitted, so an editor sends back the `raw_bits`
+ * it was shown. `password: ""` clears the password.
+ *
+ * With the `roles` capability, `roles` replaces the account's roles, and
+ * `grant`, `deny`, `raw_grant` and `raw_deny`, in place of `access`,
+ * replace the keys its own record sets over them, all four together: one
+ * sent alone clears the other three. An editor that shows roles sends
+ * these; `access` is still taken, as what the account should come to,
+ * and the server keeps its own keys to what that needs.
  */
 export interface AccountEditParams {
   login: string;
@@ -1501,6 +1526,68 @@ export interface AccountEditParams {
   password?: string;
   access?: string[];
   raw_bits?: number[];
+  roles?: string[];
+  grant?: string[];
+  deny?: string[];
+  raw_grant?: number[];
+  raw_deny?: number[];
+}
+
+// --- Roles (hxd-ng's docs/roles.md §7) ----------------------------------
+
+/** A role as a user list is drawn with it. */
+export interface RoleShown {
+  name: string;
+  title: string;
+  /** Display order, highest first. */
+  position: number;
+  /** `0xRRGGBB`; absent when it has none. */
+  color?: number;
+  mentionable?: true;
+}
+
+/** The login reply's and `sync`'s `roles` block. */
+export interface RolesConfig {
+  list: RoleShown[];
+  /** Present when this session may create, change and delete roles. */
+  manage_roles?: true;
+}
+
+/** A role with what it grants, as `role_list` and `role_get` answer. */
+export interface Role extends RoleShown, AccessSet {
+  /** The `[extra]` keys it grants. */
+  extra: string[];
+}
+
+export interface RoleListOk {
+  roles: (Role & { holder_count: number })[];
+}
+
+export interface RoleGetOk {
+  role: Role;
+  /** The logins holding it. */
+  holders: string[];
+}
+
+export interface RoleOk {
+  role: Role;
+}
+
+/**
+ * `role_create` and `role_update`. What is left out stays as it was; a
+ * new role takes its name as its title and grants nothing. `access`
+ * replaces the bits it grants, `raw_bits` included, and `extra` its
+ * `[extra]` keys. `color: null` clears the color.
+ */
+export interface RoleEditParams {
+  name: string;
+  title?: string;
+  color?: number | null;
+  position?: number;
+  mentionable?: boolean;
+  access?: string[];
+  raw_bits?: number[];
+  extra?: string[];
 }
 
 // --- Voice --------------------------------------------------------------
@@ -1630,6 +1717,14 @@ export interface Events {
    *  this is what it may do now. `Connection.accounts` is already
    *  updated when a handler hears it. */
   account_changed: SelfAccess;
+  /** A role was made, deleted, or shown differently. `Connection.roles`
+   *  is already updated when a handler hears it: redraw names and colors
+   *  from it. */
+  roles_changed: { list: RoleShown[] };
+  /** Too many users changed at once to be sent each. `Connection` has
+   *  already asked for the roster again, which arrives through
+   *  `onSnapshot`. */
+  roster_stale: Record<string, never>;
   voice_offer: { cid: number; sdp: string };
   voice_ice: { cid: number; candidate: RTCIceCandidateInit | null };
   voice_status: { cid: number; participants: VoiceParticipant[] };
@@ -1894,6 +1989,9 @@ const RETRY = {
   outranked: 'never',
   no_such_account: 'never',
   invalid_login: 'never',
+  // Roles (roles.md §7.2).
+  no_such_role: 'never',
+  role_in_use: 'never',
   // Voice and video (voice.md §8, capabilities-video.md).
   voice_disabled: 'never',
   video_disabled: 'never',
@@ -1982,10 +2080,12 @@ export const ERROR_TEXT: Record<string, string> = {
   own_report: 'That report is about you. Another moderator closes it.',
   protected: 'That user cannot be moderated by you.',
   // Accounts.
-  outranked: 'That account may do, or would be allowed to do, something you may not.',
+  outranked: 'That account or role may do, or would be allowed to do, something you may not.',
   no_such_account: 'There is no such account.',
   already_exists: 'That already exists.',
   invalid_login: 'A login is up to 31 letters, digits and _ - . @, not starting with a dot.',
+  no_such_role: 'There is no such role.',
+  role_in_use: 'Something still names that role. Change it first.',
   // Rooms. `no_such_room` is also a room this session may not see, so
   // it must not suggest the room was ever there.
   no_such_room: 'There is no such room.',

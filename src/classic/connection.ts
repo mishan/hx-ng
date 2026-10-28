@@ -196,6 +196,7 @@ export class ClassicConnection implements Session {
   moderation: Session['moderation'] = null;
   /** No account administration over this wire yet: no editor offered. */
   accounts: Session['accounts'] = null;
+  roles: Session['roles'] = null;
   files: Session['files'] = null;
   banner: Session['banner'] = null;
   avatars: Session['avatars'] = null;

@@ -38,6 +38,7 @@ type SessionOf<C extends Connection> = Pick<
   | 'banner'
   | 'avatars'
   | 'accounts'
+  | 'roles'
   | 'files'
   | 'start'
   | 'logout'

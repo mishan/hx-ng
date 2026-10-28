@@ -369,7 +369,7 @@ button.ghost.danger { color: var(--admin); border-color: var(--admin); }
   padding: 0.5rem;
 }
 
-.rail-head, .roster-head {
+.rail-head, .roster-head, .roster-group {
   margin: 0;
   font-size: 0.7rem;
   font-weight: inherit;
@@ -381,6 +381,7 @@ button.ghost.danger { color: var(--admin); border-color: var(--admin); }
 
 .roster-head { display: flex; align-items: center; }
 .roster-count { margin: 0; font: inherit; }
+.roster-group { padding-top: 0.8rem; }
 
 /* Shown only on the narrow layout, where the roster is dismissible. */
 .roster-close {

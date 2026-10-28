@@ -8,8 +8,9 @@
  * window*, and whether someone is in voice or publishing video.
  */
 
-import type { User, VoiceSession } from '@hotline-ng/client';
+import type { RoleShown, User, VoiceSession } from '@hotline-ng/client';
 
+import { groupByRole, nickColorOf } from '../roles';
 import { statusLabel, type Store } from '../state';
 import { fill, h } from './dom';
 import { face } from './avatar';
@@ -31,10 +32,21 @@ export interface RosterHooks {
 }
 
 /** `media` is `null` on a connection with no voice — a classic server's —
- *  where nobody is in voice or publishing anything. */
-export function renderRoster(el: HTMLElement, store: Store, media: VoiceSession | null, hooks: RosterHooks): void {
+ *  where nobody is in voice or publishing anything, and `roles` on one
+ *  with no roles. */
+export function renderRoster(
+  el: HTMLElement,
+  store: Store,
+  media: VoiceSession | null,
+  roles: RoleShown[] | null,
+  hooks: RosterHooks,
+): void {
   const users = store.roster();
-  const rows = users.map((u) => row(u, store, media, hooks));
+  const draw = (u: User) => row(u, store, media, roles, hooks);
+  const groups = groupByRole(users, roles);
+  const rows = groups
+    ? groups.flatMap((g) => [h('h3', { class: 'roster-group' }, g.role?.title ?? 'Others'), ...g.users.map(draw)])
+    : users.map(draw);
   const close = h(
     'button',
     { class: 'roster-close', type: 'button', title: 'Hide the user list', ariaLabel: 'Hide the user list' },
@@ -54,14 +66,15 @@ export function renderRoster(el: HTMLElement, store: Store, media: VoiceSession 
   );
 }
 
-/** A user's own color at a lightness the theme can read: its hue and
+/** A nick color at a lightness the theme can read: its hue and
  *  chroma kept, its lightness held to the theme's range. */
 function nickColor(c: number): string {
   const hex = (c & 0xffffff).toString(16).padStart(6, '0');
   return `oklch(from #${hex} clamp(var(--nick-l-min), l, var(--nick-l-max)) c h)`;
 }
 
-function row(u: User, store: Store, media: VoiceSession | null, hooks: RosterHooks): HTMLElement {
+function row(u: User, store: Store, media: VoiceSession | null, roles: RoleShown[] | null, hooks: RosterHooks): HTMLElement {
+  const color = nickColorOf(u, roles);
   const me = u.uid === store.self?.uid;
   const status = statusLabel(u.status);
   const voice = media?.inVoice(u.uid) ?? null;
@@ -122,7 +135,7 @@ function row(u: User, store: Store, media: VoiceSession | null, hooks: RosterHoo
     h(
       'span',
       { class: 'who' },
-      h('span', { class: 'nick', style: u.color !== undefined ? { color: nickColor(u.color) } : {} }, u.nick),
+      h('span', { class: 'nick', style: color !== undefined ? { color: nickColor(color) } : {} }, u.nick),
       u.admin ? h('span', { class: 'sr-only' }, ', administrator') : null,
       u.remote && !u.remote.tagged ? h('span', { class: 'tag' }, u.remote.tag) : null,
       status ? h('span', { class: 'status' }, status) : null,

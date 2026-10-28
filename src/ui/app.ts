@@ -1096,6 +1096,7 @@ export class App {
     conn.on('report', (d) => this.moderation.onReport(d));
     // `conn.accounts` is already what the account may do now.
     conn.on('account_changed', () => this.onAccountChanged());
+    conn.on('roles_changed', () => this.renderRoster());
     conn.on('report_closed', (d) => {
       if (d.yours) this.say(closedForReporter(d.id, d.outcome));
       // A moderator who filed it hears it once, as the reporter.
@@ -2971,7 +2972,7 @@ export class App {
   }
 
   private renderRoster(): void {
-    renderRoster(this.rosterEl, this.store, this.media, {
+    renderRoster(this.rosterEl, this.store, this.media, this.conn?.roles?.list ?? null, {
       onMessage: (u) => {
         this.select(this.store.openPm({ uid: u.uid, nick: u.nick }).id);
         this.showRoster(false);

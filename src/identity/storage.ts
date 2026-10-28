@@ -22,7 +22,7 @@ import { bytesToHex, type SealedReplay, type ServerPin, type ServerPinStore } fr
 import type { GuidMemory } from '../signing';
 
 const DB_NAME = 'hxd-ng.identity';
-const DB_VERSION = 4;
+const DB_VERSION = 5;
 const DEVICES_STORE = 'devices';
 const META_STORE = 'meta';
 const SERVER_PINS_STORE = 'serverPins';
@@ -30,6 +30,7 @@ const NEWS_GUIDS_STORE = 'newsGuids';
 const SEALED_STORE = 'sealedReplay';
 const SEALED_UNTIL_INDEX = 'until';
 const PEERS_STORE = 'peers';
+const CONTACTS_STORE = 'contacts';
 const ACTIVE_KEY = 'active';
 /** The latest time the clock has shown a sealed message's reader. */
 const SEALED_LATEST_KEY = 'sealedLatest';
@@ -97,6 +98,9 @@ function openDb(): Promise<IDBDatabase> {
       }
       if (!db.objectStoreNames.contains(PEERS_STORE)) {
         db.createObjectStore(PEERS_STORE); // keyed by `peerKey`
+      }
+      if (!db.objectStoreNames.contains(CONTACTS_STORE)) {
+        db.createObjectStore(CONTACTS_STORE); // keyed by fingerprint
       }
     };
     req.onsuccess = () => resolve(req.result);
@@ -375,6 +379,30 @@ export function mergePeer(was: PeerRecord | undefined, r: PeerRecord): PeerRecor
   };
 }
 
+/** The user's word that they compared a fingerprint out of band
+ *  (hxd-ng's `docs/e2e-messages.md` §8),
+ *  or took that back: per fingerprint and not per server, since it is
+ *  the identity key that was compared, whichever server showed it. */
+export interface ContactMark {
+  fingerprint: string;
+  /** When it was last marked compared, in milliseconds, and the name it
+   *  was compared as. */
+  compared?: number;
+  name?: string;
+  /** When it was last unmarked. */
+  unmarked?: number;
+}
+
+/** Two marks of one fingerprint as one: each act at its later time, so
+ *  whichever the user did last holds in every tab, and a tab that never
+ *  heard of the later one cannot undo it by writing what it holds. */
+export function mergeMark(was: ContactMark | undefined, r: ContactMark): ContactMark {
+  if (!was) return r;
+  const [older, newer] = (r.compared ?? 0) >= (was.compared ?? 0) ? [was, r] : [r, was];
+  const unmarked = Math.max(was.unmarked ?? 0, r.unmarked ?? 0);
+  return { ...older, ...newer, ...(unmarked ? { unmarked } : {}) };
+}
+
 export const peers = {
   all: () => withDb(PEERS_STORE, 'readonly', (tx) => requestResult<PeerRecord[]>(tx.objectStore(PEERS_STORE).getAll())),
   /** `record` merged into the one stored, in one transaction; the
@@ -386,5 +414,22 @@ export const peers = {
       const merged = mergePeer(await requestResult<PeerRecord | undefined>(store.get(key)), record);
       store.put(merged, key);
       return merged;
+    }),
+  marks: () => withDb(CONTACTS_STORE, 'readonly', (tx) => requestResult<ContactMark[]>(tx.objectStore(CONTACTS_STORE).getAll())),
+  mark: (mark: ContactMark) =>
+    withDb(CONTACTS_STORE, 'readwrite', async (tx) => {
+      const store = tx.objectStore(CONTACTS_STORE);
+      const merged = mergeMark(await requestResult<ContactMark | undefined>(store.get(mark.fingerprint)), mark);
+      store.put(merged, mark.fingerprint);
+      return merged;
+    }),
+  /** Every record of `fingerprint`, on every server, and its mark. */
+  forget: (fingerprint: string) =>
+    withDb([PEERS_STORE, CONTACTS_STORE], 'readwrite', async (tx) => {
+      const store = tx.objectStore(PEERS_STORE);
+      for (const r of await requestResult<PeerRecord[]>(store.getAll())) {
+        if (r.fingerprint === fingerprint) store.delete(peerKey(r.server, r.fingerprint));
+      }
+      tx.objectStore(CONTACTS_STORE).delete(fingerprint);
     }),
 };

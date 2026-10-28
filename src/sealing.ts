@@ -5,12 +5,15 @@
 
 import type { User } from '@hotline-ng/client';
 
-import { mergePeer, peerKey, type PeerRecord } from './identity/storage';
+import { mergeMark, mergePeer, peerKey, type ContactMark, type PeerRecord } from './identity/storage';
 import type { Line } from './state';
 
 export interface PeerStore {
   all(): Promise<PeerRecord[]>;
   merge(record: PeerRecord): Promise<PeerRecord>;
+  marks(): Promise<ContactMark[]>;
+  mark(mark: ContactMark): Promise<ContactMark>;
+  forget(fingerprint: string): Promise<void>;
 }
 
 /** The peers this browser has sealed to, or had messages verified from,
@@ -18,16 +21,82 @@ export interface PeerStore {
  *  `store`, which every tab shares. */
 export class PeerMemory {
   private readonly records = new Map<string, PeerRecord>();
+  private readonly marks = new Map<string, ContactMark>();
+  /** Keys of what was noted here and not yet stored, kept over a load. */
+  private readonly unwritten = new Set<string>();
+  /** A count each write and forget here moves on, and when each key was
+   *  last written and each fingerprint forgotten by it: so a load keeps
+   *  what was written since its read began, and a write that lands after
+   *  its fingerprint was forgotten is not taken back in. */
+  private generation = 0;
+  private readonly written = new Map<string, number>();
+  private readonly forgotten = new Map<string, number>();
 
   constructor(private readonly store: PeerStore | null = null) {}
 
-  /** What the store holds, merged with what was noted here. */
+  /** What the store holds, with what was noted here and not yet written
+   *  over it; so a contact another tab forgot is forgotten here too. */
   async load(): Promise<void> {
-    for (const r of (await this.store?.all()) ?? []) this.merged(r);
+    if (!this.store) return;
+    const since = this.generation;
+    const [records, marks] = await Promise.all([this.store.all(), this.store.marks()]);
+    const kept = (k: string) => this.unwritten.has(k) || (this.written.get(k) ?? 0) > since;
+    const keptRecords = [...this.records].flatMap(([k, r]) => (kept(k) ? [r] : []));
+    const keptMarks = [...this.marks].flatMap(([k, m]) => (kept(k) ? [m] : []));
+    this.records.clear();
+    this.marks.clear();
+    // What this tab forgot while the store was read stays forgotten.
+    const live = (r: { fingerprint: string }) => (this.forgotten.get(r.fingerprint) ?? 0) <= since;
+    for (const r of [...records.filter(live), ...keptRecords]) this.merged(r);
+    for (const m of [...marks.filter(live), ...keptMarks]) this.mergedMark(m);
   }
 
   get(server: string, fingerprint: string): PeerRecord | undefined {
     return this.records.get(peerKey(server, fingerprint));
+  }
+
+  /** Every record, on every server. */
+  all(): PeerRecord[] {
+    return [...this.records.values()];
+  }
+
+  /** Every mark, compared or not. */
+  marked(): ContactMark[] {
+    return [...this.marks.values()];
+  }
+
+  /** `fingerprint`'s mark, compared or not. */
+  mark(fingerprint: string): ContactMark | undefined {
+    return this.marks.get(fingerprint);
+  }
+
+  /** Whether the user last said they compared `fingerprint`. */
+  compared(fingerprint: string): boolean {
+    const m = this.marks.get(fingerprint);
+    return (m?.compared ?? 0) > (m?.unmarked ?? 0);
+  }
+
+  /** The user's word that `fingerprint` was compared, and the name they
+   *  gave it, or with `null`, that it no longer is: after anything this
+   *  tab knows of, whatever the clock. */
+  setCompared(fingerprint: string, name: string | null): Promise<void> {
+    const was = this.marks.get(fingerprint);
+    const at = Math.max(Date.now(), (was?.compared ?? 0) + 1, (was?.unmarked ?? 0) + 1);
+    const mark = this.mergedMark({ fingerprint, ...(name !== null ? { compared: at, name } : { unmarked: at }) });
+    return this.write(fingerprint, fingerprint, () => this.store!.mark(mark), (stored) => void this.mergedMark(stored));
+  }
+
+  /** Every record of `fingerprint`, here and in the store. */
+  forget(fingerprint: string): Promise<void> {
+    for (const [k, r] of this.records) {
+      if (r.fingerprint !== fingerprint) continue;
+      this.records.delete(k);
+      this.unwritten.delete(k);
+    }
+    this.marks.delete(fingerprint);
+    this.unwritten.delete(fingerprint);
+    this.forgotten.set(fingerprint, ++this.generation);
+    return (this.store?.forget(fingerprint) ?? Promise.resolve()).catch(() => {});
   }
 
   /** `fingerprint` seen as `who` on `server`, with what changed, and
@@ -50,9 +119,24 @@ export class PeerMemory {
       ...rest,
       ...(accepted ? { accepted: now } : {}),
     });
-    return (this.store?.merge(record).then((stored) => void this.merged(stored)) ?? Promise.resolve()).catch(() => {
-      /* storage refused; remembered this page load */
-    });
+    return this.write(peerKey(server, fingerprint), fingerprint, () => this.store!.merge(record), (stored) => void this.merged(stored));
+  }
+
+  private write<T>(key: string, fingerprint: string, put: () => Promise<T>, took: (stored: T) => void): Promise<void> {
+    if (!this.store) return Promise.resolve();
+    const at = ++this.generation;
+    this.written.set(key, at);
+    this.unwritten.add(key);
+    return put()
+      .then((stored) => {
+        this.unwritten.delete(key);
+        if ((this.forgotten.get(fingerprint) ?? 0) > at) return;
+        this.written.set(key, ++this.generation);
+        took(stored);
+      })
+      .catch(() => {
+        /* storage refused; remembered this page load */
+      });
   }
 
   private merged(r: PeerRecord): PeerRecord {
@@ -60,6 +144,12 @@ export class PeerMemory {
     const record = mergePeer(this.records.get(key), r);
     this.records.set(key, record);
     return record;
+  }
+
+  private mergedMark(m: ContactMark): ContactMark {
+    const mark = mergeMark(this.marks.get(m.fingerprint), m);
+    this.marks.set(m.fingerprint, mark);
+    return mark;
   }
 
   /** The fingerprint this account was last seen under on this server. */

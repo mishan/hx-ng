@@ -8,6 +8,7 @@ import {
   forgetActiveDevice,
   getActiveDevice,
   newsGuids,
+  peers,
   sealedReplay,
   serverPins,
 } from '../src/identity/storage';
@@ -176,6 +177,38 @@ describe('sealedReplay', () => {
     for (const [name, run, want] of cases) expect(await run(), name).toBe(want);
     expect(await serverPins.get('hl.example')).toEqual(pin);
     expect(await newsGuids.note(new Uint8Array(32).fill(1), 'g1', 4)).toBe(4);
+    expect((await getActiveDevice())?.devicePub).toBe('ab');
+  });
+});
+
+describe('peers', () => {
+  it('upgrades a v4 database with its devices and peers kept, and keeps a mark beside them', async () => {
+    // The v4 schema, and a device and a peer in it, as a browser that
+    // predates contacts left them.
+    const db = await new Promise<IDBDatabase>((resolve) => {
+      const req = indexedDB.open('hxd-ng.identity', 4);
+      req.onupgradeneeded = () => {
+        req.result.createObjectStore('devices', { keyPath: 'devicePub' }).createIndex('fingerprint', 'fingerprint');
+        req.result.createObjectStore('meta');
+        req.result.createObjectStore('serverPins');
+        req.result.createObjectStore('newsGuids');
+        req.result.createObjectStore('sealedReplay').createIndex('until', 'until');
+        req.result.createObjectStore('peers');
+      };
+      req.onsuccess = () => resolve(req.result);
+    });
+    const alice = { fingerprint: 'F'.repeat(52), server: 'wss://hl.example', logins: ['alice'], nick: 'Alice', at: 1000, sealed: true as const };
+    const tx = db.transaction(['devices', 'meta', 'peers'], 'readwrite');
+    await new Promise((resolve) => (tx.objectStore('devices').put({ devicePub: 'ab' }).onsuccess = resolve));
+    await new Promise((resolve) => (tx.objectStore('meta').put('ab', 'active').onsuccess = resolve));
+    await new Promise((resolve) => (tx.objectStore('peers').put(alice, `wss://hl.example ${alice.fingerprint}`).onsuccess = resolve));
+    db.close();
+
+    expect(await peers.marks()).toEqual([]);
+    const mark = { fingerprint: alice.fingerprint, compared: 2000, name: 'Alice' };
+    expect(await peers.mark(mark)).toEqual(mark);
+    expect(await peers.marks()).toEqual([mark]);
+    expect(await peers.all()).toEqual([alice]);
     expect((await getActiveDevice())?.devicePub).toBe('ab');
   });
 });

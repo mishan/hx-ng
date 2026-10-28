@@ -1297,6 +1297,21 @@ export class ClassicConnection implements Session {
   async accountDelete(): Promise<never> {
     throw unavailable('account administration');
   }
+  async roleList(): Promise<never> {
+    throw unavailable('roles');
+  }
+  async roleGet(): Promise<never> {
+    throw unavailable('roles');
+  }
+  async roleCreate(): Promise<never> {
+    throw unavailable('roles');
+  }
+  async roleUpdate(): Promise<never> {
+    throw unavailable('roles');
+  }
+  async roleDelete(): Promise<never> {
+    throw unavailable('roles');
+  }
   async uploadMedia(): Promise<never> {
     throw unavailable('sending images');
   }

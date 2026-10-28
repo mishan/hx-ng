@@ -107,4 +107,9 @@ type SessionOf<C extends Connection> = Pick<
   | 'accountCreate'
   | 'accountUpdate'
   | 'accountDelete'
+  | 'roleList'
+  | 'roleGet'
+  | 'roleCreate'
+  | 'roleUpdate'
+  | 'roleDelete'
 >;

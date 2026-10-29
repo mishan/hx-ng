@@ -21,6 +21,7 @@ import {
   screenShareBlockedReason,
   VoiceSession,
   WireFailure,
+  RATE_LIMITED,
   CAP_CHAT_GUID,
   CAP_FILES,
   CAP_HISTORY,
@@ -249,6 +250,9 @@ const SEALED_MSG_MAX_BYTES = 8192;
  *  own is said again at the shorter interval while typing goes on
  *  (§7.5). */
 const TYPING_SHOWN_MS = 10_000;
+/** How long read receipts refused `rate_limited` wait when the server
+ *  names no time. */
+const READ_RETRY_MS = 1_000;
 const TYPING_RENEW_MS = 5_000;
 
 /** How long after a resume the events it replays may still arrive. */
@@ -492,6 +496,8 @@ export class App {
   private typingShown = new Map<ConvId, number>();
   /** Instant messages shown and not yet told read, by conversation. */
   private pendingReads = new Map<ConvId, string[]>();
+  /** A retry of read receipts refused `rate_limited`, by conversation. */
+  private readRetry = new Map<ConvId, number>();
   /** Each instant message shown, by sender and guid: one handed over
    *  again is acknowledged again and not shown twice. */
   private imSeen = new Set<string>();
@@ -801,7 +807,10 @@ export class App {
           }
         });
       },
-      onFriends: ({ friends }) => this.friends.onFriends(friends),
+      // A pull a replaced connection asked for may answer late.
+      onFriends: ({ friends }) => {
+        if (conn === this.conn) this.friends.onFriends(friends);
+      },
       onMissedHistory: (ok) => {
         void this.historyLines(ok).then((lines) => {
           if (!lines) return;
@@ -2415,8 +2424,10 @@ export class App {
   }
 
   /** Tell a friend which of their messages are now read. */
-  /** A receipt lost with a socket that may resume waits for the resume;
-   *  one the server refused, or one for a session since gone, does not. */
+  /** A receipt lost with a socket that may resume waits for the resume,
+   *  and one refused `rate_limited` is sent again once the server says;
+   *  one the server refused otherwise, or one for a session since gone,
+   *  is let go. */
   private flushReads(conv: Conversation): void {
     const conn = this.conn;
     const guids = this.pendingReads.get(conv.id);
@@ -2426,8 +2437,19 @@ export class App {
     this.pendingReads.delete(conv.id);
     for (const guid of guids) {
       void conn.receipt(login, guid, true).catch((e: unknown) => {
-        if (e instanceof WireFailure || this.conn !== conn || conn.session !== session) return;
+        const limited = e instanceof WireFailure && e.wire.code === RATE_LIMITED;
+        if ((e instanceof WireFailure && !limited) || this.conn !== conn || conn.session !== session) return;
         this.pendingReads.set(conv.id, [...(this.pendingReads.get(conv.id) ?? []), guid]);
+        if (!limited || this.readRetry.has(conv.id)) return;
+        const after = (e as WireFailure).wire.retry_after;
+        const wait = after !== undefined ? after * 1000 : READ_RETRY_MS;
+        this.readRetry.set(
+          conv.id,
+          window.setTimeout(() => {
+            this.readRetry.delete(conv.id);
+            if (this.conn === conn && conn.session === session) this.flushReads(conv);
+          }, wait),
+        );
       });
     }
   }

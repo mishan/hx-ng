@@ -149,6 +149,9 @@ export function addressOf(c: Conversation): Address | null {
   return null;
 }
 
+/** How many receipts may wait for lines not yet added. */
+const EARLY_RECEIPTS = 256;
+
 const uidKey = (uid: number): string => `uid:${uid}`;
 const loginKey = (login: string): string => `login:${login.toLowerCase()}`;
 /** The last-resort key, for a sender the wire gave no name at all. */
@@ -267,6 +270,10 @@ export class Store {
    *  lands on the previous one's transcript. Every lookup goes through
    *  `pmIndex` instead, so an id nothing points at is unreachable. */
   private pmSeq = 0;
+  /** Receipts for a guid no line carries yet, by login and guid: a
+   *  friend's client can answer before the send's own reply lands, which
+   *  is when the line is added. Oldest dropped past `EARLY_RECEIPTS`. */
+  private earlyReceipts = new Map<string, boolean>();
 
   constructor() {
     this.conversations.set(LOBBY, {
@@ -583,6 +590,14 @@ export class Store {
       c.mailIds.add(line.id);
     }
     c.lines.push(line);
+    if (line.local && line.guid !== undefined && c.peer.login !== undefined) {
+      const key = `${loginKey(c.peer.login)} ${line.guid}`;
+      const read = this.earlyReceipts.get(key);
+      if (read !== undefined) {
+        this.earlyReceipts.delete(key);
+        line.receipt = read ? 'read' : 'delivered';
+      }
+    }
     if (c.kind === 'lobby') this.trimPublic(c, 'oldest');
     else if (c.lines.length > MAX_LINES) c.lines.splice(0, c.lines.length - MAX_LINES);
     // A line announcing a news article is counted where the news is, on
@@ -595,11 +610,20 @@ export class Store {
 
   /** A friend's `receipt` for a message this client sent: the
    *  conversation it moved, or undefined. A read is never taken back to
-   *  delivered, whichever arrives first. */
+   *  delivered, whichever arrives first, and one for a line not added
+   *  yet is kept for it. */
   receipt(login: string, guid: string, read: boolean): Conversation | undefined {
     const c = this.pmWith({ login });
     const line = c?.lines.find((l) => l.local && l.guid === guid);
-    if (!line || line.receipt === 'read' || (!read && line.receipt === 'delivered')) return undefined;
+    if (!line) {
+      const key = `${loginKey(login)} ${guid}`;
+      const had = this.earlyReceipts.get(key);
+      this.earlyReceipts.delete(key);
+      this.earlyReceipts.set(key, read || had === true);
+      if (this.earlyReceipts.size > EARLY_RECEIPTS) this.earlyReceipts.delete(this.earlyReceipts.keys().next().value!);
+      return undefined;
+    }
+    if (line.receipt === 'read' || (!read && line.receipt === 'delivered')) return undefined;
     line.receipt = read ? 'read' : 'delivered';
     this.revision++;
     return c;

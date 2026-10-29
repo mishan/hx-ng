@@ -1875,14 +1875,24 @@ export class Connection {
    *  every page of them, as the wire requires a client to read; a
    *  sender whose requests span pages is one entry. Listing makes this a
    *  session that understands requests. Past the pages this reads, the
-   *  answer keeps the `cursor` to go on from. */
+   *  answer keeps the `cursor` to go on from; at a cursor the server
+   *  hands back again, it stops with none. */
   async requests(cursor?: string): Promise<RequestsOk> {
     let all: RequestsOk | null = null;
+    // A cursor handed back again would read a page already merged.
+    const asked = new Set(cursor === undefined ? [] : [cursor]);
     for (let page = 0; page < REQUESTS_PAGES; page++) {
       const ok = await this.family<RequestsOk>('requests', cursor === undefined ? {} : { cursor });
       all = all ? mergeRequests(all, ok) : ok;
       cursor = ok.cursor;
       if (cursor === undefined) return all;
+      if (asked.has(cursor)) {
+        this.trace('in', 'requests-stopped', `cursor ${cursor} again`, true);
+        const done = { ...all };
+        delete done.cursor;
+        return done;
+      }
+      asked.add(cursor);
     }
     this.trace('in', 'requests-stopped', `more at ${cursor}`, true);
     return all!;

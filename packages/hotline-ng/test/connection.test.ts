@@ -1146,9 +1146,28 @@ describe('instant messaging', () => {
   });
 
   it('stops paging requests a server never ends, and keeps the cursor', async () => {
-    server.on('requests', () => ({ ok: { requests: [], approvals: [], dropped: 0, takes_requests: true, cursor: 'again' } }));
+    let n = 0;
+    server.on('requests', () => ({ ok: { requests: [], approvals: [], dropped: 0, takes_requests: true, cursor: `c${++n}` } }));
     const conn = await connect();
-    expect((await conn.requests()).cursor).toBe('again');
+    expect((await conn.requests()).cursor).toBe('c20');
+  });
+
+  it('stops at a cursor handed back again, without merging a page twice', async () => {
+    const msg = (id: number) => ({ id, text: `hi ${id}`, at: 1_700_000_000 + id, guid: `g-${id}` });
+    server.on('requests', (params) => ({
+      ok: {
+        requests: [{ login: 'eve', messages: [msg(params.cursor ? 2 : 1)] }],
+        approvals: [],
+        dropped: 0,
+        takes_requests: true,
+        cursor: 'stuck',
+      },
+    }));
+    const conn = await connect();
+    const all = await conn.requests();
+    expect(all.requests).toEqual([{ login: 'eve', messages: [msg(1), msg(2)] }]);
+    expect(all).not.toHaveProperty('cursor');
+    expect(server.sent('requests')).toHaveLength(2);
   });
 
   it.each([

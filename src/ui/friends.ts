@@ -269,7 +269,9 @@ export class FriendsView {
 
   private async answer(login: string, action: RequestAction): Promise<void> {
     const done = { approve: `${login} may message you now.`, delete: `Deleted ${login}'s request.`, end: `${login} may no longer message you.` };
-    if (await this.act((conn) => conn.requestAnswer(login, action), done[action])) void this.loadRequests();
+    if (!(await this.act((conn) => conn.requestAnswer(login, action), done[action]))) return;
+    if (action === 'end') this.approvedBy.delete(login.toLowerCase());
+    void this.loadRequests();
   }
 
   private async clear(): Promise<void> {

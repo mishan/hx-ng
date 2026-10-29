@@ -727,6 +727,8 @@ export class App {
       onLogin: (ok) => {
         this.store.server = ok.server;
         this.store.forgetPmUids();
+        // A new session: receipts owed under the last are not its to send.
+        this.pendingReads.clear();
         // Every login, not just the first: a resume that fails after a
         // server restart logs in again on this connection, and the
         // operator may have changed the banner, or taken it down.
@@ -787,6 +789,8 @@ export class App {
         // connected", and nothing would ever try again.
         this.news.onReconnected();
         void this.news.refreshFollowing();
+        const conv = this.store.conversation(this.store.active);
+        if (conv && !this.store.covered && document.visibilityState === 'visible') this.flushReads(conv);
       },
       onMissedMail: (ok) => {
         void this.mergeStoredMail(ok).then((n) => {
@@ -810,6 +814,7 @@ export class App {
       onEnded: (reason) => {
         this.say(reason);
         this.noteTyping(true);
+        this.pendingReads.clear();
         this.media?.teardown();
         this.banner.clear();
         // The handles die with the session, so the blob URLs may as
@@ -2410,13 +2415,21 @@ export class App {
   }
 
   /** Tell a friend which of their messages are now read. */
+  /** A receipt lost with a socket that may resume waits for the resume;
+   *  one the server refused, or one for a session since gone, does not. */
   private flushReads(conv: Conversation): void {
     const conn = this.conn;
     const guids = this.pendingReads.get(conv.id);
     const login = conv.peer.login;
     if (!guids || !login || conn?.state !== 'online') return;
+    const session = conn.session;
     this.pendingReads.delete(conv.id);
-    for (const guid of guids) void conn.receipt(login, guid, true).catch(() => {});
+    for (const guid of guids) {
+      void conn.receipt(login, guid, true).catch((e: unknown) => {
+        if (e instanceof WireFailure || this.conn !== conn || conn.session !== session) return;
+        this.pendingReads.set(conv.id, [...(this.pendingReads.get(conv.id) ?? []), guid]);
+      });
+    }
   }
 
   /** Tell the friend this conversation is with whether a message to them

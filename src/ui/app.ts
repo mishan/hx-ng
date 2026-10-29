@@ -915,6 +915,9 @@ export class App {
             },
             hooks,
           );
+    // The old connection stayed current through the awaits above, so a
+    // receipt it was still sending may have been owed again since.
+    this.dropOwed();
     this.conn = conn;
     this.images.attach(conn);
     avatars.attach(conn);

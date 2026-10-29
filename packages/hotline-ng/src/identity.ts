@@ -46,7 +46,9 @@ export type IdentityErrorKind =
   | 'cert-mismatch'
   | 'clock-skew'
   | 'open-failed'
-  | 'replayed';
+  | 'replayed'
+  /** A friendship object a cutoff the checker holds ends. */
+  | 'withdrawn';
 
 export class IdentityError extends Error {
   constructor(

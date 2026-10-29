@@ -311,6 +311,40 @@ that has blocked you reads as missing, `no_such_user`, on every
 request that names it; your own block of it is `friend_add`'s
 `blocked`.
 
+### Portable friendships
+
+A friendship can belong to the two people rather than to one server:
+an offer signed by one party's device and an acceptance signed by the
+other's, which each client keeps and presents on the servers its user
+chooses, and which a signed withdrawal ends everywhere (hxd-ng's
+`docs/proposals/portable-friends.md` and `friendship-objects.md`).
+`signFriendOffer`, `signFriendAcceptance` and `signFriendWithdrawal`
+sign the objects with the device's key, and `checkFriendOffer`,
+`checkFriendship` and `checkFriendWithdrawal` run each check in its
+order, refusing with a `FriendshipRefused` that names the step. A
+withdrawal whose pair is not yet known is kept from
+`parseFriendWithdrawal` and finished by `checkWithdrawalPair`; only one
+checked whole gives a cutoff.
+`parseRotation` and `rotationChainEnd` follow a friend's rotations.
+
+On the wire, `friendships: true` beside `messaging: true` asks for it
+at login, and `caps` lists `CAP_FRIENDSHIPS` only where it was granted,
+to a session proving a device of the account's linked identity. Such a
+session puts an `offer` on `friendAdd`, a `friendship` on
+`friendRespond` and a `withdraw` on `friendRemove` or `block`, and has
+`friendshipsPresent` and `friendshipsFetch`. `beforeFriends` is where
+it presents its withdrawals, since they must reach the server before
+the roster is read.
+
+```ts
+const conn = new Connection({ ...creds, messaging: true, friendships: true }, {
+  beforeFriends: () => presentWithdrawals(conn),
+  onFriends: ({ friends }) => drawRoster(friends),
+});
+const offer = await signFriendOffer(deviceSignKey, { from: identity, to: theirs, time, expires, cert });
+await conn.friendAdd('bob', undefined, bytesToBase64url(offer));
+```
+
 ### Signed messages
 
 A line, a private message or an article can be signed by the device

@@ -27,6 +27,7 @@ import {
   type FilesListOk,
 } from './files.js';
 import {
+  CAP_FRIENDSHIPS,
   isEvent,
   isReply,
   ERROR_TEXT,
@@ -43,7 +44,12 @@ import {
   type BlockParams,
   type EventFrame,
   type Events,
+  type FriendRemoveParams,
   type FriendsOk,
+  type FriendshipsFetchOk,
+  type FriendshipsFetchParams,
+  type FriendshipsPresentOk,
+  type FriendshipsPresentParams,
   type FriendStateOk,
   type MessagingConfig,
   type MessagingUserOk,
@@ -230,6 +236,10 @@ export interface Credentials {
    *  `receipt`. A resume keeps what the login said. Without it, the
    *  first of the family's requests makes the session one that does. */
   messaging?: boolean;
+  /** With `messaging`, say `friendships` at login: its portable part
+   *  (§7.5), which the server grants only to a session proving a device
+   *  of the account's linked identity, and then lists in `caps`. */
+  friendships?: boolean;
   /** Opens each socket in place of the global `WebSocket`: for a
    *  runtime without one, or a test's fake server
    *  (`@hotline-ng/client/testing`). */
@@ -398,6 +408,11 @@ export interface ConnectionHooks {
    *  hands over the instant messages that waited, and those not yet
    *  acknowledged, as `im` events; without this hook nothing is asked. */
   onFriends?: (ok: FriendsOk) => void;
+  /** Awaited before each `friends` the handshake asks, by a session
+   *  granted `friendships`: where a client presents its withdrawals, so
+   *  that they are applied before its roster is read (§7.5). A failure
+   *  is traced, and the roster asked all the same. */
+  beforeFriends?: () => Promise<void>;
   /** The session is gone for good — kicked, logged out, banned, or the
    *  grace window lapsed. No further reconnection will be attempted. */
   onEnded?: (reason: string) => void;
@@ -678,6 +693,7 @@ export class Connection {
     if (this.sealed) params.sealed = true;
     this.speaks = this.creds.messaging === true;
     if (this.speaks) params.messaging = true;
+    if (this.speaks && this.creds.friendships) params.friendships = true;
 
     const ok = await this.request<LoginOk>('login', params);
     this.signing = ok.signs ?? null;
@@ -832,6 +848,13 @@ export class Connection {
    *  is. */
   private async pullFriends(): Promise<void> {
     if (!this.hooks.onFriends || !this.speaks || !this.messaging?.takes_part) return;
+    if (this.hooks.beforeFriends && this.hasCap(CAP_FRIENDSHIPS)) {
+      try {
+        await this.hooks.beforeFriends();
+      } catch (e) {
+        this.trace('in', 'withdrawals-failed', String(e instanceof Error ? e.message : e), true);
+      }
+    }
     for (let refusals = 0; ; ) {
       try {
         return this.hooks.onFriends(await this.request<FriendsOk>('friends', {}));
@@ -1523,6 +1546,8 @@ export class Connection {
     return wsToHttp(this.creds.url);
   }
 
+  /** With `withdraw` beside `login`, from a friendships session: withdraw
+   *  the friendship, then block (§7.5). */
   block(who: BlockParams): Promise<Record<string, never>> {
     return this.request('block', who);
   }
@@ -1829,19 +1854,40 @@ export class Connection {
     return this.family<FriendsOk>('friends', {});
   }
 
-  /** Ask for friendship, or accept theirs where they asked first. */
-  friendAdd(login: string, note?: string): Promise<FriendStateOk> {
-    return this.family<FriendStateOk>('friend_add', note === undefined ? { login } : { login, note });
+  /** Ask for friendship, or accept theirs where they asked first. With
+   *  an `offer`, from a friendships session, a portable friendship, or
+   *  on a friendship already standing an upgrade offer (§7.5). */
+  friendAdd(login: string, note?: string, offer?: string): Promise<FriendStateOk> {
+    return this.family<FriendStateOk>('friend_add', {
+      login,
+      ...(note !== undefined ? { note } : {}),
+      ...(offer !== undefined ? { offer } : {}),
+    });
   }
 
-  friendRespond(login: string, accept: boolean): Promise<FriendStateOk> {
-    return this.family<FriendStateOk>('friend_respond', { login, accept });
+  /** With `friendship`, the offer `login` sent and this client's own
+   *  acceptance of it, an accept makes a portable friendship. */
+  friendRespond(login: string, accept: boolean, friendship?: string): Promise<FriendStateOk> {
+    return this.family<FriendStateOk>('friend_respond', { login, accept, ...(friendship !== undefined ? { friendship } : {}) });
   }
 
   /** End a friendship, for both; withdraw a request sent, or decline
-   *  one received. */
-  friendRemove(login: string): Promise<Record<string, never>> {
-    return this.family<Record<string, never>>('friend_remove', { login });
+   *  one received. The rest of `FriendRemoveParams` is a friendships
+   *  session's. */
+  friendRemove(who: string | FriendRemoveParams): Promise<Record<string, never>> {
+    return this.family<Record<string, never>>('friend_remove', typeof who === 'string' ? { login: who } : who);
+  }
+
+  /** Present friendships here and give the server withdrawals, the
+   *  withdrawals applied first; each result in the order sent. */
+  friendshipsPresent(params: FriendshipsPresentParams): Promise<FriendshipsPresentOk> {
+    return this.family<FriendshipsPresentOk>('friendships_present', params);
+  }
+
+  /** The friendships whose hashes an entry carried, and the rotation
+   *  records that end at a friend's fingerprint. */
+  friendshipsFetch(params: FriendshipsFetchParams): Promise<FriendshipsFetchOk> {
+    return this.family<FriendshipsFetchOk>('friendships_fetch', params);
   }
 
   /** The name this account shows a friend by; `null` clears it. */
@@ -1853,8 +1899,9 @@ export class Connection {
     return this.family<Record<string, never>>('presence', params);
   }
 
-  findUser(login: string): Promise<MessagingUserOk> {
-    return this.family<MessagingUserOk>('find_user', { login });
+  /** By login, or by an identity's fingerprint. */
+  findUser(who: string | { fingerprint: string }): Promise<MessagingUserOk> {
+    return this.family<MessagingUserOk>('find_user', typeof who === 'string' ? { login: who } : who);
   }
 
   userProfile(login: string): Promise<MessagingUserOk> {

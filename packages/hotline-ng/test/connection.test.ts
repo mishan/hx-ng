@@ -1125,6 +1125,26 @@ describe('instant messaging', () => {
     expect(resumed.messaging).toEqual(away);
   });
 
+  it.each([
+    { name: 'granted', asked: true, caps: ['messaging', 'friendships'], order: ['friendships_present', 'friends'] },
+    { name: 'asked for and not granted', asked: true, caps: ['messaging'], order: ['friends'] },
+    { name: 'not asked for', asked: false, caps: ['messaging'], order: ['friends'] },
+  ])('presents withdrawals before friends only where friendships are $name', async ({ asked, caps, order }) => {
+    server.on('login', () => ({ ok: loginOk({ caps, messaging: MESSAGING }) }));
+    server.on('friends', () => ({ ok: { friends: [] } }));
+    server.on('friendships_present', () => ({ ok: { withdrawals: [], friendships: [] } }));
+    let conn: Connection | null = null;
+    const hooks = {
+      onFriends: () => {},
+      beforeFriends: async () => void (await conn!.friendshipsPresent({ withdrawals: ['w'] })),
+    };
+    conn = new Connection({ ...CREDS, messaging: true, friendships: asked }, hooks);
+    await conn.start();
+    await settle();
+    expect(server.sent('login')[0]?.params.friendships).toBe(asked ? true : undefined);
+    expect(server.requests.map((f) => f.req).filter((r) => r !== 'login')).toEqual(order);
+  });
+
   it('reads every page of requests, one entry per sender', async () => {
     const msg = (id: number) => ({ id, text: `hi ${id}`, at: 1_700_000_000 + id, guid: `g-${id}` });
     const pages = [
@@ -1175,7 +1195,19 @@ describe('instant messaging', () => {
     { call: (c: Connection) => c.friendAdd('bob'), req: 'friend_add', params: { login: 'bob' } },
     { call: (c: Connection) => c.friendAdd('bob', 'it is Alice'), req: 'friend_add', params: { login: 'bob', note: 'it is Alice' } },
     { call: (c: Connection) => c.friendRespond('bob', false), req: 'friend_respond', params: { login: 'bob', accept: false } },
+    { call: (c: Connection) => c.friendAdd('bob', undefined, 'o'), req: 'friend_add', params: { login: 'bob', offer: 'o' } },
+    { call: (c: Connection) => c.friendRespond('bob', true, 'f'), req: 'friend_respond', params: { login: 'bob', accept: true, friendship: 'f' } },
     { call: (c: Connection) => c.friendRemove('bob'), req: 'friend_remove', params: { login: 'bob' } },
+    { call: (c: Connection) => c.friendRemove({ login: 'bob', withdraw: 'w' }), req: 'friend_remove', params: { login: 'bob', withdraw: 'w' } },
+    { call: (c: Connection) => c.friendRemove({ fingerprint: 'fp' }), req: 'friend_remove', params: { fingerprint: 'fp' } },
+    { call: (c: Connection) => c.findUser({ fingerprint: 'fp' }), req: 'find_user', params: { fingerprint: 'fp' } },
+    { call: (c: Connection) => c.block({ login: 'bob', withdraw: 'w' }), req: 'block', params: { login: 'bob', withdraw: 'w' } },
+    {
+      call: (c: Connection) => c.friendshipsPresent({ withdrawals: ['w'], friendships: ['f'] }),
+      req: 'friendships_present',
+      params: { withdrawals: ['w'], friendships: ['f'] },
+    },
+    { call: (c: Connection) => c.friendshipsFetch({ hashes: ['h'] }), req: 'friendships_fetch', params: { hashes: ['h'] } },
     { call: (c: Connection) => c.friendAlias('bob', null), req: 'friend_alias', params: { login: 'bob', alias: null } },
     {
       call: (c: Connection) => c.setPresence({ state: 'away', status_text: null, takes_requests: true }),

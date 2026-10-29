@@ -24,6 +24,7 @@ import {
   RATE_LIMITED,
   CAP_CHAT_GUID,
   CAP_FILES,
+  CAP_FRIENDSHIPS,
   CAP_HISTORY,
   CAP_INBOX,
   CAP_SIGNED,
@@ -89,7 +90,7 @@ import { type AvatarChoice, pickIcon } from './iconpicker';
 import { IdentityPanel } from './identity';
 import { installButton } from './install';
 import { takeScanFragment, type Scanned } from '../identity/scan';
-import { getActiveDevice, getDevice, newsGuids, peers, sealedReplay, type StoredDevice } from '../identity/storage';
+import { friendshipBooks, getActiveDevice, getDevice, newsGuids, peers, sealedReplay, type StoredDevice } from '../identity/storage';
 import {
   PeerMemory,
   adoption,
@@ -139,6 +140,7 @@ import { closedForReporter, ModerationView, problem as moderationProblem } from 
 import { AccountsView } from './accounts';
 import { FriendsView } from './friends';
 import { OwedReceipts } from '../friends';
+import { PortableFriends } from '../friendships';
 import { mayAdminister } from '../accounts';
 import { NewsView } from './news';
 import { appendLine, isAtBottom, keepingPlace, lineOf, renderTranscript, scrollToEnd, signedName, spoken, type TranscriptOptions } from './transcript';
@@ -484,10 +486,14 @@ export class App {
   private accountsOpen = false;
   private friends = new FriendsView({
     conn: () => this.conn,
+    portable: () => this.portable,
     message: (login, name) => this.select(this.store.openPm({ login, nick: name }).id),
     onCount: () => this.renderRail(),
   });
   private friendsOpen = false;
+  /** This identity's portable friendships, on a session granted them. */
+  private portable: PortableFriends | null = null;
+  private portableOf: Session | null = null;
   /** The friend this session last told it is typing to, if any, and
    *  the timer saying it again while it is. */
   private typingTo: string | null = null;
@@ -815,7 +821,19 @@ export class App {
       },
       // A pull a replaced connection asked for may answer late.
       onFriends: ({ friends }) => {
-        if (conn === this.conn) this.friends.onFriends(friends);
+        if (conn !== this.conn) return;
+        this.friends.onFriends(friends);
+        void this.portable?.onRoster(friends).then(
+          () => this.friends.portableChanged(),
+          (e: unknown) => this.say(`Portable friends could not be brought up to date: ${this.problem(e)}`),
+        );
+      },
+      // Withdrawals go before the roster is read, so the keeper is opened
+      // here, once the login reply has said whether it was granted.
+      beforeFriends: async () => {
+        if (conn !== this.conn) return;
+        await this.openPortable(conn, way.url);
+        await this.portable?.presentWithdrawals();
       },
       onMissedHistory: (ok) => {
         void this.historyLines(ok).then((lines) => {
@@ -832,7 +850,10 @@ export class App {
         this.pendingReads.clear();
         // A session that ended after its replacement was installed owes
         // nothing the replacement does.
-        if (conn === this.conn) this.dropOwed();
+        if (conn === this.conn) {
+          this.dropOwed();
+          this.portable = null;
+        }
         this.media?.teardown();
         this.banner.clear();
         // The handles die with the session, so the blob URLs may as
@@ -907,6 +928,7 @@ export class App {
               url: way.url,
               messaging: true,
               ...(signs ? { signs, sealed: true } : {}),
+              ...(d.identity ? { friendships: true } : {}),
               // Asked as the login goes out, a fresh one after a failed
               // resume included: it proves the active device.
               ...(d.identity
@@ -1250,10 +1272,21 @@ export class App {
       const conv = this.store.pmWith({ login: d.login });
       if (conv) this.setTyping(conv, d.typing);
     });
-    conn.on('friend', (d) => this.friends.onFriend(d));
+    conn.on('friend', (d) => {
+      this.friends.onFriend(d);
+      void this.portable?.onFriend(d.friend).then(
+        () => this.friends.portableChanged(),
+        (e: unknown) => this.say(`Portable friends could not be brought up to date: ${this.problem(e)}`),
+      );
+    });
     conn.on('friend_request', (d) => {
+      const upgrade = d.offer !== undefined && this.friends.book.isFriend(d.login);
       this.friends.onFriendRequest(d);
-      this.say(`${d.login} asks to be your friend. Friends has the request.`);
+      this.say(
+        upgrade
+          ? `${d.login} offers to make your friendship portable. Friends has the offer.`
+          : `${d.login} asks to be your friend. Friends has the request.`,
+      );
     });
     conn.on('presence', (d) => {
       this.friends.onPresence(d);
@@ -1880,6 +1913,30 @@ export class App {
     this.autoGrow();
   }
 
+  /** The keeper for a session granted `friendships`, signing with the
+   *  device the session proved. Kept across the handshakes of one
+   *  connection. */
+  private async openPortable(conn: Session, server: string): Promise<void> {
+    if (!(conn instanceof Connection) || !conn.hasCap(CAP_FRIENDSHIPS) || !this.signer) {
+      this.portable = null;
+      return;
+    }
+    if (this.portable && this.portableOf === conn) return;
+    try {
+      this.portable = await PortableFriends.open({
+        conn,
+        server,
+        signer: { key: this.signer.key, cert: this.signer.cert },
+        store: friendshipBooks,
+        say: (text) => this.say(text),
+      });
+      this.portableOf = conn;
+    } catch (e) {
+      this.portable = null;
+      this.say(`Portable friends are not available in this browser: ${this.problem(e)}`);
+    }
+  }
+
   /** The device a session proves, remembered with the tab for a resume,
    *  and what it says of signing, `undefined` for one that cannot sign. */
   private useDevice(url: string, device: StoredDevice | null): Signs | undefined {
@@ -2051,6 +2108,13 @@ export class App {
       case 'unblock': {
         if (!arg) return this.say(`Usage: /${word} <nick, account or fingerprint>`);
         const on = word === 'block';
+        // A portable friend is blocked by login with a withdrawal, which
+        // ends the friendship on their other servers too.
+        const friend = on ? this.friends.book.get(arg) : undefined;
+        if (friend && this.portable?.with(friend.fingerprint).length) {
+          await this.portable.remove(friend, true);
+          return this.say(`Blocked ${arg}, and withdrew your friendship everywhere it travels.`);
+        }
         // A nick on the roster names a uid, which is the only way to
         // block an identity admitted as a guest — they have a
         // fingerprint to hold it against but no login of their own.

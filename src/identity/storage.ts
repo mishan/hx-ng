@@ -19,10 +19,11 @@
 
 import { bytesToHex, type SealedReplay, type ServerPin, type ServerPinStore } from '@hotline-ng/client';
 
+import { emptyBook, type BookStore, type FriendshipBook } from '../friendships';
 import type { GuidMemory } from '../signing';
 
 const DB_NAME = 'hxd-ng.identity';
-const DB_VERSION = 5;
+const DB_VERSION = 6;
 const DEVICES_STORE = 'devices';
 const META_STORE = 'meta';
 const SERVER_PINS_STORE = 'serverPins';
@@ -31,6 +32,7 @@ const SEALED_STORE = 'sealedReplay';
 const SEALED_UNTIL_INDEX = 'until';
 const PEERS_STORE = 'peers';
 const CONTACTS_STORE = 'contacts';
+const FRIENDSHIPS_STORE = 'friendships';
 const ACTIVE_KEY = 'active';
 /** The latest time the clock has shown a sealed message's reader. */
 const SEALED_LATEST_KEY = 'sealedLatest';
@@ -101,6 +103,9 @@ function openDb(): Promise<IDBDatabase> {
       }
       if (!db.objectStoreNames.contains(CONTACTS_STORE)) {
         db.createObjectStore(CONTACTS_STORE); // keyed by fingerprint
+      }
+      if (!db.objectStoreNames.contains(FRIENDSHIPS_STORE)) {
+        db.createObjectStore(FRIENDSHIPS_STORE); // keyed by the identity's fingerprint
       }
     };
     req.onsuccess = () => resolve(req.result);
@@ -431,5 +436,24 @@ export const peers = {
         if (r.fingerprint === fingerprint) store.delete(peerKey(r.server, r.fingerprint));
       }
       tx.objectStore(CONTACTS_STORE).delete(fingerprint);
+    }),
+};
+
+/** Each identity's portable friendships (`../friendships`), beside the
+ *  device keys that signed them, and like the server pins kept when a
+ *  device is forgotten: a friendship lost with its last copy is a
+ *  friend made again by hand. */
+export const friendshipBooks: BookStore = {
+  load: (identity) =>
+    withDb(FRIENDSHIPS_STORE, 'readonly', async (tx) => {
+      return (await requestResult<FriendshipBook | undefined>(tx.objectStore(FRIENDSHIPS_STORE).get(identity))) ?? emptyBook();
+    }),
+  update: (identity, fn) =>
+    withDb(FRIENDSHIPS_STORE, 'readwrite', async (tx) => {
+      const store = tx.objectStore(FRIENDSHIPS_STORE);
+      const book = (await requestResult<FriendshipBook | undefined>(store.get(identity))) ?? emptyBook();
+      fn(book);
+      store.put(book, identity);
+      return book;
     }),
 };

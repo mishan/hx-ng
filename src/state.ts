@@ -65,6 +65,11 @@ export interface Line {
   /** A sealed one invalid or unverified, its text hidden until the user
    *  reveals it. */
   hidden?: boolean;
+  /** The `guid` an instant message went or came under, which receipts
+   *  name it by. */
+  guid?: string;
+  /** How far a friend has told of one this client sent. */
+  receipt?: 'delivered' | 'read';
 }
 
 export type ConvId = string;
@@ -110,6 +115,8 @@ export interface Conversation {
    *  first message's, received verified or deniable or sent signed or
    *  sealed, or one the user accepted in its place. */
   verified?: string;
+  /** The friend at the far end is typing to this account. */
+  typing?: boolean;
 }
 
 export const LOBBY: ConvId = 'lobby';
@@ -117,7 +124,24 @@ export const LOBBY: ConvId = 'lobby';
 /** What `msg` should carry to reach this conversation's other half, or
  *  `null` when nothing can: a guest who has left the roster has no login
  *  to fall back on, and their uid is somebody else's now or nobody's. */
-export function addressOf(c: Conversation): { to_login: string } | { to: number } | null {
+export type Address = { to_login: string } | { to: number };
+
+/** `addressOf` with instant messaging (hxd-ng's `docs/hotline-ng.md`
+ *  §7.5) taken into account: where this account takes part, a `msg` by
+ *  login to someone who is neither a friend nor under an approval
+ *  becomes a message request they may never see, so one present on the
+ *  roster is sent by uid instead. */
+export function messageAddress(
+  c: Conversation,
+  o: { takesPart: boolean; present: (uid: number) => boolean; mayIm: (login: string) => boolean },
+): Address | null {
+  const to = addressOf(c);
+  const uid = c.peer.uid;
+  if (!to || !('to_login' in to) || uid === undefined || !o.present(uid)) return to;
+  return !o.takesPart || o.mayIm(to.to_login) ? to : { to: uid };
+}
+
+export function addressOf(c: Conversation): Address | null {
   // The login first. It is the durable name, and it is the only one that
   // reaches someone who is not here.
   if (c.peer.login !== undefined) return { to_login: c.peer.login };
@@ -280,9 +304,15 @@ export class Store {
   replaceRoster(users: User[]): void {
     this.users.clear();
     for (const u of users) this.users.set(u.uid, u);
+    // A uid seen again may be someone else's now, with nothing on this
+    // side having seen it change hands; a conversation with a login
+    // still reaches its person by that, and has the uid back with their
+    // next message.
     for (const key of [...this.pmIndex.keys()]) {
       const uid = key.startsWith('uid:') ? Number(key.slice(4)) : undefined;
-      if (uid !== undefined && !this.users.has(uid)) this.forgetPmUid(uid);
+      if (uid === undefined) continue;
+      const c = this.conversations.get(this.pmIndex.get(key)!);
+      if (!this.users.has(uid) || c?.peer.login !== undefined) this.forgetPmUid(uid);
     }
   }
 
@@ -560,6 +590,18 @@ export class Store {
     // and is about none of them: a reply from Bob is not unread chat with
     // Carol.
     if (fresh && line.article === undefined && (id !== this.active || this.covered)) c.unread++;
+    return c;
+  }
+
+  /** A friend's `receipt` for a message this client sent: the
+   *  conversation it moved, or undefined. A read is never taken back to
+   *  delivered, whichever arrives first. */
+  receipt(login: string, guid: string, read: boolean): Conversation | undefined {
+    const c = this.pmWith({ login });
+    const line = c?.lines.find((l) => l.local && l.guid === guid);
+    if (!line || line.receipt === 'read' || (!read && line.receipt === 'delivered')) return undefined;
+    line.receipt = read ? 'read' : 'delivered';
+    this.revision++;
     return c;
   }
 

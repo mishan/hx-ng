@@ -1030,3 +1030,150 @@ describe('sealed', () => {
     expect(conn.sealing).toBe(echo);
   });
 });
+
+describe('instant messaging', () => {
+  const MESSAGING = { takes_part: true, max_roster: 500, max_message_bytes: 4096, request_messages: 5 };
+  const BOB = { login: 'bob', state: 'accepted' as const, presence: 'online' as const };
+
+  it.each([
+    ['asked for', true, true],
+    ['not asked for', false, undefined],
+  ] as const)('says messaging at login only when %s, and never on a resume', async (_, messaging, said) => {
+    server.on('login', () => ({ ok: loginOk({ caps: ['messaging'], messaging: MESSAGING }) }));
+    const conn = new Connection({ ...CREDS, messaging }, {});
+    await conn.start();
+    expect(server.sent('login')[0]?.params.messaging).toBe(said);
+    expect(conn.messaging).toEqual(MESSAGING);
+
+    server.on('resume', () => ({ ok: { replay: 0, self: me(1, 'Alice') } }));
+    server.on('sync', () => ({ ok: { server: { name: 'Test', subject: 'hi' }, users: [], seq: 0 } }));
+    const resumed = new Connection({ ...CREDS, messaging }, {});
+    await resumed.start();
+    expect(server.sent('resume')[0]?.params).not.toHaveProperty('messaging');
+    expect(resumed.messaging).toEqual(MESSAGING);
+  });
+
+  it.each([
+    { name: 'a login that said it and takes part', messaging: true, takesPart: true, hook: true, asked: 1 },
+    { name: 'a login that did not say it', messaging: false, takesPart: true, hook: true, asked: 0 },
+    { name: 'an account that takes no part', messaging: true, takesPart: false, hook: true, asked: 0 },
+    { name: 'a caller with no hook', messaging: true, takesPart: true, hook: false, asked: 0 },
+  ])('asks for friends after $name: $asked', async ({ messaging, takesPart, hook, asked }) => {
+    server.on('login', () => ({
+      ok: loginOk({ caps: ['messaging'], messaging: { ...MESSAGING, takes_part: takesPart } }),
+    }));
+    server.on('friends', () => ({ ok: { friends: [BOB] } }));
+    const heard: unknown[] = [];
+    const conn = new Connection({ ...CREDS, messaging }, hook ? { onFriends: (ok) => heard.push(ok.friends) } : {});
+    await conn.start();
+    await settle();
+    expect(server.sent('friends')).toHaveLength(asked);
+    expect(heard).toEqual(asked ? [[BOB]] : []);
+  });
+
+  it.each([
+    ['a resume', () => server.on('resume', () => ({ ok: { replay: 0, self: me(1, 'Alice') } }))],
+    ['a resync', () => server.on('resume', () => ({ error: { code: 'resync_required', text: 'gap' } }))],
+  ] as const)('asks for friends again after %s', async (_, answer) => {
+    server.on('login', () => ({ ok: loginOk({ caps: ['messaging'], messaging: MESSAGING }) }));
+    server.on('friends', () => ({ ok: { friends: [] } }));
+    server.on('sync', () => ({ ok: { server: { name: 'Test', subject: 'hi' }, users: [], seq: 5 } }));
+    const hooks = { onFriends: () => {} };
+    await new Connection({ ...CREDS, messaging: true }, hooks).start();
+    await settle();
+    answer();
+    await new Connection({ ...CREDS, messaging: true }, hooks).start();
+    await settle();
+    expect(server.sent('friends')).toHaveLength(2);
+  });
+
+  it('makes a session that did not say it one that does at its first family request, asks for friends then, and keeps that for a resume', async () => {
+    server.on('login', () => ({ ok: loginOk({ caps: ['messaging'], messaging: MESSAGING }) }));
+    server.on('friends', () => ({ ok: { friends: [] } }));
+    server.on('presence', () => ({ ok: {} }));
+    const hooks = { onFriends: () => {} };
+    const conn = new Connection(CREDS, hooks);
+    await conn.start();
+    await conn.setPresence({ state: 'away' });
+    await conn.setPresence({ state: 'busy' });
+    await settle();
+    expect(server.sent('friends')).toHaveLength(1);
+
+    server.on('resume', () => ({ ok: { replay: 0, self: me(1, 'Alice') } }));
+    server.on('sync', () => ({ ok: { server: { name: 'Test', subject: 'hi' }, users: [], seq: 0 } }));
+    await new Connection(CREDS, hooks).start();
+    await settle();
+    expect(server.sent('friends')).toHaveLength(2);
+  });
+
+  it('asks for friends again after rate_limited, and takes the block sync restates', async () => {
+    server.on('login', () => ({ ok: loginOk({ caps: ['messaging'], messaging: MESSAGING }) }));
+    let asked = 0;
+    server.on('friends', () =>
+      ++asked === 1 ? { error: { code: 'rate_limited', text: 'slow down', retry_after: 0 } } : { ok: { friends: [BOB] } },
+    );
+    const heard: unknown[] = [];
+    await new Connection({ ...CREDS, messaging: true }, { onFriends: (ok) => heard.push(ok.friends) }).start();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(heard).toEqual([[BOB]]);
+
+    const away = { ...MESSAGING, state: 'away' as const, takes_requests: true };
+    server.on('resume', () => ({ error: { code: 'resync_required', text: 'gap' } }));
+    server.on('sync', () => ({ ok: { server: { name: 'Test', subject: 'hi' }, users: [], seq: 5, messaging: away } }));
+    const resumed = new Connection({ ...CREDS, messaging: true }, {});
+    await resumed.start();
+    expect(resumed.messaging).toEqual(away);
+  });
+
+  it('reads every page of requests, one entry per sender', async () => {
+    const msg = (id: number) => ({ id, text: `hi ${id}`, at: 1_700_000_000 + id, guid: `g-${id}` });
+    const pages = [
+      { requests: [{ login: 'eve', messages: [msg(1)] }], approvals: [{ login: 'dan' }], dropped: 2, takes_requests: true, cursor: 'c1' },
+      { requests: [{ login: 'eve', messages: [msg(2)] }, { login: 'mal', messages: [msg(3)] }], approvals: [], dropped: 1, takes_requests: false },
+    ];
+    server.on('requests', (params) => ({ ok: pages[params.cursor === 'c1' ? 1 : 0] }));
+    const conn = await connect();
+    expect(await conn.requests()).toEqual({
+      requests: [
+        { login: 'eve', messages: [msg(1), msg(2)] },
+        { login: 'mal', messages: [msg(3)] },
+      ],
+      approvals: [{ login: 'dan' }],
+      dropped: 3,
+      takes_requests: false,
+    });
+    expect(server.sent('requests').map((f) => f.params)).toEqual([{}, { cursor: 'c1' }]);
+  });
+
+  it('stops paging requests a server never ends, and keeps the cursor', async () => {
+    server.on('requests', () => ({ ok: { requests: [], approvals: [], dropped: 0, takes_requests: true, cursor: 'again' } }));
+    const conn = await connect();
+    expect((await conn.requests()).cursor).toBe('again');
+  });
+
+  it.each([
+    { call: (c: Connection) => c.friends(), req: 'friends', params: {} },
+    { call: (c: Connection) => c.friendAdd('bob'), req: 'friend_add', params: { login: 'bob' } },
+    { call: (c: Connection) => c.friendAdd('bob', 'it is Alice'), req: 'friend_add', params: { login: 'bob', note: 'it is Alice' } },
+    { call: (c: Connection) => c.friendRespond('bob', false), req: 'friend_respond', params: { login: 'bob', accept: false } },
+    { call: (c: Connection) => c.friendRemove('bob'), req: 'friend_remove', params: { login: 'bob' } },
+    { call: (c: Connection) => c.friendAlias('bob', null), req: 'friend_alias', params: { login: 'bob', alias: null } },
+    {
+      call: (c: Connection) => c.setPresence({ state: 'away', status_text: null, takes_requests: true }),
+      req: 'presence',
+      params: { state: 'away', status_text: null, takes_requests: true },
+    },
+    { call: (c: Connection) => c.findUser('bob'), req: 'find_user', params: { login: 'bob' } },
+    { call: (c: Connection) => c.userProfile('bob'), req: 'user_profile', params: { login: 'bob' } },
+    { call: (c: Connection) => c.receipt('bob', 'g-1'), req: 'receipt', params: { login: 'bob', guid: 'g-1' } },
+    { call: (c: Connection) => c.receipt('bob', 'g-1', true), req: 'receipt', params: { login: 'bob', guid: 'g-1', read: true } },
+    { call: (c: Connection) => c.typing('bob', true), req: 'typing', params: { login: 'bob', typing: true } },
+    { call: (c: Connection) => c.requestAnswer('eve', 'end'), req: 'request_answer', params: { login: 'eve', action: 'end' } },
+    { call: (c: Connection) => c.requestsClear({ since: 1_700_000_000 }), req: 'requests_clear', params: { since: 1_700_000_000 } },
+  ])('$req sends the frame the wire specifies: $params', async ({ call, req, params }) => {
+    const conn = await connect();
+    server.on(req, () => ({ ok: {} }));
+    await call(conn);
+    expect(server.sent(req).map((f) => f.params)).toEqual([params]);
+  });
+});

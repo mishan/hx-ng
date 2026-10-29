@@ -198,6 +198,7 @@ export class ClassicConnection implements Session {
   accounts: Session['accounts'] = null;
   roles: Session['roles'] = null;
   files: Session['files'] = null;
+  messaging: Session['messaging'] = null;
   banner: Session['banner'] = null;
   avatars: Session['avatars'] = null;
   news: NewsConfig | null = null;
@@ -1311,6 +1312,39 @@ export class ClassicConnection implements Session {
   }
   async roleDelete(): Promise<never> {
     throw unavailable('roles');
+  }
+  async friends(): Promise<never> {
+    throw unavailable('instant messaging');
+  }
+  async friendAdd(): Promise<never> {
+    throw unavailable('instant messaging');
+  }
+  async friendRespond(): Promise<never> {
+    throw unavailable('instant messaging');
+  }
+  async friendRemove(): Promise<never> {
+    throw unavailable('instant messaging');
+  }
+  async friendAlias(): Promise<never> {
+    throw unavailable('instant messaging');
+  }
+  async setPresence(): Promise<never> {
+    throw unavailable('instant messaging');
+  }
+  async receipt(): Promise<never> {
+    throw unavailable('instant messaging');
+  }
+  async typing(): Promise<never> {
+    throw unavailable('instant messaging');
+  }
+  async requests(): Promise<never> {
+    throw unavailable('instant messaging');
+  }
+  async requestAnswer(): Promise<never> {
+    throw unavailable('instant messaging');
+  }
+  async requestsClear(): Promise<never> {
+    throw unavailable('instant messaging');
   }
   async uploadMedia(): Promise<never> {
     throw unavailable('sending images');

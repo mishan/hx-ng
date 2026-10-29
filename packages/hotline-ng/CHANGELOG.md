@@ -14,6 +14,21 @@ says how.
 
 ### Added
 
+- Instant messaging (hxd-ng's `docs/hotline-ng.md` §7.5):
+  `Credentials.messaging` says `messaging` at login, and
+  `Connection.messaging` is the login reply's `MessagingConfig`, and
+  `sync`'s, saved with the session. `onFriends` is handed `friends`
+  after each login, resume and resync of a session that speaks the
+  family and takes part, and after the request that made it one, which
+  is what hands over the instant messages that waited; a `friends`
+  refused `rate_limited` is asked again. `friends`,
+  `friendAdd`, `friendRespond`, `friendRemove`, `friendAlias`,
+  `setPresence`, `findUser`, `userProfile`, `receipt`, `typing`,
+  `requests` (every page, one entry per sender, as `mergeRequests`
+  joins two), `requestAnswer` and `requestsClear`; the events `friend`, `friend_request`, `presence`,
+  `im`, `receipt`, `typing` and `requests_changed`; `MsgOk.requested`;
+  `CAP_MESSAGING`; the codes `already_friends`, `request_pending`,
+  `not_friends`, `roster_full`, `request_full` and `no_such_request`.
 - Roles (hxd-ng's `docs/roles.md` §7): `Connection.roles`, a
   `RolesConfig` from the login reply and `sync`, kept current by
   `roles_changed` and `account_changed` and saved with the session;

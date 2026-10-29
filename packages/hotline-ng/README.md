@@ -274,6 +274,43 @@ as a room joined with `request` rather than `roomJoin`, starts at its
 newest line, so that gap is the caller's to page and later ones are
 covered.
 
+### Instant messaging
+
+Where `caps` lists `messaging`, the login reply's and `sync`'s
+`messaging` block says whether this account takes part, the bounds it
+is held to, and what it shows of itself: its `state`, `status_text`
+and whether it `takes_requests`. A client that speaks the family says
+so with `messaging: true` in its `Credentials`, or by sending any of
+the family's requests; only then is it sent the family's events, and a
+friend's instant messages reach it as `im` rather than `msg`. Accounts are named
+by login throughout, and an instant message is a `msg` by `to_login`,
+answered `requested: true` where it became a message request instead.
+
+```ts
+const conn = new Connection({ ...creds, messaging: true }, {
+  onFriends: ({ friends }) => drawRoster(friends),
+});
+conn.on('im', (m) => {
+  show(m);
+  void conn.receipt(m.from.login, m.guid);
+});
+conn.on('friend', ({ friend }) => replaceRow(friend));
+conn.on('presence', (p) => updateRow(p));
+await conn.friendAdd('bob', 'it is Alice');
+await conn.msg({ to_login: 'bob', text: 'hi', guid: newGuid() });
+```
+
+`onFriends` is handed the roster after each login, resume and resync,
+and after the request that made a session one that speaks the family,
+since asking for it is what hands over what waited. Acknowledging each
+`im` with `receipt` is the caller's, and one it does not is handed over
+again, so an `im` whose `guid` and sender were shown already is a
+repeat. `requests` reads every page of the message requests and
+approvals, and `mergeRequests` joins two pages as it does. An account
+that has blocked you reads as missing, `no_such_user`, on every
+request that names it; your own block of it is `friend_add`'s
+`blocked`.
+
 ### Signed messages
 
 A line, a private message or an article can be signed by the device

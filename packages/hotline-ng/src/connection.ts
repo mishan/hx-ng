@@ -43,6 +43,16 @@ import {
   type BlockParams,
   type EventFrame,
   type Events,
+  type FriendsOk,
+  type FriendStateOk,
+  type MessagingConfig,
+  type MessagingUserOk,
+  type PresenceParams,
+  type RequestAction,
+  type RequestsClearOk,
+  type RequestsClearParams,
+  type RequestsOk,
+  mergeRequests,
   type HistoryOk,
   type HistoryParams,
   type InboxCounts,
@@ -214,6 +224,12 @@ export interface Credentials {
   signs?: Signs;
   /** Whether a resume says `sealed`, as `signs` above. */
   sealed?: boolean;
+  /** Say `messaging` at login: this client speaks the friend family
+   *  (§7.5), so a friend's instant messages reach it as `im` events
+   *  rather than `msg`, each for the caller to acknowledge with
+   *  `receipt`. A resume keeps what the login said. Without it, the
+   *  first of the family's requests makes the session one that does. */
+  messaging?: boolean;
   /** Opens each socket in place of the global `WebSocket`: for a
    *  runtime without one, or a test's fake server
    *  (`@hotline-ng/client/testing`). */
@@ -269,6 +285,10 @@ interface Saved {
   accounts?: AccessSet | null;
   roles?: RolesConfig | null;
   files?: FilesConfig | null;
+  messaging?: MessagingConfig | null;
+  /** The session speaks the friend family: its login said so, or it
+   *  has sent one of the family's requests. */
+  speaks?: boolean;
 }
 
 const SAVED_KEY = 'hxd-ng.session';
@@ -285,6 +305,8 @@ const HISTORY_BACKOFF_TRIES = 3;
  *  means a server that answers `has_more` forever cannot hold the loop
  *  open for the life of the session. */
 const HISTORY_CATCHUP_PAGES = 20;
+/** Pages of `requests` read in one call, for the same reason. */
+const REQUESTS_PAGES = 20;
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -371,6 +393,11 @@ export interface ConnectionHooks {
    *  with the room they are from, 0 for the lobby. They may overlap
    *  live events already handled; deduplicate by id within a room. */
   onMissedHistory?: (ok: HistoryOk, room: number) => void;
+  /** This account's friends, asked after each login, resume and resync
+   *  of a session that said `messaging` and takes part. Asking is what
+   *  hands over the instant messages that waited, and those not yet
+   *  acknowledged, as `im` events; without this hook nothing is asked. */
+  onFriends?: (ok: FriendsOk) => void;
   /** The session is gone for good — kicked, logged out, banned, or the
    *  grace window lapsed. No further reconnection will be attempted. */
   onEnded?: (reason: string) => void;
@@ -457,6 +484,12 @@ export class Connection {
   /** What this session may change in the file area, from the login reply
    *  or the saved session. `null` means no file area. */
   files: FilesConfig | null = null;
+  /** The friend family's bounds and whether this account takes part,
+   *  from the login reply or the saved session. `null` means the server
+   *  has no such family. */
+  messaging: MessagingConfig | null = null;
+  /** This session speaks the friend family, so is sent its events. */
+  private speaks = false;
   /** Round-trip time of the last explicit `ping`, in milliseconds. */
   rtt: number | null = null;
   /** The `signs` the next resume says; `setSigns` changes it and tells
@@ -516,6 +549,8 @@ export class Connection {
       this.accounts = saved.accounts ?? null;
       this.roles = saved.roles ?? null;
       this.files = saved.files ?? null;
+      this.messaging = saved.messaging ?? null;
+      this.speaks = saved.speaks ?? false;
     } else if (opts.resumeOnly) {
       throw new Error('no session to resume');
     }
@@ -641,6 +676,8 @@ export class Connection {
     if (this.signs) params.signs = this.signs;
     this.sealed = this.creds.identity?.sealed?.() ?? false;
     if (this.sealed) params.sealed = true;
+    this.speaks = this.creds.messaging === true;
+    if (this.speaks) params.messaging = true;
 
     const ok = await this.request<LoginOk>('login', params);
     this.signing = ok.signs ?? null;
@@ -666,6 +703,7 @@ export class Connection {
     this.accounts = ok.accounts ?? null;
     this.roles = ok.roles ?? null;
     this.files = ok.files ?? null;
+    this.messaging = ok.messaging ?? null;
     // Only a session that may detach is worth remembering: without the
     // permission a resume can only ever answer session_expired, and
     // storing a token we know is useless just invites a confusing
@@ -681,6 +719,7 @@ export class Connection {
     // otherwise hold the connect screen open behind it. Failures are
     // traced and swallowed inside.
     void this.pullMissedHistory(historyAfter);
+    void this.pullFriends();
   }
 
   /** Returns true when the session was recovered (with or without a
@@ -709,6 +748,7 @@ export class Connection {
         await this.snapshot(this.gotSnapshot);
         this.persist();
       }
+      void this.pullFriends();
       return true;
     } catch (e) {
       if (!(e instanceof WireFailure)) throw e;
@@ -746,6 +786,7 @@ export class Connection {
       this.retry = 0;
       this.setState('online');
       await this.pullMissedMail();
+      void this.pullFriends();
       void this.pullMissedRooms(historyAfter, roomsAfter, ok.rooms?.joined ?? []);
       return true;
     }
@@ -782,6 +823,41 @@ export class Connection {
     } catch (e) {
       this.trace('in', 'missed-mail-failed', String(e instanceof Error ? e.message : e), true);
     }
+  }
+
+  /** The `friends` §7.5 asks for after each handshake, and after the
+   *  request that made this a session that speaks the family. Asked
+   *  again after `rate_limited`, which is pacing and not an answer;
+   *  any other failure is traced and swallowed, as `pullMissedMail`'s
+   *  is. */
+  private async pullFriends(): Promise<void> {
+    if (!this.hooks.onFriends || !this.speaks || !this.messaging?.takes_part) return;
+    for (let refusals = 0; ; ) {
+      try {
+        return this.hooks.onFriends(await this.request<FriendsOk>('friends', {}));
+      } catch (e) {
+        if (e instanceof WireFailure && e.wire.code === RATE_LIMITED && refusals < HISTORY_BACKOFF_TRIES) {
+          const after = e.wire.retry_after;
+          await sleep(after !== undefined ? after * 1000 : HISTORY_BACKOFF_MS * 2 ** refusals);
+          refusals++;
+          continue;
+        }
+        this.trace('in', 'friends-failed', String(e instanceof Error ? e.message : e), true);
+        return;
+      }
+    }
+  }
+
+  /** One of the family's requests. The first from a session that did
+   *  not say `messaging` makes it one that speaks the family, which then
+   *  asks for its friends as a login would have. */
+  private async family<T>(req: string, params: unknown): Promise<T> {
+    const first = !this.speaks;
+    this.speaks = true;
+    if (first) this.persist();
+    const ok = await this.request<T>(req, params);
+    if (first && req !== 'friends') void this.pullFriends();
+    return ok;
   }
 
   /** Recover durable public chat after an outbox gap. The cursor is
@@ -841,6 +917,7 @@ export class Connection {
     this.rosterStale = false;
     if (ok.accounts) this.adoptAccess(ok.accounts);
     if (ok.roles) this.roles = ok.roles;
+    if (ok.messaging) this.messaging = ok.messaging;
     if (ok.rooms) {
       // The server's word on which rooms this session is in. A room new
       // to the record starts at its newest line: what came before is the
@@ -1740,6 +1817,89 @@ export class Connection {
     return this.request('role_delete', { name });
   }
 
+  // --- instant messaging (docs/hotline-ng.md §7.5) ---------------------
+  //
+  // Every account is named by login. An instant message is a `msg` by
+  // `to_login`, answered `requested` where it became a message request.
+  // An account that has blocked this one reads as missing, `no_such_user`;
+  // this one's own block of it is `friend_add`'s `blocked`.
+
+  /** This account's roster; asking also hands over what waited. */
+  friends(): Promise<FriendsOk> {
+    return this.family<FriendsOk>('friends', {});
+  }
+
+  /** Ask for friendship, or accept theirs where they asked first. */
+  friendAdd(login: string, note?: string): Promise<FriendStateOk> {
+    return this.family<FriendStateOk>('friend_add', note === undefined ? { login } : { login, note });
+  }
+
+  friendRespond(login: string, accept: boolean): Promise<FriendStateOk> {
+    return this.family<FriendStateOk>('friend_respond', { login, accept });
+  }
+
+  /** End a friendship, for both; withdraw a request sent, or decline
+   *  one received. */
+  friendRemove(login: string): Promise<Record<string, never>> {
+    return this.family<Record<string, never>>('friend_remove', { login });
+  }
+
+  /** The name this account shows a friend by; `null` clears it. */
+  friendAlias(login: string, alias: string | null): Promise<Record<string, never>> {
+    return this.family<Record<string, never>>('friend_alias', { login, alias });
+  }
+
+  setPresence(params: PresenceParams): Promise<Record<string, never>> {
+    return this.family<Record<string, never>>('presence', params);
+  }
+
+  findUser(login: string): Promise<MessagingUserOk> {
+    return this.family<MessagingUserOk>('find_user', { login });
+  }
+
+  userProfile(login: string): Promise<MessagingUserOk> {
+    return this.family<MessagingUserOk>('user_profile', { login });
+  }
+
+  /** Acknowledge the `im` `login` sent under `guid`: received, or with
+   *  `read` read. */
+  receipt(login: string, guid: string, read = false): Promise<Record<string, never>> {
+    return this.family<Record<string, never>>('receipt', read ? { login, guid, read } : { login, guid });
+  }
+
+  typing(login: string, typing: boolean): Promise<Record<string, never>> {
+    return this.family<Record<string, never>>('typing', { login, typing });
+  }
+
+  /** The message requests waiting for this account and its approvals,
+   *  every page of them, as the wire requires a client to read; a
+   *  sender whose requests span pages is one entry. Listing makes this a
+   *  session that understands requests. Past the pages this reads, the
+   *  answer keeps the `cursor` to go on from. */
+  async requests(cursor?: string): Promise<RequestsOk> {
+    let all: RequestsOk | null = null;
+    for (let page = 0; page < REQUESTS_PAGES; page++) {
+      const ok = await this.family<RequestsOk>('requests', cursor === undefined ? {} : { cursor });
+      all = all ? mergeRequests(all, ok) : ok;
+      cursor = ok.cursor;
+      if (cursor === undefined) return all;
+    }
+    this.trace('in', 'requests-stopped', `more at ${cursor}`, true);
+    return all!;
+  }
+
+  /** Approve the conversation with `login`, delete its request, or end
+   *  an approval. */
+  requestAnswer(login: string, action: RequestAction): Promise<Record<string, never>> {
+    return this.family<Record<string, never>>('request_answer', { login, action });
+  }
+
+  /** Decline every friend request and delete every message request
+   *  received in the span; approvals and friendships are untouched. */
+  requestsClear(params: RequestsClearParams = {}): Promise<RequestsClearOk> {
+    return this.family<RequestsClearOk>('requests_clear', params);
+  }
+
   async ping(): Promise<number> {
     const t0 = performance.now();
     await this.request('ping', {});
@@ -1832,6 +1992,8 @@ export class Connection {
       accounts: this.accounts,
       roles: this.roles,
       files: this.files,
+      messaging: this.messaging,
+      speaks: this.speaks,
     });
   }
 

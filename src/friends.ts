@@ -94,3 +94,25 @@ export class FriendBook {
     };
   }
 }
+
+/** Read receipts owed for messages the user was shown, whose sending
+ *  failed in a way worth trying again: kept apart from the messages not
+ *  yet read, so a retry tells nobody of one the user never saw. */
+export class OwedReceipts {
+  private owed = new Map<string, { login: string; guid: string }>();
+
+  add(login: string, guid: string): void {
+    this.owed.set(`${keyOf(login)} ${guid}`, { login, guid });
+  }
+
+  /** Everything owed, which is then no longer held here. */
+  take(): { login: string; guid: string }[] {
+    const all = [...this.owed.values()];
+    this.owed.clear();
+    return all;
+  }
+
+  clear(): void {
+    this.owed.clear();
+  }
+}

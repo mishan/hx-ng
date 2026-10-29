@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import type { Friend } from '@hotline-ng/client';
 
-import { FriendBook } from '../src/friends';
+import { FriendBook, OwedReceipts } from '../src/friends';
 import { messageAddress, Store } from '../src/state';
 
 const row = (login: string, state: Friend['state'], over: Partial<Friend> = {}): Friend => ({ login, state, ...over });
@@ -62,6 +62,26 @@ describe('receipts', () => {
     expect(conv.lines[0]?.receipt).toBe(want);
   });
 
+  it.each<[string, boolean[], 'delivered' | 'read']>([
+    ['delivered', [false], 'delivered'],
+    ['read, whichever came first', [true, false], 'read'],
+  ])('keeps one that came before its line for it: %s', (_, reads, want) => {
+    const store = new Store();
+    const conv = store.openPm({ login: 'bob', nick: 'Bob' });
+    for (const read of reads) expect(store.receipt('bob', 'g-1', read)).toBeUndefined();
+    store.add(conv.id, { t: 1, kind: 'chat', text: 'hi', local: true, guid: 'g-1' });
+    expect(conv.lines[0]?.receipt).toBe(want);
+  });
+
+  it('keeps only so many receipts for lines not added yet, the newest', () => {
+    const store = new Store();
+    const conv = store.openPm({ login: 'bob', nick: 'Bob' });
+    for (let i = 0; i <= 256; i++) store.receipt('bob', `g-${i}`, true);
+    store.add(conv.id, { t: 1, kind: 'chat', text: 'first', local: true, guid: 'g-0' });
+    store.add(conv.id, { t: 2, kind: 'chat', text: 'last', local: true, guid: 'g-256' });
+    expect(conv.lines.map((l) => l.receipt)).toEqual([undefined, 'read']);
+  });
+
   it('marks nothing for a guid this client did not send', () => {
     const store = new Store();
     const conv = store.openPm({ login: 'bob', nick: 'Bob' });
@@ -100,5 +120,19 @@ describe('the address a message goes to', () => {
     const conv = store.openPm({ uid: 7, nick: 'Bob' });
     store.replaceRoster([bob]);
     expect(conv.peer.uid).toBe(7);
+  });
+});
+
+describe('owed read receipts', () => {
+  it('hands each over once, a repeat of one owed again held once', () => {
+    const owed = new OwedReceipts();
+    owed.add('bob', 'g-1');
+    owed.add('Bob', 'g-1');
+    owed.add('eve', 'g-2');
+    expect(owed.take()).toEqual([
+      { login: 'Bob', guid: 'g-1' },
+      { login: 'eve', guid: 'g-2' },
+    ]);
+    expect(owed.take()).toEqual([]);
   });
 });

@@ -21,6 +21,7 @@ import {
   screenShareBlockedReason,
   VoiceSession,
   WireFailure,
+  RATE_LIMITED,
   CAP_CHAT_GUID,
   CAP_FILES,
   CAP_HISTORY,
@@ -137,6 +138,7 @@ import { avatars, face } from './avatar';
 import { closedForReporter, ModerationView, problem as moderationProblem } from './moderation';
 import { AccountsView } from './accounts';
 import { FriendsView } from './friends';
+import { OwedReceipts } from '../friends';
 import { mayAdminister } from '../accounts';
 import { NewsView } from './news';
 import { appendLine, isAtBottom, keepingPlace, lineOf, renderTranscript, scrollToEnd, signedName, spoken, type TranscriptOptions } from './transcript';
@@ -249,6 +251,9 @@ const SEALED_MSG_MAX_BYTES = 8192;
  *  own is said again at the shorter interval while typing goes on
  *  (§7.5). */
 const TYPING_SHOWN_MS = 10_000;
+/** How long read receipts refused `rate_limited` wait when the server
+ *  names no time. */
+const READ_RETRY_MS = 1_000;
 const TYPING_RENEW_MS = 5_000;
 
 /** How long after a resume the events it replays may still arrive. */
@@ -492,6 +497,10 @@ export class App {
   private typingShown = new Map<ConvId, number>();
   /** Instant messages shown and not yet told read, by conversation. */
   private pendingReads = new Map<ConvId, string[]>();
+  /** Read receipts for messages shown, refused `rate_limited` or lost
+   *  with a socket that may resume, and the timer retrying the first. */
+  private owedReads = new OwedReceipts();
+  private owedRetry: number | null = null;
   /** Each instant message shown, by sender and guid: one handed over
    *  again is acknowledged again and not shown twice. */
   private imSeen = new Set<string>();
@@ -692,6 +701,7 @@ export class App {
     this.friendsOpen = false;
     this.noteTyping(true);
     this.pendingReads.clear();
+    this.dropOwed();
     this.imSeen.clear();
     this.store.covered = false;
     if (!this.tiling) this.chatPane.hidden = false;
@@ -729,6 +739,7 @@ export class App {
         this.store.forgetPmUids();
         // A new session: receipts owed under the last are not its to send.
         this.pendingReads.clear();
+        this.dropOwed();
         // Every login, not just the first: a resume that fails after a
         // server restart logs in again on this connection, and the
         // operator may have changed the banner, or taken it down.
@@ -789,6 +800,7 @@ export class App {
         // connected", and nothing would ever try again.
         this.news.onReconnected();
         void this.news.refreshFollowing();
+        this.flushOwed();
         const conv = this.store.conversation(this.store.active);
         if (conv && !this.store.covered && document.visibilityState === 'visible') this.flushReads(conv);
       },
@@ -801,7 +813,10 @@ export class App {
           }
         });
       },
-      onFriends: ({ friends }) => this.friends.onFriends(friends),
+      // A pull a replaced connection asked for may answer late.
+      onFriends: ({ friends }) => {
+        if (conn === this.conn) this.friends.onFriends(friends);
+      },
       onMissedHistory: (ok) => {
         void this.historyLines(ok).then((lines) => {
           if (!lines) return;
@@ -815,6 +830,9 @@ export class App {
         this.say(reason);
         this.noteTyping(true);
         this.pendingReads.clear();
+        // A session that ended after its replacement was installed owes
+        // nothing the replacement does.
+        if (conn === this.conn) this.dropOwed();
         this.media?.teardown();
         this.banner.clear();
         // The handles die with the session, so the blob URLs may as
@@ -899,6 +917,9 @@ export class App {
             },
             hooks,
           );
+    // The old connection stayed current through the awaits above, so a
+    // receipt it was still sending may have been owed again since.
+    this.dropOwed();
     this.conn = conn;
     this.images.attach(conn);
     avatars.attach(conn);
@@ -2414,22 +2435,50 @@ export class App {
     });
   }
 
-  /** Tell a friend which of their messages are now read. */
-  /** A receipt lost with a socket that may resume waits for the resume;
-   *  one the server refused, or one for a session since gone, does not. */
+  /** Tell a friend which of their messages, in this conversation now on
+   *  screen, are read. */
   private flushReads(conv: Conversation): void {
     const conn = this.conn;
     const guids = this.pendingReads.get(conv.id);
     const login = conv.peer.login;
     if (!guids || !login || conn?.state !== 'online') return;
-    const session = conn.session;
     this.pendingReads.delete(conv.id);
-    for (const guid of guids) {
+    this.sendReads(conn, guids.map((guid) => ({ login, guid })));
+  }
+
+  /** A receipt refused `rate_limited` is owed, and sent again once the
+   *  server says; one lost with a socket that may resume is owed until
+   *  the resume. One the server refused otherwise, or one for a session
+   *  since gone, is let go. */
+  private sendReads(conn: Session, reads: { login: string; guid: string }[]): void {
+    const session = conn.session;
+    for (const { login, guid } of reads) {
       void conn.receipt(login, guid, true).catch((e: unknown) => {
-        if (e instanceof WireFailure || this.conn !== conn || conn.session !== session) return;
-        this.pendingReads.set(conv.id, [...(this.pendingReads.get(conv.id) ?? []), guid]);
+        const limited = e instanceof WireFailure && e.wire.code === RATE_LIMITED;
+        if ((e instanceof WireFailure && !limited) || this.conn !== conn || conn.session !== session) return;
+        this.owedReads.add(login, guid);
+        if (!limited || this.owedRetry !== null) return;
+        const after = (e as WireFailure).wire.retry_after;
+        this.owedRetry = window.setTimeout(() => {
+          this.owedRetry = null;
+          this.flushOwed();
+        }, after !== undefined ? after * 1000 : READ_RETRY_MS);
       });
     }
+  }
+
+  /** Send what is owed, every conversation's; while disconnected it
+   *  waits for the resume, which asks again. */
+  private flushOwed(): void {
+    const conn = this.conn;
+    if (conn?.state === 'online') this.sendReads(conn, this.owedReads.take());
+  }
+
+  /** A new session, or none: nothing owed under the last is its to send. */
+  private dropOwed(): void {
+    this.owedReads.clear();
+    if (this.owedRetry !== null) clearTimeout(this.owedRetry);
+    this.owedRetry = null;
   }
 
   /** Tell the friend this conversation is with whether a message to them

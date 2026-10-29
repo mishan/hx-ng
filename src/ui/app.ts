@@ -830,7 +830,9 @@ export class App {
         this.say(reason);
         this.noteTyping(true);
         this.pendingReads.clear();
-        this.dropOwed();
+        // A session that ended after its replacement was installed owes
+        // nothing the replacement does.
+        if (conn === this.conn) this.dropOwed();
         this.media?.teardown();
         this.banner.clear();
         // The handles die with the session, so the blob URLs may as

@@ -307,6 +307,8 @@ export interface LoginParams {
   /** This client can open sealed messages (hxd-ng's
    *  `docs/e2e-messages.md` §4.1). */
   sealed?: true;
+  /** This client speaks the friend family (§7.5), so is sent its events. */
+  messaging?: true;
 }
 
 export interface VideoLimits {
@@ -379,6 +381,9 @@ export interface LoginOk {
   /** The request's `sealed`, echoed when the server will carry sealed
    *  messages to and from this session; absent, it will not. */
   sealed?: true;
+  /** Present exactly when `caps` lists `messaging`, whether or not the
+   *  login said `messaging`. */
+  messaging?: MessagingConfig;
 }
 
 export interface ResumeParams {
@@ -405,6 +410,8 @@ export interface SyncOk {
   /** As the login reply's: a `roles_changed` the gap swallowed. */
   roles?: RolesConfig;
   rooms?: SyncRooms;
+  /** As the login reply's, as it stands now. */
+  messaging?: MessagingConfig;
 }
 
 // --- Private messages (docs/private-messages.md §7) ---------------------
@@ -505,6 +512,10 @@ export interface MsgOk {
   /** A queued message's id, as the recipient's `msg` event will carry
    *  it, when the sender's own account has an inbox. */
   id?: number;
+  /** With `messaging`, a `to_login` that became a message request: the
+   *  one answer it has, stored, held or dropped, with `queued` true and
+   *  no `id`. */
+  requested?: true;
 }
 
 export interface InboxCounts {
@@ -733,6 +744,173 @@ export const FINGERPRINT_CHARS = 52;
  */
 export function isFingerprint(s: string): boolean {
   return s.length === FINGERPRINT_CHARS && /^[0-9a-z]+$/i.test(s);
+}
+
+// --- Instant messaging (docs/hotline-ng.md §7.5) -------------------------
+
+/** The login reply's `messaging` block. */
+export interface MessagingConfig {
+  /** False: every request of the family is answered `access_denied`. */
+  takes_part: boolean;
+  /** Friends, blocks, approvals and requests sent, together. */
+  max_roster: number;
+  /** An instant message's text, in UTF-8 bytes; a longer one to a friend
+   *  goes as a private message. */
+  max_message_bytes: number;
+  /** Message requests one sender may send one recipient until it answers. */
+  request_messages: number;
+  /** The rest only where `takes_part` is true: what the account shows of
+   *  itself, as it set it. A session's `state` starts `online`. */
+  state?: PresenceState;
+  /** Absent unless set. */
+  status_text?: string;
+  discoverable?: boolean;
+  takes_requests?: boolean;
+}
+
+/** What `presence` sets. `invisible` is the account's, every session of
+ *  it; the others are this session's. */
+export type PresenceState = 'online' | 'away' | 'busy' | 'invisible';
+
+/** What a friend is seen as: the most available of its sessions, and
+ *  `offline` for one invisible. */
+export type FriendPresence = 'offline' | 'online' | 'away' | 'busy';
+
+/** `removed` only in a `friend` event: the row is gone. */
+export type FriendState = 'pending_out' | 'pending_in' | 'accepted' | 'blocked' | 'removed';
+
+/** One row of this account's roster, as its owner sees it. */
+export interface Friend {
+  login: string;
+  /** Absent unless the account links an identity. */
+  fingerprint?: string;
+  state: FriendState;
+  alias?: string;
+  /** Only for `accepted`. */
+  presence?: FriendPresence;
+  /** Only for `accepted`, when set. */
+  status_text?: string;
+  /** Only for `pending_in`, when the request carried one. */
+  note?: string;
+}
+
+export interface FriendsOk {
+  friends: Friend[];
+}
+
+/** `friend_add`: `pending_out`, or `accepted` where it met their
+ *  request. `friend_respond`: `accepted`, or `removed` for a decline. */
+export interface FriendStateOk {
+  state: FriendState;
+}
+
+/** `presence`: each field left out stays as it was. */
+export interface PresenceParams {
+  state?: PresenceState;
+  /** `null` clears it. */
+  status_text?: string | null;
+  discoverable?: boolean;
+  /** Message requests to this account, on or off. Either value makes
+   *  this a session that understands requests. */
+  takes_requests?: boolean;
+}
+
+export interface MessagingProfile {
+  nickname?: string;
+  first_name?: string;
+  last_name?: string;
+  email?: string;
+  /** The extension's code: 1 female, 2 male, 3 other; absent, or any
+   *  other number, is unspecified. */
+  gender?: number;
+  birthdate?: { year?: number; month?: number; day?: number };
+  country?: string;
+  postcode?: string;
+  languages: string[];
+}
+
+/** An account as `find_user` and `user_profile` answer it. Presence,
+ *  status and profile only for a friend or the caller's own account. */
+export interface MessagingUser {
+  login: string;
+  /** The profile's nickname, or the login. */
+  name: string;
+  /** On the caller's own login, its own `state`, `invisible` included. */
+  presence?: FriendPresence | PresenceState;
+  status_text?: string;
+  /** On `user_profile`'s answer alone. */
+  profile?: MessagingProfile;
+}
+
+export interface MessagingUserOk {
+  user: MessagingUser;
+}
+
+export interface RequestMessage {
+  /** The inbox id a `report` names it by. */
+  id: number;
+  text: string;
+  /** Unix seconds. */
+  at: number;
+  guid: string;
+  signed?: string;
+}
+
+/** One sender's waiting message requests, oldest first. */
+export interface MessageRequest {
+  login: string;
+  fingerprint?: string;
+  messages: RequestMessage[];
+}
+
+/** A non-friend this account lets message it. */
+export interface Approval {
+  login: string;
+  fingerprint?: string;
+}
+
+export interface RequestsOk {
+  requests: MessageRequest[];
+  approvals: Approval[];
+  /** Requests dropped since the last listing. */
+  dropped: number;
+  /** Whether this account takes message requests now. */
+  takes_requests: boolean;
+  /** Opaque, present while there is more to read; `Connection.requests`
+   *  reads on past it, and keeps it only where it stopped short. */
+  cursor?: string;
+}
+
+/** One listing out of two, `next` read after `had`: a sender whose
+ *  requests span both is one entry, `takes_requests` and `cursor` the
+ *  later page's. */
+export function mergeRequests(had: RequestsOk, next: RequestsOk): RequestsOk {
+  const requests = had.requests.map((r) => ({ ...r, messages: [...r.messages] }));
+  for (const r of next.requests) {
+    const same = requests.find((h) => h.login === r.login);
+    if (same) same.messages.push(...r.messages);
+    else requests.push({ ...r, messages: [...r.messages] });
+  }
+  return {
+    requests,
+    approvals: [...had.approvals, ...next.approvals],
+    dropped: had.dropped + next.dropped,
+    takes_requests: next.takes_requests,
+    ...(next.cursor !== undefined ? { cursor: next.cursor } : {}),
+  };
+}
+
+export type RequestAction = 'approve' | 'delete' | 'end';
+
+/** Unix seconds, from `since` up to `before`, each optional. */
+export interface RequestsClearParams {
+  since?: number;
+  before?: number;
+}
+
+export interface RequestsClearOk {
+  declined: number;
+  deleted: number;
 }
 
 // --- News (hxd-ng's docs/news.md §9) -------------------------------------
@@ -1803,6 +1981,36 @@ export interface Events {
      *  cursor, as for a reply in a thread you do not follow. */
     unread: number;
   };
+  /** A roster row changed, whole as it now stands, or went (`removed`).
+   *  Only to a session that speaks the friend family, as all below. */
+  friend: { friend: Friend };
+  /** Someone asked this account for friendship. */
+  friend_request: { login: string; fingerprint?: string; note?: string };
+  /** A friend's presence changed; a burst of changes may be told once,
+   *  with its final state. */
+  presence: { login: string; fingerprint?: string; state: FriendPresence; status_text?: string };
+  /** An instant message, from a friend or under an approval. Acknowledge
+   *  it with `receipt`: one that is not is handed over again at the next
+   *  `friends`. `id` is the inbox row, absent for one never stored. */
+  im: {
+    from: { login: string; nick: string; fingerprint?: string };
+    text: string;
+    /** Unix seconds, when it was sent. */
+    at: number;
+    guid: string;
+    queued: boolean;
+    id?: number;
+    signed?: string;
+    /** It came under an approval rather than a friendship. */
+    approval?: true;
+  };
+  /** A friend received (`read` false) or read a message this account
+   *  sent under `guid`. Under an approval only reads are told. */
+  receipt: { login: string; fingerprint?: string; guid: string; read: boolean };
+  typing: { login: string; fingerprint?: string; typing: boolean };
+  /** How many senders' requests wait changed: only to sessions that
+   *  understand requests. */
+  requests_changed: { count: number };
   /** The server's placeholder for a domain event this protocol revision
    *  has no mapping for. It exists so `seq` never has holes; a client's
    *  only correct response is to count it and move on. */
@@ -1835,6 +2043,7 @@ export const CAP_PUSH = 'push';
 export const CAP_CHAT_GUID = 'chat_guid';
 export const CAP_SIGNED = 'signed';
 export const CAP_ROOMS = 'rooms';
+export const CAP_MESSAGING = 'messaging';
 
 /**
  * `resync_required` is not a failure: the session is still alive and the
@@ -1944,6 +2153,14 @@ const RETRY = {
   not_sealed: 'never',
   cert_changed: 'never',
   bad_signature: 'never',
+  // Instant messaging (§7.5). `request_full` passes once its recipient
+  // answers, or its requests lapse.
+  already_friends: 'never',
+  request_pending: 'never',
+  not_friends: 'never',
+  roster_full: 'never',
+  request_full: 'later',
+  no_such_request: 'never',
   // Files (§7.2).
   not_authorized: 'later',
   not_found: 'never',
@@ -2050,6 +2267,14 @@ export const ERROR_TEXT: Record<string, string> = {
   mailbox_full: 'That mailbox is full. Try again once they have read some.',
   blocked: 'That user is not accepting messages from you.',
   denied: 'This server would not admit you.',
+  // Instant messaging. `not_friends` on a `msg` is also someone who takes
+  // no requests, which it must not say apart from the rest.
+  already_friends: 'You are friends already.',
+  request_pending: 'A friend request between you is waiting already.',
+  not_friends: 'There is no friendship or waiting request between you for that.',
+  roster_full: 'Your friends, blocks and requests are as many as this server allows. Remove one first.',
+  request_full: 'You have sent them as many requests as you may until they answer.',
+  no_such_request: 'There is no request or approval of theirs to answer.',
   name_reserved: 'That name is reserved for somebody else on this server.',
   // News. `no_news` is about the server and `access_denied` about you,
   // which is the difference between hiding the button and graying it.

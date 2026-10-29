@@ -1157,7 +1157,7 @@ dialog.picker header input { width: 9rem; }
 
 /* The chat pane and the news reader take turns in the main column, under
    the call bar and the tiles. */
-.chat-pane, .news, .files-view, .mod-view, .accounts-view, .roles-view {
+.chat-pane, .news, .files-view, .mod-view, .accounts-view, .roles-view, .friends-view {
   flex: 1;
   min-height: 0;
   min-width: 0;
@@ -1808,6 +1808,17 @@ dialog.settings button.ghost:hover { background: var(--surface-2); color: var(--
 
 /* --- accounts --------------------------------------------------------- */
 
+.friends-form { display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center; }
+.friends-form input[type="text"] { flex: 1 1 8rem; min-width: 0; }
+.friends-group h3 { margin: 0.4rem 0 0.2rem; font-size: 0.9rem; }
+.friends-row { display: flex; flex-wrap: wrap; gap: 0.2rem 0.5rem; align-items: baseline; }
+.friends-name { font-weight: 600; overflow-wrap: anywhere; }
+.friends-note { overflow-wrap: anywhere; }
+.friends-presence { font-size: 0.8rem; color: var(--muted); }
+.friends-presence.p-online { color: var(--accent); }
+.friends-message { margin: 0.1rem 0 0 1rem; overflow-wrap: anywhere; }
+.friends-message .time { color: var(--muted); font-size: 0.8rem; }
+.line .text > .tag.receipt { margin-left: 0.4rem; color: var(--muted); font-size: 0.68rem; }
 .accounts-body { flex: 1; min-height: 0; display: flex; gap: 0.75rem; padding: 0.5rem 0.75rem 1rem; overflow-y: auto; }
 .accounts-list { flex: 0 0 12rem; display: flex; flex-direction: column; gap: 0.2rem; }
 .accounts-row { display: flex; gap: 0.5rem; align-items: baseline; text-align: left; }

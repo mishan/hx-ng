@@ -221,6 +221,7 @@ function chatLine(
       sameSpeaker ? null : who.compared,
       sameSpeaker ? null : who.aside,
       ...body.nodes,
+      line.receipt ? h('span', { class: 'tag receipt', title: 'As their client told it' }, line.receipt) : null,
       // An image is a block under the text, not a word in it: a line
       // may carry one with nothing said at all, which is a picture
       // posted rather than an empty message.

@@ -67,7 +67,7 @@ import { serverFromUrl, type AppConfig } from '../config';
 import { durationWords, DURATIONS, lineReport, parseDuration, personRef } from '../moderation';
 import { notifyText } from '../news';
 import {
-  addressOf,
+  messageAddress,
   Cursor,
   LOBBY,
   type Conversation,
@@ -136,6 +136,7 @@ import { MediaCache } from './media';
 import { avatars, face } from './avatar';
 import { closedForReporter, ModerationView, problem as moderationProblem } from './moderation';
 import { AccountsView } from './accounts';
+import { FriendsView } from './friends';
 import { mayAdminister } from '../accounts';
 import { NewsView } from './news';
 import { appendLine, isAtBottom, keepingPlace, lineOf, renderTranscript, scrollToEnd, signedName, spoken, type TranscriptOptions } from './transcript';
@@ -170,7 +171,7 @@ function offPane(el: HTMLElement): HTMLElement {
 }
 
 /** Every panel this client tiles, in the order the shell builds them. */
-const PANES = ['rail', 'chat', 'news', 'files', 'reports', 'accounts', 'roster'];
+const PANES = ['rail', 'chat', 'news', 'files', 'friends', 'reports', 'accounts', 'roster'];
 
 /** Where they go the first time somebody opens this in a window with
  *  room. Chat, news and files are tabs of one leaf, which is the whole
@@ -180,7 +181,7 @@ const LAYOUT: PaneNode = {
   size: [0.16, 0.62, 0.22],
   kids: [
     { tabs: ['rail'] },
-    { tabs: ['chat', 'news', 'files', 'reports', 'accounts'] },
+    { tabs: ['chat', 'news', 'files', 'friends', 'reports', 'accounts'] },
     { tabs: ['roster'] },
   ],
 };
@@ -244,6 +245,12 @@ const CLEAR_MSG_MAX_BYTES = 4096;
 /** The text a sealed message may carry (§4.3). */
 const SEALED_MSG_MAX_BYTES = 8192;
 
+/** A friend's typing flag lapses after this, unless said again; one's
+ *  own is said again at the shorter interval while typing goes on
+ *  (§7.5). */
+const TYPING_SHOWN_MS = 10_000;
+const TYPING_RENEW_MS = 5_000;
+
 /** How long after a resume the events it replays may still arrive. */
 const RESUME_REPLAY_MS = 5000;
 
@@ -253,6 +260,8 @@ interface SentPm {
   text: string;
   signature?: LineSignature;
   sealed?: boolean;
+  /** The guid it went under, which a friend's receipts name. */
+  guid?: string;
 }
 
 const SIGNED_WHAT: Record<SignScope, string> = { lobby: 'lines', pm: 'private messages', news: 'articles' };
@@ -468,6 +477,24 @@ export class App {
   /** The account editor, for a session that may read or make accounts. */
   private accountsView = new AccountsView(() => this.conn);
   private accountsOpen = false;
+  private friends = new FriendsView({
+    conn: () => this.conn,
+    message: (login, name) => this.select(this.store.openPm({ login, nick: name }).id),
+    onCount: () => this.renderRail(),
+  });
+  private friendsOpen = false;
+  /** The friend this session last told it is typing to, if any, and
+   *  the timer saying it again while it is. */
+  private typingTo: string | null = null;
+  private typingRenew: number | null = null;
+  private typingIdle: number | null = null;
+  /** A friend's typing flag, shown until it lapses. */
+  private typingShown = new Map<ConvId, number>();
+  /** Instant messages shown and not yet told read, by conversation. */
+  private pendingReads = new Map<ConvId, string[]>();
+  /** Each instant message shown, by sender and guid: one handed over
+   *  again is acknowledged again and not shown twice. */
+  private imSeen = new Set<string>();
   /** The account typed at the connect form, or `null` for a guest. */
   private account: string | null = null;
   /** Notifications on this device, for this server and account. Shown
@@ -534,9 +561,13 @@ export class App {
     // Coming back to the app is seeing what the badge counted, whether
     // or not there is a session to have counted it in.
     document.addEventListener('visibilitychange', () => {
-      if (document.visibilityState === 'visible') this.renderUnreadTitle();
+      if (document.visibilityState !== 'visible') return this.noteTyping(true);
+      this.renderUnreadTitle();
+      const conv = this.store.conversation(this.store.active);
+      if (conv && !this.store.covered) this.flushReads(conv);
     });
     void this.paintBadge(0);
+    window.addEventListener('pagehide', () => this.noteTyping(true));
 
     // A notification tapped while this page is open: its worker asks
     // whose this page is, and if it picks this one, says to act.
@@ -596,6 +627,7 @@ export class App {
         else if (id === 'files') this.files.shown(on);
         else if (id === 'reports') this.moderation.shown(on);
         else if (id === 'accounts') this.accountsView.shown(on);
+        else if (id === 'friends') this.friends.shown(on);
       },
     });
 
@@ -656,6 +688,11 @@ export class App {
     this.reportsOpen = false;
     this.accountsView.reset();
     this.accountsOpen = false;
+    this.friends.reset();
+    this.friendsOpen = false;
+    this.noteTyping(true);
+    this.pendingReads.clear();
+    this.imSeen.clear();
     this.store.covered = false;
     if (!this.tiling) this.chatPane.hidden = false;
     this.account = d.login.trim() || null;
@@ -690,6 +727,8 @@ export class App {
       onLogin: (ok) => {
         this.store.server = ok.server;
         this.store.forgetPmUids();
+        // A new session: receipts owed under the last are not its to send.
+        this.pendingReads.clear();
         // Every login, not just the first: a resume that fails after a
         // server restart logs in again on this connection, and the
         // operator may have changed the banner, or taken it down.
@@ -721,6 +760,9 @@ export class App {
         if (!stale) this.certs.clear();
         this.sealedRows.clear();
         for (const u of users) this.noteSealed(u);
+        // The block a login or a sync carries, as it stands now.
+        this.friends.onBlock();
+        this.panes?.available('friends', this.conn?.messaging?.takes_part === true);
         this.renderAll();
         // Only the roster: every client was told at once, and nothing
         // else was missed.
@@ -747,6 +789,8 @@ export class App {
         // connected", and nothing would ever try again.
         this.news.onReconnected();
         void this.news.refreshFollowing();
+        const conv = this.store.conversation(this.store.active);
+        if (conv && !this.store.covered && document.visibilityState === 'visible') this.flushReads(conv);
       },
       onMissedMail: (ok) => {
         void this.mergeStoredMail(ok).then((n) => {
@@ -757,6 +801,7 @@ export class App {
           }
         });
       },
+      onFriends: ({ friends }) => this.friends.onFriends(friends),
       onMissedHistory: (ok) => {
         void this.historyLines(ok).then((lines) => {
           if (!lines) return;
@@ -768,6 +813,8 @@ export class App {
       },
       onEnded: (reason) => {
         this.say(reason);
+        this.noteTyping(true);
+        this.pendingReads.clear();
         this.media?.teardown();
         this.banner.clear();
         // The handles die with the session, so the blob URLs may as
@@ -788,6 +835,9 @@ export class App {
         this.accountsView.reset();
         this.showAccounts(false);
         this.panes?.available('accounts', false);
+        this.friends.reset();
+        this.showFriends(false);
+        this.panes?.available('friends', false);
         // The paperclip goes with the session it belonged to. Left up,
         // it opens a picker whose upload can only fail with "not logged
         // in" — inert chrome saying something this client cannot do.
@@ -837,6 +887,7 @@ export class App {
             {
               ...creds,
               url: way.url,
+              messaging: true,
               ...(signs ? { signs, sealed: true } : {}),
               // Asked as the login goes out, a fresh one after a failed
               // resume included: it proves the active device.
@@ -900,6 +951,7 @@ export class App {
     this.panes?.available('reports', reports);
     if (reports) void this.moderation.recount();
     this.panes?.available('accounts', mayAdminister(conn.accounts));
+    this.panes?.available('friends', conn.messaging?.takes_part === true);
     this.renderAll();
     this.composer.focus();
     // Conversations live in memory and die with the page; the mailbox
@@ -1168,6 +1220,27 @@ export class App {
       });
     });
 
+    conn.on('im', (d) => this.onIm(d));
+    conn.on('receipt', (d) => {
+      const conv = this.store.receipt(d.login, d.guid, d.read);
+      if (conv?.id === this.store.active) keepingPlace(this.transcript, () => this.renderTranscript());
+    });
+    conn.on('typing', (d) => {
+      const conv = this.store.pmWith({ login: d.login });
+      if (conv) this.setTyping(conv, d.typing);
+    });
+    conn.on('friend', (d) => this.friends.onFriend(d));
+    conn.on('friend_request', (d) => {
+      this.friends.onFriendRequest(d);
+      this.say(`${d.login} asks to be your friend. Friends has the request.`);
+    });
+    conn.on('presence', (d) => {
+      this.friends.onPresence(d);
+      const conv = d.state === 'offline' ? this.store.pmWith({ login: d.login }) : undefined;
+      if (conv?.typing) this.setTyping(conv, false);
+    });
+    conn.on('requests_changed', (d) => this.friends.onRequestsChanged(d));
+
     // News events say "your copy is stale", to every reader. They are not
     // notifications — nothing here raises a badge — so all they do is
     // have the reader refresh what it shows, or remember to when next
@@ -1267,7 +1340,7 @@ export class App {
 
     const conv = this.store.conversation(this.store.active);
     if (conv?.kind === 'pm') {
-      const to = addressOf(conv);
+      const to = this.addressFor(conv);
       if (!to) {
         this.restoreAttachment(attached);
         return this.say(
@@ -1289,7 +1362,8 @@ export class App {
       const me = this.store.self;
       let sent = 0;
       let queued = false;
-      await this.sendPm(conv, params, ({ ok, text: part, signature, sealed }) => {
+      let requested = false;
+      await this.sendPm(conv, params, ({ ok, text: part, signature, sealed, guid: under }) => {
         this.push(conv.id, {
           t: Date.now(),
           kind: 'chat',
@@ -1299,15 +1373,19 @@ export class App {
           media: sent ? undefined : attached?.media,
           ...(signature ? { signature } : {}),
           ...(sealed !== undefined ? { sealed } : {}),
+          ...(under !== undefined ? { guid: under } : {}),
         });
         sent += part.length;
         queued ||= ok.queued;
+        requested ||= ok.requested === true;
       }).catch((e: unknown) => {
         if (!sent) this.restoreAttachment(attached);
         this.restoreComposer(text.slice(sent), 'normal');
         throw e;
       });
-      if (queued) {
+      if (requested) {
+        this.say(`${conv.title} is not your friend, so that went as a message request: they see it only if they look at their requests.`);
+      } else if (queued) {
         this.say(`${conv.title} is not here. The server is holding that for them.`);
       }
       return;
@@ -1355,7 +1433,7 @@ export class App {
   private async sendPm(conv: Conversation, params: MsgParams, sent: (part: SentPm) => void): Promise<void> {
     const conn = this.conn;
     if (!conn) throw new Error('Not connected.');
-    if (!(conn instanceof Connection)) return sent({ ok: await conn.msg(params), text: params.text });
+    if (!(conn instanceof Connection)) return sent({ ok: await conn.msg(params), text: params.text, guid: params.guid });
     const parts = splitUtf8(params.text, CLEAR_MSG_MAX_BYTES);
     if (this.sealPms) {
       // Nothing is sealed or signed while a key check, or its warning,
@@ -1364,7 +1442,7 @@ export class App {
       const never = neverSeals({ sealing: conn.sealing, device: this.signer !== null });
       if (never === null) {
         const sealed = await this.sendSealed(conn, conv, params);
-        if ('ok' in sealed) return sent({ ...sealed, text: params.text });
+        if ('ok' in sealed) return sent({ ...sealed, text: params.text, guid: params.guid });
         await this.unsealedAfter(conv, sealed.why, parts.length);
       } else if (neverSealedFallback({ device: this.signer !== null }, this.wasSealed(conv)) === 'ask') {
         await this.unsealedAfter(conv, never, parts.length);
@@ -1379,7 +1457,7 @@ export class App {
       const part = i === 0 ? { ...params, text } : { ...params, text, guid: newGuid(), media: undefined };
       const clear = await this.sendClear(conn, conv, part, sign);
       sign = clear.signature !== undefined;
-      sent({ ...clear, text, ...this.clearMark() });
+      sent({ ...clear, text, guid: part.guid, ...this.clearMark() });
     }
   }
 
@@ -2115,7 +2193,9 @@ export class App {
     else if (this.filesOpen) this.showFiles(false);
     else if (this.reportsOpen) this.showReports(false);
     else if (this.accountsOpen) this.showAccounts(false);
+    else if (this.friendsOpen) this.showFriends(false);
     else this.seen(conv);
+    this.noteTyping();
     this.renderRail();
     this.renderTranscript();
     this.renderComposerHint();
@@ -2127,6 +2207,7 @@ export class App {
   private seen(conv: Conversation): void {
     conv.unread = 0;
     this.renderUnreadTitle();
+    this.flushReads(conv);
     // Reading is a thing the server keeps for us, so tell it — while
     // there is a session to tell. Failure is worth a line but not worth
     // interrupting the selection over.
@@ -2152,6 +2233,7 @@ export class App {
     if (open && this.filesOpen) this.showFiles(false);
     if (open && this.reportsOpen) this.showReports(false);
     if (open && this.accountsOpen) this.showAccounts(false);
+    if (open && this.friendsOpen) this.showFriends(false);
     const was = this.newsOpen;
     this.newsOpen = open;
     // The conversation the reader covers stays the active one, and what
@@ -2187,6 +2269,7 @@ export class App {
     if (open && this.newsOpen) this.showNews(false);
     if (open && this.reportsOpen) this.showReports(false);
     if (open && this.accountsOpen) this.showAccounts(false);
+    if (open && this.friendsOpen) this.showFriends(false);
     const was = this.filesOpen;
     this.filesOpen = open;
     this.store.covered = open;
@@ -2203,6 +2286,7 @@ export class App {
     if (open && this.newsOpen) this.showNews(false);
     if (open && this.filesOpen) this.showFiles(false);
     if (open && this.accountsOpen) this.showAccounts(false);
+    if (open && this.friendsOpen) this.showFriends(false);
     const was = this.reportsOpen;
     this.reportsOpen = open;
     this.store.covered = open;
@@ -2230,6 +2314,7 @@ export class App {
     if (open && this.newsOpen) this.showNews(false);
     if (open && this.filesOpen) this.showFiles(false);
     if (open && this.reportsOpen) this.showReports(false);
+    if (open && this.friendsOpen) this.showFriends(false);
     const was = this.accountsOpen;
     this.accountsOpen = open;
     this.store.covered = open;
@@ -2239,6 +2324,136 @@ export class App {
     const conv = this.store.conversation(this.store.active);
     if (was && !open && conv) this.seen(conv);
     this.renderRail();
+  }
+
+  /** Friends and message requests, in the same space the readers take. */
+  private showFriends(open: boolean): void {
+    if (open && this.newsOpen) this.showNews(false);
+    if (open && this.filesOpen) this.showFiles(false);
+    if (open && this.reportsOpen) this.showReports(false);
+    if (open && this.accountsOpen) this.showAccounts(false);
+    const was = this.friendsOpen;
+    this.friendsOpen = open;
+    this.store.covered = open;
+    this.raise(open ? 'friends' : 'chat', open);
+    if (this.tiling) this.friends.shown(open);
+    else this.friends.show(open);
+    const conv = this.store.conversation(this.store.active);
+    if (was && !open && conv) this.seen(conv);
+    this.renderRail();
+  }
+
+  /** An instant message (§7.5), shown in the conversation with its
+   *  sender as a private message is, acknowledged once it is and told
+   *  read once it is on screen. One whose guid and sender were shown
+   *  already is a repeat, acknowledged again and not shown. */
+  private onIm(d: Events['im']): void {
+    const conn = this.conn;
+    const login = d.from.login;
+    const ack = () => void conn?.receipt(login, d.guid).catch(() => {});
+    const key = `${login.toLowerCase()} ${d.guid}`;
+    if (this.imSeen.has(key) || (d.id !== undefined && this.store.hasMail(d.id))) return ack();
+    this.imSeen.add(key);
+    if (d.approval) this.friends.noteApproval(login);
+    this.checkClock(d.at, d.queued);
+    const messages = this.messages;
+    const as: Events['msg'] = {
+      from: { uid: 0, nick: d.from.nick, login, ...(d.from.fingerprint !== undefined ? { fingerprint: d.from.fingerprint } : {}) },
+      text: d.text,
+      at: d.at,
+      queued: d.queued,
+      ...(d.id !== undefined ? { id: d.id } : {}),
+      ...(d.signed !== undefined ? { signed: d.signed } : {}),
+    };
+    const read = messages.live(as, undefined).catch(() => unreadable(d.signed));
+    this.inOrder(async () => {
+      const { signature, duplicate } = await read;
+      if (messages !== this.messages || conn !== this.conn) return;
+      if (duplicate) return ack();
+      const friend = this.friends.book.get(login);
+      const conv = this.store.openPm({ login, nick: friend?.alias ?? d.from.nick });
+      this.setTyping(conv, false);
+      this.push(conv.id, {
+        t: d.at * 1000,
+        kind: 'chat',
+        from: { nick: d.from.nick, login },
+        text: d.text,
+        queued: d.queued,
+        id: d.id,
+        guid: d.guid,
+        ...(signature ? { signature } : {}),
+        ...(d.signed !== undefined ? { signed: d.signed } : {}),
+      });
+      ack();
+      const seen = sighting(signature, this.verifiedUnder(conv), d.from);
+      if (seen) void rememberIdentity(conv, this.peerMemory, this.keyUrl, seen.fingerprint, seen.who, {});
+      this.pendingReads.set(conv.id, [...(this.pendingReads.get(conv.id) ?? []), d.guid]);
+      if (conv.id === this.store.active && !this.store.covered && document.visibilityState === 'visible') this.flushReads(conv);
+      this.renderRail();
+    });
+  }
+
+  /** A friend's typing flag, which lapses unless it is said again. */
+  private setTyping(conv: Conversation, on: boolean): void {
+    clearTimeout(this.typingShown.get(conv.id));
+    this.typingShown.delete(conv.id);
+    if (on) this.typingShown.set(conv.id, window.setTimeout(() => this.setTyping(conv, false), TYPING_SHOWN_MS));
+    if (conv.typing === on) return;
+    conv.typing = on;
+    if (conv.id === this.store.active) this.renderComposerHint();
+  }
+
+  /** By login, where that is an instant message or mail. A present
+   *  non-friend, under no approval, by uid: by login it would go as a
+   *  message request, or be refused (§7.5). */
+  private addressFor(conv: Conversation): ReturnType<typeof messageAddress> {
+    return messageAddress(conv, {
+      takesPart: this.conn?.messaging?.takes_part === true,
+      present: (uid) => this.store.user(uid) !== undefined,
+      mayIm: (login) => this.friends.mayIm(login),
+    });
+  }
+
+  /** Tell a friend which of their messages are now read. */
+  /** A receipt lost with a socket that may resume waits for the resume;
+   *  one the server refused, or one for a session since gone, does not. */
+  private flushReads(conv: Conversation): void {
+    const conn = this.conn;
+    const guids = this.pendingReads.get(conv.id);
+    const login = conv.peer.login;
+    if (!guids || !login || conn?.state !== 'online') return;
+    const session = conn.session;
+    this.pendingReads.delete(conv.id);
+    for (const guid of guids) {
+      void conn.receipt(login, guid, true).catch((e: unknown) => {
+        if (e instanceof WireFailure || this.conn !== conn || conn.session !== session) return;
+        this.pendingReads.set(conv.id, [...(this.pendingReads.get(conv.id) ?? []), guid]);
+      });
+    }
+  }
+
+  /** Tell the friend this conversation is with whether a message to them
+   *  is being written: on each change, and again while it goes on, since
+   *  the flag lapses, until a pause in the typing as long as the
+   *  renewal. `stop` for that pause, leaving, the page or the tab. */
+  private noteTyping(stop = false): void {
+    const conn = this.conn;
+    const conv = this.store.conversation(this.store.active);
+    const login = conv?.kind === 'pm' ? conv.peer.login : undefined;
+    const text = this.composer.value.trim();
+    const to = !stop && login && text && !text.startsWith('/') && this.friends.book.isFriend(login) ? login : null;
+    if (this.typingIdle !== null) clearTimeout(this.typingIdle);
+    this.typingIdle = to ? window.setTimeout(() => this.noteTyping(true), TYPING_RENEW_MS) : null;
+    if (to === this.typingTo) return;
+    if (this.typingTo) void conn?.typing(this.typingTo, false).catch(() => {});
+    if (this.typingRenew !== null) clearInterval(this.typingRenew);
+    this.typingRenew = null;
+    if (to) {
+      const say = () => void conn?.typing(to, true).catch(() => {});
+      say();
+      this.typingRenew = window.setInterval(say, TYPING_RENEW_MS);
+    }
+    this.typingTo = to;
   }
 
   /** Something in the news is yours: count it on the rail, and say so
@@ -2833,7 +3048,7 @@ export class App {
   private renderRail(): void {
     const items = [...this.store.conversations.values()].map((c) => {
       const active =
-        !this.newsOpen && !this.filesOpen && !this.reportsOpen && !this.accountsOpen && c.id === this.store.active;
+        !this.newsOpen && !this.filesOpen && !this.reportsOpen && !this.accountsOpen && !this.friendsOpen && c.id === this.store.active;
       // Only a conversation whose other half is on the roster has a face
       // to show. One carried by an account alone — mail from someone who
       // is not here — falls back to the default icon.
@@ -2910,6 +3125,23 @@ export class App {
       );
       files.onclick = () => this.showFiles(true);
     }
+    let friends: HTMLElement | null = null;
+    if (conn?.messaging?.takes_part && conn.state !== 'offline') {
+      const waiting = this.friends.count;
+      friends = h(
+        'button',
+        {
+          class: `rail-item${this.friendsOpen ? ' on' : ''}${waiting ? ' unread' : ''}`,
+          title: waiting ? `${waiting} waiting for an answer` : 'Friends',
+          ariaCurrent: this.friendsOpen ? 'page' : null,
+          dataset: { key: 'friends' },
+        },
+        h('span', { class: 'rail-glyph', ariaHidden: 'true' }, '@'),
+        h('span', { class: 'rail-title' }, 'Friends'),
+        waiting ? badge(waiting, 'waiting') : null,
+      );
+      friends.onclick = () => this.showFriends(true);
+    }
     let reports: HTMLElement | null = null;
     if (conn?.moderator && conn.moderation && conn.state !== 'offline') {
       const open = this.moderation.queue.count;
@@ -2951,7 +3183,7 @@ export class App {
     if (this.drawerFoot.parentNode !== this.rail) this.rail.append(this.drawerFoot);
     while (this.rail.firstChild !== this.drawerFoot) this.rail.firstChild!.remove();
     this.drawerFoot.before(
-      ...[h('h2', { class: 'rail-head' }, 'Conversations'), lobby, news, files, reports, accounts, ...rest].filter(
+      ...[h('h2', { class: 'rail-head' }, 'Conversations'), lobby, news, files, friends, reports, accounts, ...rest].filter(
         (el): el is HTMLElement => !!el,
       ),
     );
@@ -2962,7 +3194,7 @@ export class App {
   /** A dot on ☰ for anything unread behind it, which on a phone is
    *  everything the rail and the mailbox count. */
   private paintMenuUnread(): void {
-    // News and Reports count only while the rail has them to show, on
+    // News, Reports and Friends count only while the rail has them to show, on
     // the same terms `renderRail` draws them.
     const conn = this.conn;
     const live = !!conn && conn.state !== 'offline';
@@ -2970,7 +3202,8 @@ export class App {
       [...this.store.conversations.values()].some((c) => c.unread > 0) ||
       (this.store.mail?.unread ?? 0) > 0 ||
       (live && !!conn.news && this.news.unread > 0) ||
-      (live && conn.moderator && !!conn.moderation && this.moderation.queue.count > 0);
+      (live && conn.moderator && !!conn.moderation && this.moderation.queue.count > 0) ||
+      (live && !!conn.messaging?.takes_part && this.friends.count > 0);
     this.menuBtn.classList.toggle('unread', any);
   }
 
@@ -3047,6 +3280,7 @@ export class App {
           : deniable
             ? 'private message — sealed deniably'
             : 'private message';
+    if (pm && conv.typing) this.composerHint.textContent += ` — ${conv.title} is typing…`;
     this.composerHint.classList.toggle('warn', !!peer && transport !== 'encrypted');
     const shown = pm ? this.conversationFingerprint(conv) : null;
     const fp = shown && canonicalFingerprint(shown);
@@ -3245,12 +3479,16 @@ export class App {
         if (!text && !this.attached) return;
         this.composer.value = '';
         this.autoGrow();
+        this.noteTyping();
         this.send(text).catch((err: Error) =>
           this.say(err instanceof WireFailure ? errorText(err.wire) : err.message),
         );
       }
     };
-    this.composer.oninput = () => this.autoGrow();
+    this.composer.oninput = () => {
+      this.autoGrow();
+      this.noteTyping();
+    };
 
     // Attaching, three ways in. The paperclip opens the picker; the
     // picker's `accept` list is the server's own, so a phone's photo
@@ -3377,6 +3615,8 @@ export class App {
           pane(this.chatPane, 'chat', 'Chat', 320),
           pane(this.news.el, 'news', 'News', 360),
           pane(this.files.el, 'files', 'Files', 320),
+          // Off until someone who takes part in messaging logs in.
+          offPane(pane(this.friends.el, 'friends', 'Friends', 320)),
           // Off until a moderator logs in: nobody else has any reports.
           offPane(pane(this.moderation.el, 'reports', 'Reports', 360)),
           // Off until someone who may read or make accounts logs in.

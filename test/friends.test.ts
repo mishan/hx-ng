@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import type { Friend } from '@hotline-ng/client';
 
-import { FriendBook } from '../src/friends';
+import { FriendBook, OwedReceipts } from '../src/friends';
 import { messageAddress, Store } from '../src/state';
 
 const row = (login: string, state: Friend['state'], over: Partial<Friend> = {}): Friend => ({ login, state, ...over });
@@ -120,5 +120,19 @@ describe('the address a message goes to', () => {
     const conv = store.openPm({ uid: 7, nick: 'Bob' });
     store.replaceRoster([bob]);
     expect(conv.peer.uid).toBe(7);
+  });
+});
+
+describe('owed read receipts', () => {
+  it('hands each over once, a repeat of one owed again held once', () => {
+    const owed = new OwedReceipts();
+    owed.add('bob', 'g-1');
+    owed.add('Bob', 'g-1');
+    owed.add('eve', 'g-2');
+    expect(owed.take()).toEqual([
+      { login: 'Bob', guid: 'g-1' },
+      { login: 'eve', guid: 'g-2' },
+    ]);
+    expect(owed.take()).toEqual([]);
   });
 });

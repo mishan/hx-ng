@@ -449,7 +449,9 @@ export class Connection {
    *  hands one back and Node the other, and nothing here cares which. */
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
   private closing = false;
-  private readonly writer = Math.random().toString(36).slice(2);
+  private readonly writer = Array.from(crypto.getRandomValues(new Uint8Array(8)), (b) =>
+    b.toString(16).padStart(2, '0'),
+  ).join('');
   /** The resume record as this connection last wrote or read it. */
   private savedRaw: string | null = null;
   /** A handshake under way, whose caller retries if it fails: a close

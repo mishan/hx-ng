@@ -306,6 +306,10 @@ interface Saved {
    *  one that took the session over and wrote since, and a connection
    *  clears only a record it wrote or read. */
   writer?: string;
+  /** The account the session is on, as the login named it or an
+   *  identity landed on it, so a store shared by one person's accounts
+   *  resumes only the one asked for. */
+  login?: string;
 }
 
 const SAVED_KEY = 'hxd-ng.session';
@@ -332,11 +336,15 @@ const REQUESTS_PAGES = 20;
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
 /** Is a session for `url` saved, in `store` or else sessionStorage,
- *  that a `resume` could pick up? The client asks before showing a
- *  login form, so a reload goes straight back into the room. */
-export function hasSavedSession(url: string, store?: SessionStore): boolean {
-  const s = parseSaved(readRaw(store));
-  return !!s && s.url === url;
+ *  that a `resume` could pick up? With `login`, only one on that
+ *  account. The client asks before showing a login form, so a reload
+ *  goes straight back into the room. */
+export function hasSavedSession(url: string, store?: SessionStore, login?: string): boolean {
+  return savedFor(parseSaved(readRaw(store)), url, login);
+}
+
+function savedFor(s: Saved | null, url: string, login?: string): s is Saved {
+  return !!s && s.url === url && (!login || s.login === login);
 }
 
 /** How many tries in a row may go astray before an upload gives up: with
@@ -554,7 +562,9 @@ export class Connection {
     this.flooded = false;
     const raw = readRaw(this.creds.sessionStore);
     const saved = parseSaved(raw);
-    if (saved && saved.url === this.creds.url) {
+    // A login named is the account asked for, and another's session is
+    // not resumed in its place.
+    if (savedFor(saved, this.creds.url, this.creds.login)) {
       this.savedRaw = raw;
       this.session = saved.session;
       this.token = saved.token;
@@ -2005,7 +2015,7 @@ export class Connection {
    *  `session_expired`. */
   private persist(): void {
     if (!this.session || !this.token || this.grace === null) return;
-    this.savedRaw = saveSession(this.creds.sessionStore, {
+    const raw = saveSession(this.creds.sessionStore, {
       url: this.creds.url,
       session: this.session,
       token: this.token,
@@ -2029,7 +2039,10 @@ export class Connection {
       messaging: this.messaging,
       speaks: this.speaks,
       writer: this.writer,
+      login: this.self?.identity?.account ?? this.creds.login,
     });
+    // A write that failed left the record as it was, still this one's.
+    if (raw !== null) this.savedRaw = raw;
   }
 
   private forget(): void {

@@ -664,9 +664,14 @@ export class App {
     // A reload is a dropped connection like any other: if this tab still
     // holds a session for the server it was last on, go straight back
     // into it rather than making someone log in again to reach the room
-    // they never left.
-    const saved = remembered(this.config);
-    if (hasSavedSession(saved.url, this.sessionStore)) {
+    // they never left. A notification names its server and account, and
+    // an installed app's windows share one record, so that is the one
+    // to resume and no other account's.
+    const asked = this.pendingOpen;
+    const saved = asked
+      ? { ...remembered(this.config), url: asked.server, login: asked.account }
+      : remembered(this.config);
+    if (hasSavedSession(saved.url, this.sessionStore, saved.login)) {
       screen.hidden = true;
       const splash = h('div', { class: 'connect' }, h('p', { class: 'muted' }, 'Resuming your session…'));
       screen.before(splash);
@@ -676,7 +681,7 @@ export class App {
           // A session refused for now, or out of reach, is kept for the
           // next reload; logging in here would start another beside it.
           this.connectForm?.fail(
-            hasSavedSession(saved.url, this.sessionStore)
+            hasSavedSession(saved.url, this.sessionStore, saved.login)
               ? `${e.message.replace(/([^.!?])$/, '$1.')} Your session is still there: reload to go back into it.`
               : e.message,
           );
@@ -910,7 +915,7 @@ export class App {
     // one that session logged in with, whichever is active now; for an
     // identity login, the active one.
     const active = d.identity ? await getActiveDevice().catch(() => null) : null;
-    const resuming = way.wire === 'ng' && hasSavedSession(way.url, this.sessionStore);
+    const resuming = way.wire === 'ng' && hasSavedSession(way.url, this.sessionStore, d.login);
     const saved = resuming ? signingDeviceFor(way.url) : null;
     const resumed = saved ? await getDevice(saved).catch(() => null) : null;
     const signs = this.useDevice(way.url, resuming ? resumed : active);

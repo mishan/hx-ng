@@ -323,6 +323,31 @@ describe('resume', () => {
     expect(hasSavedSession(CREDS.url, store)).toBe(true);
   });
 
+  it('clears its record at logout after a later write to it failed', async () => {
+    const store = memoryStore();
+    const conn = new Connection({ ...CREDS, sessionStore: store });
+    await conn.start();
+    store.setItem = () => {
+      throw new Error('QuotaExceededError');
+    };
+    server.event('chat', { from: { uid: 2, nick: 'Bob' }, text: 'hi', style: 'normal' });
+    await settle();
+    await conn.logout();
+    expect(hasSavedSession(CREDS.url, store)).toBe(false);
+  });
+
+  it('resumes only the account asked for, where one is', async () => {
+    const store = memoryStore();
+    await new Connection({ ...CREDS, sessionStore: store }).start();
+    expect(hasSavedSession(CREDS.url, store, 'alice')).toBe(true);
+    expect(hasSavedSession(CREDS.url, store)).toBe(true);
+    expect(hasSavedSession(CREDS.url, store, 'bob')).toBe(false);
+
+    await new Connection({ ...CREDS, login: 'bob', sessionStore: store }).start();
+    expect(server.sent('resume')).toHaveLength(0);
+    expect(server.sent('login').map((f) => f.params.login)).toEqual(['alice', 'bob']);
+  });
+
   it('goes on trying nothing once start is refused', async () => {
     server.on('login', () => ({ error: { code: 'rate_limited', text: 'slow down', retry_after: 0 } }));
     await expect(new Connection(CREDS, {}).start()).rejects.toThrow('slow down');

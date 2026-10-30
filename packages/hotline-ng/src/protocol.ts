@@ -309,6 +309,10 @@ export interface LoginParams {
   sealed?: true;
   /** This client speaks the friend family (§7.5), so is sent its events. */
   messaging?: true;
+  /** With `messaging`, its portable part (§7.5): granted only to a
+   *  session that proved a device of the account's linked identity, and
+   *  then listed in `caps`. */
+  friendships?: true;
 }
 
 export interface VideoLimits {
@@ -704,7 +708,15 @@ export type RoomPartReason = 'access' | 'archived' | 'insecure';
  *  unblocks: it names a block, not a person. */
 export type BlockParams =
   | { uid: number; login?: never; fingerprint?: never }
-  | { login: string; uid?: never; fingerprint?: never }
+  | {
+      login: string;
+      /** To `block` alone, from a friendships session: a withdrawal of
+       *  the friendship, applied before the block, which the friend's
+       *  other servers hear of as a removal (§7.5). */
+      withdraw?: string;
+      uid?: never;
+      fingerprint?: never;
+    }
   | { fingerprint: string; uid?: never; login?: never };
 
 /**
@@ -792,6 +804,16 @@ export interface Friend {
   status_text?: string;
   /** Only for `pending_in`, when the request carried one. */
   note?: string;
+  /** The rest only to a friendships session (§7.5). On an `accepted`
+   *  entry that is portable, the hashes of the friendships each party
+   *  presented, one or two. */
+  friendships?: string[];
+  /** On `pending_in` whose request carries one, and on `accepted` whose
+   *  friend sent an upgrade offer not yet answered. */
+  offer?: string;
+  /** On `removed`, the withdrawal that ended it. A `removed` without
+   *  one ended it on this server alone. */
+  withdraw?: string;
 }
 
 export interface FriendsOk {
@@ -803,6 +825,60 @@ export interface FriendsOk {
 export interface FriendStateOk {
   state: FriendState;
 }
+
+/** `friend_remove`: by `login`, or by `fingerprint` to drop a friendship
+ *  this account presented and the other party has not. From a
+ *  friendships session, `withdraw` ends the friendship everywhere it
+ *  travels, and `offer`, the caller's own upgrade offer, cancels that
+ *  alone (§7.5). */
+export type FriendRemoveParams = ({ login: string; fingerprint?: never } | { fingerprint: string; login?: never }) & {
+  withdraw?: string;
+  offer?: string;
+};
+
+/** What `friendships_present` made of one object, in the order sent:
+ *  `hash` the friendship's, or a withdrawal's pair hash. `withdraw`
+ *  beside `withdrawn` is the withdrawal that ends it. */
+export interface FriendshipResult {
+  hash: string;
+  result: FriendshipResultCode;
+  withdraw?: string;
+}
+
+/** `ok` presented or taken, `no_such_user` and `roster_full` to try
+ *  again later, `bad_signature` to drop the object, `withdrawn` ended
+ *  here, `stale` to sign afresh. */
+export type FriendshipResultCode = 'ok' | 'no_such_user' | 'roster_full' | 'bad_signature' | 'withdrawn' | 'stale';
+
+/** At most `FRIENDSHIPS_PER_REQUEST` objects together, and at most one
+ *  withdrawal for a pair. Withdrawals are applied first. */
+export interface FriendshipsPresentParams {
+  withdrawals?: string[];
+  friendships?: string[];
+}
+
+export interface FriendshipsPresentOk {
+  withdrawals: FriendshipResult[];
+  friendships: FriendshipResult[];
+}
+
+/** At most `FRIENDSHIPS_PER_REQUEST` hashes and fingerprints together. */
+export interface FriendshipsFetchParams {
+  hashes?: string[];
+  fingerprints?: string[];
+}
+
+export interface FriendshipsFetchOk {
+  /** Each hash asked, with its friendship only where it is in an entry
+   *  this account was sent for a friend it has now. */
+  friendships: { hash: string; friendship?: string }[];
+  /** Each fingerprint asked, with the rotation records that end at it,
+   *  oldest first, where it is a friend's and the server applied them. */
+  rotations: { fingerprint: string; records: string[] }[];
+}
+
+/** The bound on one `friendships_present` or `friendships_fetch`. */
+export const FRIENDSHIPS_PER_REQUEST = 32;
 
 /** `presence`: each field left out stays as it was. */
 export interface PresenceParams {
@@ -835,6 +911,9 @@ export interface MessagingUser {
   login: string;
   /** The profile's nickname, or the login. */
   name: string;
+  /** To a friendships session, the identity the account links where the
+   *  server would show the link: what an offer's `to` is. */
+  fingerprint?: string;
   /** On the caller's own login, its own `state`, `invisible` included. */
   presence?: FriendPresence | PresenceState;
   status_text?: string;
@@ -1985,7 +2064,14 @@ export interface Events {
    *  Only to a session that speaks the friend family, as all below. */
   friend: { friend: Friend };
   /** Someone asked this account for friendship. */
-  friend_request: { login: string; fingerprint?: string; note?: string };
+  friend_request: {
+    login: string;
+    fingerprint?: string;
+    note?: string;
+    /** To a friendships session, the request's offer; an upgrade offer's
+     *  request reaches such sessions alone. */
+    offer?: string;
+  };
   /** A friend's presence changed; a burst of changes may be told once,
    *  with its final state. */
   presence: { login: string; fingerprint?: string; state: FriendPresence; status_text?: string };
@@ -2044,6 +2130,8 @@ export const CAP_CHAT_GUID = 'chat_guid';
 export const CAP_SIGNED = 'signed';
 export const CAP_ROOMS = 'rooms';
 export const CAP_MESSAGING = 'messaging';
+/** Listed only in reply to a login that asked for it, and granted. */
+export const CAP_FRIENDSHIPS = 'friendships';
 
 /**
  * `resync_required` is not a failure: the session is still alive and the
@@ -2161,6 +2249,11 @@ const RETRY = {
   roster_full: 'never',
   request_full: 'later',
   no_such_request: 'never',
+  // Portable friendships (§7.5): a withdrawal held ends what was signed
+  // before it, so a half signed afresh after ten minutes may pass; one
+  // out of the server's time passes only signed afresh.
+  withdrawn: 'later',
+  stale: 'never',
   // Files (§7.2).
   not_authorized: 'later',
   not_found: 'never',
@@ -2275,6 +2368,8 @@ export const ERROR_TEXT: Record<string, string> = {
   roster_full: 'Your friends, blocks and requests are as many as this server allows. Remove one first.',
   request_full: 'You have sent them as many requests as you may until they answer.',
   no_such_request: 'There is no request or approval of theirs to answer.',
+  withdrawn: 'A withdrawal of that friendship is held here. Try again in ten minutes.',
+  stale: "This device's clock is more than ten minutes off the server's, so it cannot sign for friendships. Set the clock right.",
   name_reserved: 'That name is reserved for somebody else on this server.',
   // News. `no_news` is about the server and `access_denied` about you,
   // which is the difference between hiding the button and graying it.

@@ -41,6 +41,25 @@ says how.
   `im`, `receipt`, `typing` and `requests_changed`; `MsgOk.requested`;
   `CAP_MESSAGING`; the codes `already_friends`, `request_pending`,
   `not_friends`, `roster_full`, `request_full` and `no_such_request`.
+- Portable friendships (hxd-ng's `docs/hotline-ng.md` §7.5,
+  `docs/proposals/friendship-objects.md`): the offer, acceptance,
+  friendship and withdrawal, signed by `signFriendOffer`,
+  `signFriendAcceptance` and `signFriendWithdrawal` and checked by
+  `checkFriendOffer`, `checkFriendship` and `checkFriendWithdrawal`,
+  each refusal a `FriendshipRefused` naming its step. A withdrawal
+  checked without its pair is a `KeptWithdrawal` from
+  `parseFriendWithdrawal`, which `checkWithdrawalPair` finishes; one
+  checked whole is a `HeldWithdrawal`, the only kind `cutoffOf` takes.
+  `pairHash`, `friendshipBytes`, `cutoffEnds`, `offerEndedBy` and
+  `friendshipEndedBy`; rotation records by `parseRotation`, followed
+  by `rotationChainEnd`. On the wire, `Credentials.friendships`,
+  `CAP_FRIENDSHIPS` and `beforeFriends`; `friendAdd`'s `offer`,
+  `friendRespond`'s `friendship`, `friendRemove` by
+  `FriendRemoveParams`, `findUser` by fingerprint and `block`'s
+  `withdraw`; `friendshipsPresent` and `friendshipsFetch`;
+  `friendships`, `offer` and `withdraw` on `Friend`, `offer` on
+  `friend_request`, `fingerprint` on `MessagingUser`; the codes
+  `withdrawn` and `stale`, and the `IdentityError` kind `withdrawn`.
 - Roles (hxd-ng's `docs/roles.md` §7): `Connection.roles`, a
   `RolesConfig` from the login reply and `sync`, kept current by
   `roles_changed` and `account_changed` and saved with the session;

@@ -6,6 +6,7 @@ import {
   attachCertificate,
   ensureActiveDevice,
   forgetActiveDevice,
+  friendshipBooks,
   getActiveDevice,
   newsGuids,
   peers,
@@ -210,5 +211,15 @@ describe('peers', () => {
     expect(await peers.marks()).toEqual([mark]);
     expect(await peers.all()).toEqual([alice]);
     expect((await getActiveDevice())?.devicePub).toBe('ab');
+  });
+});
+
+describe('friendshipBooks', () => {
+  it('keeps each identity its own book, each update applied to the book as stored', async () => {
+    await friendshipBooks.update('alice', (b) => void b.offers.push({ raw: 'o', to: 'bob', server: 's', login: 'bob', expires: 1 }));
+    await friendshipBooks.update('alice', (b) => void (b.servers.s = { bring: true, leftOut: [], refused: [] }));
+    const alice = await friendshipBooks.load('alice');
+    expect([alice.offers.map((o) => o.raw), alice.servers.s?.bring]).toEqual([['o'], true]);
+    expect(await friendshipBooks.load('bob')).toEqual({ friendships: [], offers: [], cutoffs: [], moves: [], servers: {} });
   });
 });

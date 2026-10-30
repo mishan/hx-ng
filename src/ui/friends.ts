@@ -22,6 +22,7 @@ import {
 } from '@hotline-ng/client';
 
 import { FriendBook, friendName, PRESENCE_LABEL } from '../friends';
+import type { KeptFriendship, PortableFriends } from '../friendships';
 import type { Session } from '../session';
 import { ask } from './ask';
 import { badge, h } from './dom';
@@ -40,6 +41,9 @@ const CLEAR_SPANS: [string, string][] = [
 
 export interface FriendsHooks {
   conn: () => Session | null;
+  /** This identity's portable friendships, where the session was
+   *  granted them. */
+  portable: () => PortableFriends | null;
   /** Open the conversation with `login`. */
   message: (login: string, name: string) => void;
   /** What the rail counts changed. */
@@ -151,6 +155,11 @@ export class FriendsView {
     if (this.sight.on) void this.loadRequests();
   }
 
+  /** The keeper changed what it holds. */
+  portableChanged(): void {
+    if (this.sight.on) this.render();
+  }
+
   private changed(): void {
     this.hooks.onCount();
     if (this.sight.on) this.render();
@@ -196,7 +205,12 @@ export class FriendsView {
   private async add(login: string, note: string): Promise<void> {
     let state = '';
     const ok = await this.act(async (conn) => {
-      state = (await conn.friendAdd(login, note || undefined)).state;
+      const portable = this.hooks.portable();
+      state = (
+        portable
+          ? await portable.add(login, note || undefined)
+          : await conn.friendAdd(login, note || undefined)
+      ).state;
     });
     if (!ok) return;
     this.drafts.delete('add-login');
@@ -218,17 +232,109 @@ export class FriendsView {
   }
 
   private async remove(f: Friend, how: 'remove' | 'withdraw' | 'decline'): Promise<void> {
+    const portable = this.hooks.portable();
+    const everywhere = how === 'remove' && !!portable?.holds(f);
     if (how === 'remove') {
       const yes = await ask({
         title: `Remove ${friendName(f)}?`,
-        body: 'The friendship ends for both of you, and what they send you is held from then on.',
+        body: everywhere
+          ? 'The friendship ends for both of you, here and on every other server it was brought to, and what they send you is held from then on.'
+          : 'The friendship ends for both of you, and what they send you is held from then on.',
         fields: [],
         ok: 'Remove',
         danger: true,
       });
       if (!yes) return;
     }
-    await this.act((conn) => (how === 'decline' ? conn.friendRespond(f.login, false) : conn.friendRemove(f.login)));
+    await this.act((conn) =>
+      how === 'decline' ? conn.friendRespond(f.login, false) : portable ? portable.remove(f) : conn.friendRemove(f.login),
+    );
+  }
+
+  /** With this client's own acceptance where the request carries an
+   *  offer and the session may sign one. */
+  private async accept(f: Friend): Promise<void> {
+    const portable = this.hooks.portable();
+    // Asked after any rotation the entry shows is followed, so a fetch
+    // still in flight cannot skip the question.
+    const old = portable && f.offer ? await portable.rotation(f) : undefined;
+    if (old) {
+      const yes = await ask({
+        title: `Accept ${friendName(f)}'s new key?`,
+        body:
+          `Their identity key has rotated from ${old.slice(0, 8)}… to ${f.fingerprint!.slice(0, 8)}…, and they offer your friendship under it. ` +
+          'Both keys signed the rotation; that the old key had committed to this new one is the server\'s word, which this device ' +
+          'cannot check. Accept only if you expected them to change keys.',
+        fields: [],
+        ok: 'Accept',
+      });
+      if (!yes) return;
+    }
+    const move = old ? { from: old, to: f.fingerprint! } : undefined;
+    await this.act((conn) => (portable && f.offer ? portable.accept(f, move) : conn.friendRespond(f.login, true)));
+  }
+
+  /** Turned on, the user picks who comes along before anything is
+   *  presented, since presenting is what tells the server. */
+  private async bring(on: boolean): Promise<void> {
+    const portable = this.hooks.portable();
+    if (!portable) return;
+    let leftOut: string[] = [];
+    if (on) {
+      const friends = [...new Set(portable.book.friendships.filter((k) => portable.adopted(k) && !portable.movedTo(k.friend)).map((k) => k.friend))];
+      const yes = await ask({
+        title: 'Bring your portable friends here?',
+        body:
+          'The friends ticked here are shown to this server, each one it can find, and become friends here once they bring you too. ' +
+          'This server then knows who you are friends with.',
+        fields: friends.map((fp) => ({ kind: 'check' as const, name: fp, label: this.portableName(fp), value: !portable.choice.leftOut.includes(fp) })),
+        ok: 'Bring them',
+      });
+      if (!yes) return;
+      leftOut = friends.filter((fp) => !yes[fp]);
+    }
+    await this.act(
+      () => portable.setBring(on, leftOut),
+      on ? 'Your portable friends are brought here.' : 'Your portable friends are no longer brought here.',
+    );
+  }
+
+  /** A portable friend by the login a server last showed them under, or
+   *  their key. */
+  private portableName(fp: string): string {
+    const logins = this.hooks.portable()?.with(fp).find((k) => Object.keys(k.logins).length)?.logins;
+    return (logins && Object.values(logins)[0]) ?? `${fp.slice(0, 8)}…`;
+  }
+
+  private async leaveOut(friend: string, out: boolean, login?: string): Promise<void> {
+    const portable = this.hooks.portable();
+    if (!portable) return;
+    if (out) {
+      const yes = await ask({
+        title: 'Leave this friend out here?',
+        body: 'Your friendship stays on the other servers. Here it ends, if it stands, and is not brought again.',
+        fields: [],
+        ok: 'Leave out',
+      });
+      if (!yes) return;
+    }
+    await this.act(() => portable.leaveOut(friend, out, login));
+  }
+
+  private async confirm(k: KeptFriendship, keep: boolean): Promise<void> {
+    const portable = this.hooks.portable();
+    if (!portable) return;
+    if (!keep) {
+      const yes = await ask({
+        title: 'Not yours?',
+        body: 'The friendship is withdrawn, on this server and on every other this device reaches, as a removal by you would be.',
+        fields: [],
+        ok: 'Withdraw it',
+        danger: true,
+      });
+      if (!yes) return;
+    }
+    await this.act(() => portable.confirm(k.hash, keep));
   }
 
   /** Only what changed, so another session's status is not written over
@@ -375,7 +481,7 @@ export class FriendsView {
           row(
             f,
             f.note ? h('span', { class: 'muted friends-note' }, f.note) : null,
-            this.button('Accept', `accept:${f.login}`, () => void this.act((c) => c.friendRespond(f.login, true))),
+            this.button('Accept', `accept:${f.login}`, () => void this.accept(f)),
             this.button('Decline', `decline:${f.login}`, () => void this.remove(f, 'decline')),
           ),
         ),
@@ -384,12 +490,17 @@ export class FriendsView {
         'Friends',
         friends.map((f) => {
           const presence = f.presence ?? 'offline';
+          const keeper = this.hooks.portable();
+          const portable = keeper?.with(f.fingerprint).some((k) => keeper.adopted(k));
           return row(
             f,
+            portable ? h('span', { class: 'muted friends-note', title: f.fingerprint }, 'portable') : null,
             h('span', { class: `friends-presence p-${presence}` }, PRESENCE_LABEL[presence]),
             f.status_text ? h('span', { class: 'muted friends-note' }, f.status_text) : null,
+            f.offer ? this.button('Make portable', `upgrade:${f.login}`, () => void this.accept(f)) : null,
             this.button('Message', `msg:${f.login}`, () => this.hooks.message(f.login, friendName(f))),
             this.button('Rename', `alias:${f.login}`, () => void this.rename(f)),
+            portable ? this.button('Leave out here', `here:${f.login}`, () => void this.leaveOut(f.fingerprint!, true, f.login)) : null,
             this.button('Remove', `remove:${f.login}`, () => void this.remove(f, 'remove'), true),
           );
         }),
@@ -403,8 +514,65 @@ export class FriendsView {
         blocked.map((f) => row(f, this.button('Unblock', `unblock:${f.login}`, () => void this.act((c) => c.unblock({ login: f.login }))))),
       ),
     ];
+    out.push(this.portablePart(friends));
     if (!out.some(Boolean)) return [h('p', { class: 'muted' }, 'No friends yet. Add someone by their login.')];
     return out.filter((el): el is HTMLDivElement => !!el);
+  }
+
+  /** Where this server stands with the user's portable friendships: the
+   *  choice to bring them, each friend not a friend here and whether
+   *  they are left out, and what another of the user's devices made. */
+  private portablePart(here: Friend[]): HTMLDivElement | null {
+    const portable = this.hooks.portable();
+    if (!portable) return null;
+    const { bring, leftOut } = portable.choice;
+    const held = portable.book.friendships;
+    const name = (fp: string) => this.portableName(fp);
+    const elsewhere = [
+      ...new Set(
+        held.filter((k) => portable.adopted(k) && !portable.movedTo(k.friend) && !here.some((f) => f.fingerprint === k.friend)).map((k) => k.friend),
+      ),
+    ];
+    const rows = elsewhere.map((fp) => {
+      const out = leftOut.includes(fp);
+      return h(
+        'div',
+        { class: 'friends-row' },
+        h('span', { class: 'friends-name', title: fp }, name(fp)),
+        h('span', { class: 'muted friends-note' }, out ? 'left out here' : bring ? 'not here yet' : ''),
+        bring ? this.button(out ? 'Bring here' : 'Leave out', `leave:${fp}`, () => void this.leaveOut(fp, !out)) : null,
+      );
+    });
+    // Grouped by the device that signed them, so a user asks themselves
+    // once per device rather than once per friend (§6).
+    const devices = new Map<string, KeptFriendship[]>();
+    for (const k of held) if (!portable.adopted(k)) devices.set(k.device, [...(devices.get(k.device) ?? []), k]);
+    const confirm = [...devices.values()].flatMap((group) => [
+      h('p', { class: 'muted' }, `Made on ${group[0]!.deviceName ?? 'a device other than this one'}. Keep the ones you recognize.`),
+      ...group.map((k) =>
+        h(
+          'div',
+          { class: 'friends-row' },
+          h('span', { class: 'friends-name', title: k.friend }, name(k.friend)),
+          h('span', { class: 'muted friends-note' }, new Date(k.signedAt * 1000).toLocaleDateString()),
+          this.button('Keep', `keep:${k.hash}`, () => void this.confirm(k, true)),
+          this.button('Not mine', `drop:${k.hash}`, () => void this.confirm(k, false), true),
+        ),
+      ),
+    ]);
+    return h(
+      'div',
+      { class: 'friends-group' },
+      h('h3', {}, 'Portable friends'),
+      h(
+        'p',
+        { class: 'muted' },
+        bring ? 'Your portable friends are brought to this server. ' : 'Your portable friends are not brought to this server. ',
+        this.button(bring ? 'Stop bringing them' : 'Bring them here…', 'bring', () => void this.bring(!bring)),
+      ),
+      ...rows,
+      ...confirm,
+    );
   }
 
   private requestsPart(): HTMLElement[] {

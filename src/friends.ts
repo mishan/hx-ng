@@ -56,15 +56,18 @@ export class FriendBook {
     else this.rows.set(keyOf(f.login), f);
   }
 
-  /** A `friend_request`, which may come before or without its row. */
+  /** A `friend_request`, which may come before or without its row. On
+   *  a friendship it is an upgrade offer, kept on the row. */
   request(d: Events['friend_request']): void {
     const had = this.get(d.login);
+    if (had?.state === 'accepted' && d.offer !== undefined) return this.apply({ ...had, offer: d.offer });
     if (had && had.state !== 'pending_in') return;
     this.apply({
       login: d.login,
       state: 'pending_in',
       ...(d.fingerprint !== undefined ? { fingerprint: d.fingerprint } : {}),
       ...(d.note !== undefined ? { note: d.note } : {}),
+      ...(d.offer !== undefined ? { offer: d.offer } : {}),
     });
   }
 

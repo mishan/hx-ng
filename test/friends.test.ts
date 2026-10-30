@@ -34,6 +34,11 @@ describe('the friend book', () => {
     ],
     ['takes no presence for a row that is not a friendship', (b) => b.presence({ login: 'eve', state: 'online' }), row('bob', 'accepted', { presence: 'online', status_text: 'lunch' })],
     ['leaves a friendship as it is on a friend request', (b) => b.request({ login: 'bob', note: 'again?' }), row('bob', 'accepted', { presence: 'online', status_text: 'lunch' })],
+    [
+      'keeps an upgrade offer on a friendship',
+      (b) => b.request({ login: 'bob', offer: 'o' }),
+      row('bob', 'accepted', { presence: 'online', status_text: 'lunch', offer: 'o' }),
+    ],
   ])('%s', (_, act, want) => {
     const book = new FriendBook();
     book.replace([row('bob', 'accepted', { presence: 'online', status_text: 'lunch' }), row('eve', 'pending_out')]);

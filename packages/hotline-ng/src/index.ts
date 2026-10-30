@@ -79,6 +79,7 @@ export {
 export * from './identity.js';
 export * from './handover.js';
 export * from './message.js';
+export * from './friendship.js';
 // Named rather than `*`: the padding and a box made from a fixed
 // ephemeral key are for the tests that pin hl-identity's vectors.
 export {

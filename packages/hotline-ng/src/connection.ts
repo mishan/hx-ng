@@ -234,6 +234,18 @@ export interface Credentials {
    *  runtime without one, or a test's fake server
    *  (`@hotline-ng/client/testing`). */
   webSocket?: (url: string) => SocketLike;
+  /** Where the resume record is kept, in place of `sessionStorage`:
+   *  for a page whose sessionStorage dies before its session should, as
+   *  an installed app's does when the OS kills its window. */
+  sessionStore?: SessionStore;
+}
+
+/** The parts of a `Storage` that keep the resume record, which is what
+ *  `Credentials.sessionStore` takes. `localStorage` is one. */
+export interface SessionStore {
+  getItem(key: string): string | null;
+  setItem(key: string, value: string): void;
+  removeItem(key: string): void;
 }
 
 /** A handler compared bivariantly, as a method's parameters are, so a
@@ -255,7 +267,8 @@ export interface SocketLike {
 
 /** What a resumed session is allowed to remember between page loads. The
  *  token is a bearer credential for one session and dies with it, so it
- *  lives in sessionStorage — per tab, gone when the tab is.
+ *  lives in sessionStorage — per tab, gone when the tab is — unless the
+ *  caller names a `sessionStore` that lasts longer.
  *
  *  The capability facts ride along because only the *login* reply
  *  carries them: `resume` answers with `self` and a replay, and `sync`
@@ -289,9 +302,17 @@ interface Saved {
   /** The session speaks the friend family: its login said so, or it
    *  has sent one of the family's requests. */
   speaks?: boolean;
+  /** The connection that wrote it. A store shared by windows may hold
+   *  one that took the session over and wrote since, and a connection
+   *  clears only a record it wrote or read. */
+  writer?: string;
 }
 
 const SAVED_KEY = 'hxd-ng.session';
+
+/** A resume-only connection's session is gone, and with no password to
+ *  log in again with, so is the connection. */
+class SessionGone extends Error {}
 
 /** `WebSocket.OPEN`, without needing a global `WebSocket` to read it from. */
 const OPEN = 1;
@@ -310,11 +331,11 @@ const REQUESTS_PAGES = 20;
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
-/** Does this tab hold a session for `url` that a `resume` could pick up?
- *  The client asks before showing a login form, so a reload goes
- *  straight back into the room. */
-export function hasSavedSession(url: string): boolean {
-  const s = readSaved();
+/** Is a session for `url` saved, in `store` or else sessionStorage,
+ *  that a `resume` could pick up? The client asks before showing a
+ *  login form, so a reload goes straight back into the room. */
+export function hasSavedSession(url: string, store?: SessionStore): boolean {
+  const s = parseSaved(readRaw(store));
   return !!s && s.url === url;
 }
 
@@ -420,6 +441,9 @@ export class Connection {
    *  hands one back and Node the other, and nothing here cares which. */
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
   private closing = false;
+  private readonly writer = Math.random().toString(36).slice(2);
+  /** The resume record as this connection last wrote or read it. */
+  private savedRaw: string | null = null;
   /** A handshake under way, whose caller retries if it fails: a close
    *  meanwhile is part of that failure, not a second one. */
   private attaching = false;
@@ -528,8 +552,10 @@ export class Connection {
   async start(opts: { resumeOnly?: boolean } = {}): Promise<void> {
     this.closing = false;
     this.flooded = false;
-    const saved = readSaved();
+    const raw = readRaw(this.creds.sessionStore);
+    const saved = parseSaved(raw);
     if (saved && saved.url === this.creds.url) {
+      this.savedRaw = raw;
       this.session = saved.session;
       this.token = saved.token;
       this.seq = saved.seq;
@@ -575,7 +601,7 @@ export class Connection {
     } catch {
       /* the socket dying during logout is a successful logout */
     }
-    clearSaved();
+    this.forget();
     this.ws?.close();
     this.setState('offline');
   }
@@ -643,11 +669,8 @@ export class Connection {
     if (this.session && this.token) {
       const ws = await this.openSocket(this.creds.url);
       if (await this.tryResume()) return;
-      if (this.resumeOnly) {
-        this.closing = true;
-        ws.close();
-        throw new Error('Your session has ended. Log in again.');
-      }
+      // `attach` lets the socket go.
+      if (this.resumeOnly) throw new SessionGone('Your session has ended. Log in again.');
       // The server closes a connection whose resume it refused (§6.2),
       // and an identity login needs a socket opened with a token anyway.
       this.discard(ws);
@@ -761,7 +784,7 @@ export class Connection {
         this.session = null;
         this.token = null;
         this.seq = 0;
-        clearSaved();
+        this.forget();
         return false;
       }
       // The resume's `signs` and `sealed` hold all the same, as far as
@@ -993,7 +1016,7 @@ export class Connection {
       this.session = null;
       this.token = null;
       this.seq = 0;
-      clearSaved();
+      this.forget();
     }
     this.scheduleRetry();
   }
@@ -1001,7 +1024,7 @@ export class Connection {
   private end(reason: string): void {
     this.closing = true;
     this.cancelRetry();
-    clearSaved();
+    this.forget();
     this.session = null;
     this.token = null;
     this.setState('offline', reason);
@@ -1019,6 +1042,7 @@ export class Connection {
       this.retryTimer = null;
       this.attach().catch((e) => {
         if (this.closing) return;
+        if (e instanceof SessionGone) return this.end(e.message);
         // Not the server a proof would be for, however often it is asked.
         if (
           e instanceof AuthError &&
@@ -1981,7 +2005,7 @@ export class Connection {
    *  `session_expired`. */
   private persist(): void {
     if (!this.session || !this.token || this.grace === null) return;
-    saveSession({
+    this.savedRaw = saveSession(this.creds.sessionStore, {
       url: this.creds.url,
       session: this.session,
       token: this.token,
@@ -2004,7 +2028,13 @@ export class Connection {
       files: this.files,
       messaging: this.messaging,
       speaks: this.speaks,
+      writer: this.writer,
     });
+  }
+
+  private forget(): void {
+    clearSaved(this.creds.sessionStore, this.savedRaw);
+    this.savedRaw = null;
   }
 
   private noteHistoryId(id: number, room = 0): boolean {
@@ -2033,27 +2063,41 @@ export class Connection {
 
 // --- session storage ----------------------------------------------------
 
-function readSaved(): Saved | null {
+function readRaw(store?: SessionStore): string | null {
   try {
-    const raw = sessionStorage.getItem(SAVED_KEY);
+    return (store ?? sessionStorage).getItem(SAVED_KEY);
+  } catch {
+    return null;
+  }
+}
+
+function parseSaved(raw: string | null): Saved | null {
+  try {
     return raw ? (JSON.parse(raw) as Saved) : null;
   } catch {
     return null;
   }
 }
 
-function saveSession(s: Saved): void {
+/** The record as written, or null if it could not be. */
+function saveSession(store: SessionStore | undefined, s: Saved): string | null {
+  const raw = JSON.stringify(s);
   try {
-    sessionStorage.setItem(SAVED_KEY, JSON.stringify(s));
+    (store ?? sessionStorage).setItem(SAVED_KEY, raw);
+    return raw;
   } catch {
     /* private browsing, storage disabled — resume across reloads is a
        convenience, never a correctness requirement */
+    return null;
   }
 }
 
-function clearSaved(): void {
+/** Remove the record only if it is still `mine`: another window sharing
+ *  the store may have written its own since. */
+function clearSaved(store: SessionStore | undefined, mine: string | null): void {
   try {
-    sessionStorage.removeItem(SAVED_KEY);
+    const s = store ?? sessionStorage;
+    if (mine !== null && s.getItem(SAVED_KEY) === mine) s.removeItem(SAVED_KEY);
   } catch {
     /* as above */
   }

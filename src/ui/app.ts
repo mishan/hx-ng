@@ -65,6 +65,7 @@ import {
 import { ClassicConnection, type ClassicHooks } from '../classic/connection';
 import { route } from '../classic/route';
 import { serverFromUrl, type AppConfig } from '../config';
+import { sessionStore } from '../install';
 import { durationWords, DURATIONS, lineReport, parseDuration, personRef } from '../moderation';
 import { notifyText } from '../news';
 import {
@@ -280,6 +281,10 @@ export class App {
   /** Set when this page was opened by a QR code, or by a broken one. */
   private openPanelForScan = false;
   private pingTimer: number | null = null;
+  /** A connect under way: a second beside it, or after it, would leave
+   *  two sessions writing into one page. */
+  private connecting = false;
+  private sessionStore = sessionStore();
   private historyLoading = false;
   /** A server that refuses `history` refuses it for the whole session.
    *  The cap is echoed whether or not this account may read the log
@@ -661,7 +666,7 @@ export class App {
     // into it rather than making someone log in again to reach the room
     // they never left.
     const saved = remembered(this.config);
-    if (hasSavedSession(saved.url)) {
+    if (hasSavedSession(saved.url, this.sessionStore)) {
       screen.hidden = true;
       const splash = h('div', { class: 'connect' }, h('p', { class: 'muted' }, 'Resuming your session…'));
       screen.before(splash);
@@ -671,7 +676,7 @@ export class App {
           // A session refused for now, or out of reach, is kept for the
           // next reload; logging in here would start another beside it.
           this.connectForm?.fail(
-            hasSavedSession(saved.url)
+            hasSavedSession(saved.url, this.sessionStore)
               ? `${e.message.replace(/([^.!?])$/, '$1.')} Your session is still there: reload to go back into it.`
               : e.message,
           );
@@ -683,6 +688,17 @@ export class App {
   // --- connecting -------------------------------------------------------
 
   private async connect(d: Details, opts: { resumeOnly?: boolean } = {}): Promise<void> {
+    if (this.connecting) throw new Error('Already connecting.');
+    if (this.conn) throw new Error('Already connected. Reload to connect again.');
+    this.connecting = true;
+    try {
+      await this.connectOnce(d, opts);
+    } finally {
+      this.connecting = false;
+    }
+  }
+
+  private async connectOnce(d: Details, opts: { resumeOnly?: boolean }): Promise<void> {
     // A retry after a failed connect starts a fresh session; anything
     // the last one left on the strip belongs to a peer connection that
     // no longer exists.
@@ -894,7 +910,7 @@ export class App {
     // one that session logged in with, whichever is active now; for an
     // identity login, the active one.
     const active = d.identity ? await getActiveDevice().catch(() => null) : null;
-    const resuming = way.wire === 'ng' && hasSavedSession(way.url);
+    const resuming = way.wire === 'ng' && hasSavedSession(way.url, this.sessionStore);
     const saved = resuming ? signingDeviceFor(way.url) : null;
     const resumed = saved ? await getDevice(saved).catch(() => null) : null;
     const signs = this.useDevice(way.url, resuming ? resumed : active);
@@ -906,6 +922,7 @@ export class App {
               ...creds,
               url: way.url,
               messaging: true,
+              sessionStore: this.sessionStore,
               ...(signs ? { signs, sealed: true } : {}),
               // Asked as the login goes out, a fresh one after a failed
               // resume included: it proves the active device.
@@ -941,10 +958,12 @@ export class App {
       await conn.start(opts);
       started = true;
     } catch (e) {
-      this.conn = null;
-      this.media = null;
-      this.images.attach(null);
-      avatars.attach(null);
+      if (this.conn === conn) {
+        this.conn = null;
+        this.media = null;
+        this.images.attach(null);
+        avatars.attach(null);
+      }
       throw new Error(
         e instanceof WireFailure ? errorText(e.wire) : e instanceof Error ? e.message : String(e),
       );
@@ -986,6 +1005,7 @@ export class App {
         this.say(e instanceof WireFailure ? errorText(e.wire) : e.message),
       );
     }
+    if (this.pingTimer !== null) clearInterval(this.pingTimer);
     this.pingTimer = window.setInterval(() => {
       if (conn.state === 'online') void conn.ping().then(() => this.renderPill());
     }, 15000);

@@ -108,7 +108,12 @@ What it handles so a caller does not have to:
   `sessionStorage`, so a page reload resumes into the same uid.
   `hasSavedSession(url)` says whether that is possible before you draw a
   login form. Passwords are never stored; the token is a bearer
-  credential for one session and dies with the tab.
+  credential for one session and dies with the tab. An installed app,
+  whose window the OS may kill and reopen, can keep it somewhere that
+  outlives the tab instead: pass `Credentials.sessionStore` (any
+  `SessionStore`, such as `localStorage`), and the same store to
+  `hasSavedSession(url, store)`. A `start({ resumeOnly: true })`
+  connection whose resume is later refused ends, through `onEnded`.
 - **A trace hook** that sees exactly what the socket saw, in both
   directions, from the first frame.
 

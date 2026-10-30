@@ -41,6 +41,8 @@ import {
   type User,
 } from '@hotline-ng/client';
 
+import { sessionStore } from './install';
+
 /** Where a user chooses whether to sign (§8). Private chats are never
  *  signed, so they are not one. */
 export type SignScope = 'lobby' | 'pm' | 'news';
@@ -683,21 +685,21 @@ const DEVICE_KEY = 'hxd-ng.signing-devices';
 
 function devices(): Record<string, string> {
   try {
-    return (JSON.parse(sessionStorage.getItem(DEVICE_KEY) ?? '{}') as Record<string, string>) ?? {};
+    return (JSON.parse((sessionStore() ?? sessionStorage).getItem(DEVICE_KEY) ?? '{}') as Record<string, string>) ?? {};
   } catch {
     return {};
   }
 }
 
-/** Which device the session for `url` proved, kept with the tab as its
- *  session is, so a resume after a reload signs with that device and no
+/** Which device the session for `url` proved, kept where its session
+ *  is, so a resume after a reload signs with that device and no
  *  other. `null` forgets it. */
 export function rememberSigningDevice(url: string, devicePub: string | null): void {
   const all = devices();
   if (devicePub === null) delete all[url];
   else all[url] = devicePub;
   try {
-    sessionStorage.setItem(DEVICE_KEY, JSON.stringify(all));
+    (sessionStore() ?? sessionStorage).setItem(DEVICE_KEY, JSON.stringify(all));
   } catch {
     /* storage disabled; a reload signs nothing */
   }

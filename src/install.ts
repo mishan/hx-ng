@@ -69,3 +69,26 @@ export async function install(): Promise<boolean> {
   await e.prompt();
   return (await e.userChoice).outcome === 'accepted';
 }
+
+/** The parts of a window `sessionStore` looks at. */
+type Host = Pick<Window, 'matchMedia' | 'navigator' | 'localStorage' | 'sessionStorage'>;
+
+/**
+ * Where a session's resume record is kept. In a tab, sessionStorage: the
+ * token is a bearer credential, and dies with the tab. An installed
+ * app's window is killed by the OS in the background and opened afresh
+ * by a notification tap, and its sessionStorage goes with it, so there
+ * the record lives in localStorage and the app resumes. `undefined`
+ * where storage is out of reach, which the library takes as its default.
+ */
+export function sessionStore(host?: Host): Storage | undefined {
+  try {
+    const w = host ?? window;
+    const installed =
+      w.matchMedia?.('(display-mode: standalone)').matches === true ||
+      (w.navigator as { standalone?: boolean }).standalone === true;
+    return installed ? w.localStorage : w.sessionStorage;
+  } catch {
+    return undefined;
+  }
+}

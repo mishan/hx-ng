@@ -177,6 +177,7 @@ const code = (e: unknown): string | null => (e instanceof WireFailure ? e.wire.c
 /** How often a request answered `rate_limited`, which is pacing and not
  *  a refusal, is sent again before the keeper gives up for now. */
 const PACED_TRIES = 5;
+const MAX_PACE_SECONDS = 60;
 const addTo = (list: string[], x: string) => (list.includes(x) ? list : [...list, x]);
 const without = (list: string[], x: string) => list.filter((y) => y !== x);
 const chunks = <T>(list: T[]): T[][] =>
@@ -263,7 +264,9 @@ export class PortableFriends {
       } catch (e) {
         if (code(e) !== 'rate_limited' || tries >= PACED_TRIES) throw e;
         const after = (e as WireFailure).wire.retry_after;
-        await new Promise((resolve) => setTimeout(resolve, after !== undefined ? after * 1000 : 1000 * 2 ** tries));
+        // Clamped, so one server cannot hold every later act for hours.
+        const wait = Math.min(after ?? 2 ** tries, MAX_PACE_SECONDS);
+        await new Promise((resolve) => setTimeout(resolve, wait * 1000));
       }
     }
   }
@@ -800,12 +803,22 @@ export class PortableFriends {
     });
   }
 
-  /** Every key that may be `f`'s: the one shown, the ones its login was
-   *  seen under here, and either end of a rotation between them. */
+  /** Every key that is `f`'s: the one shown and every key a checked
+   *  rotation links to it, however many steps away. A login is the
+   *  server's word and may have been someone else's, so it names keys
+   *  only where the entry shows none. */
   private keysOf(f: Friend): Set<string> {
-    const keys = new Set<string>(f.fingerprint ? [f.fingerprint] : []);
-    for (const k of this.b.friendships) if (k.logins[this.d.server] === f.login) keys.add(k.friend);
-    for (const m of this.b.moves) if (keys.has(m.to) || keys.has(m.from)) [m.from, m.to].forEach((x) => keys.add(x));
+    const keys = new Set<string>();
+    if (f.fingerprint) keys.add(f.fingerprint);
+    else for (const k of this.b.friendships) if (k.logins[this.d.server] === f.login) keys.add(k.friend);
+    for (let grew = true; grew; ) {
+      grew = false;
+      for (const m of this.b.moves) {
+        if (keys.has(m.from) === keys.has(m.to)) continue;
+        [m.from, m.to].forEach((x) => keys.add(x));
+        grew = true;
+      }
+    }
     return keys;
   }
 
@@ -843,10 +856,13 @@ export class PortableFriends {
       }
       const rest = signed.filter((_, i) => i !== first);
       if (rest.length) {
-        const ok = await this.paced(() => this.d.conn.friendshipsPresent({ withdrawals: rest }));
-        ok.withdrawals.forEach((r, i) => {
-          if (r.result === 'stale') this.stale();
-          if (r.result !== 'ok' && r.result !== 'bad_signature') owed[i < first ? i : i + 1]!.push(server);
+        // The edge is gone by now, so a failure here leaves these owed
+        // to this server rather than the friendships kept.
+        const answered = await this.paced(() => this.d.conn.friendshipsPresent({ withdrawals: rest })).catch(() => null);
+        rest.forEach((_, i) => {
+          const r = answered?.withdrawals[i];
+          if (r?.result === 'stale') this.stale();
+          if (r?.result !== 'ok' && r?.result !== 'bad_signature') owed[i < first ? i : i + 1]!.push(server);
         });
       }
       for (const [i, pair] of pairs.entries()) await this.cut({ pair, party: this.self, before: now, owed: owed[i]! }, true);

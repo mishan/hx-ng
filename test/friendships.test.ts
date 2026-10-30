@@ -485,6 +485,40 @@ describe('portable friends', () => {
     expect(bob.keeper.with(ALICE)).toEqual([]);
   });
 
+  it('removes plainly, leaving the friendship held, a login now shown under another key with no checked rotation to it', async () => {
+    const { bob } = await befriend('ws://a');
+    bob.wire.on('friend_remove', () => ({}));
+    await bob.keeper.remove({ login: 'alice', state: 'accepted', fingerprint: SUCC });
+    expect(bob.wire.sent('friend_remove')).toEqual([{ login: 'alice' }]);
+    expect(bob.keeper.with(ALICE)).toHaveLength(1);
+  });
+
+  it('removes a friend shown under the last key of a chain of checked rotations by withdrawing the first', async () => {
+    const { bob } = await befriend('ws://a');
+    const last: string = V.keys.successor_successor.fingerprint;
+    await bob.store.update(BOB, (b) => {
+      b.moves.push({ from: ALICE, to: SUCC, records: [] }, { from: SUCC, to: last, records: [] });
+    });
+    const again = await party('bob', 'ws://a', bob.store, new Wire({ friend_remove: () => ({}) }));
+    await again.keeper.remove({ login: 'alice', state: 'accepted', fingerprint: last });
+    const pair = [fingerprintFromString(BOB)!, fingerprintFromString(ALICE)!] as const;
+    await checkFriendWithdrawal(base64urlToBytes(again.wire.sent('friend_remove')[0].withdraw), clock, pair);
+    expect(again.keeper.with(ALICE)).toEqual([]);
+  });
+
+  it("owes this server the other keys' withdrawals where they fail after the edge is gone", async () => {
+    const { bob } = await befriend('ws://a');
+    bob.wire.on('friendships_fetch', rotations([b64hex(V.rotate.signed_hex)]));
+    const entry: Friend = { login: 'alice', state: 'accepted', fingerprint: SUCC, offer: await successorOffer() };
+    await bob.keeper.onFriend(entry);
+    await bob.keeper.accept(entry, { from: ALICE, to: SUCC });
+    bob.wire.on('friend_remove', () => ({})).on('friendships_present', refuse('server_error'));
+    await bob.keeper.remove(entry);
+    const old = await pairHash(fingerprintFromString(BOB)!, fingerprintFromString(ALICE)!);
+    expect([bob.keeper.with(ALICE), bob.keeper.with(SUCC)]).toEqual([[], []]);
+    expect(bob.keeper.book.cutoffs.find((c) => c.pair === bytesToBase64url(old))?.owed).toEqual(['ws://a']);
+  });
+
   it('leaves an active friend out here alone by removing their edge here plainly', async () => {
     const { alice } = await befriend('ws://a');
     alice.wire.on('friend_remove', () => ({}));

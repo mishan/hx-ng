@@ -758,8 +758,9 @@ export class App {
         // operator may have changed the banner, or taken it down.
         loggedIn = true;
         // A login, not a resume: the device is the one it proved, and on
-        // a reconnect the key is checked again before it is signed to.
-        this.useDevice(way.url, active);
+        // a reconnect the key is checked again before it is signed to. A
+        // replaced connection's login proves nothing for this one.
+        if (conn === this.conn) this.useDevice(way.url, active);
         if (started) void this.repin();
         this.banner.show(conn);
         // Present whenever the *server* keeps mail — which is not the
@@ -1279,7 +1280,10 @@ export class App {
       const conv = this.store.pmWith({ login: d.login });
       if (conv) this.setTyping(conv, d.typing);
     });
+    // A replaced connection's events are not this session's friends, and
+    // its keeper would answer them through the current connection.
     conn.on('friend', (d) => {
+      if (conn !== this.conn) return;
       this.friends.onFriend(d);
       const keeper = this.portable;
       void keeper?.onFriend(d.friend).then(
@@ -1288,6 +1292,7 @@ export class App {
       );
     });
     conn.on('friend_request', (d) => {
+      if (conn !== this.conn) return;
       const upgrade = d.offer !== undefined && this.friends.book.isFriend(d.login);
       this.friends.onFriendRequest(d);
       this.say(

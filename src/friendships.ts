@@ -174,6 +174,9 @@ async function fingerprintOfKey(key: Uint8Array): Promise<string> {
 }
 
 const code = (e: unknown): string | null => (e instanceof WireFailure ? e.wire.code : null);
+/** How often a request answered `rate_limited`, which is pacing and not
+ *  a refusal, is sent again before the keeper gives up for now. */
+const PACED_TRIES = 5;
 const addTo = (list: string[], x: string) => (list.includes(x) ? list : [...list, x]);
 const without = (list: string[], x: string) => list.filter((y) => y !== x);
 const chunks = <T>(list: T[]): T[][] =>
@@ -251,6 +254,20 @@ export class PortableFriends {
     return next;
   }
 
+  /** `send`, sent again after each `rate_limited` once its delay has
+   *  passed, up to `PACED_TRIES`; then its refusal is the caller's. */
+  private async paced<T>(send: () => Promise<T>): Promise<T> {
+    for (let tries = 0; ; tries++) {
+      try {
+        return await send();
+      } catch (e) {
+        if (code(e) !== 'rate_limited' || tries >= PACED_TRIES) throw e;
+        const after = (e as WireFailure).wire.retry_after;
+        await new Promise((resolve) => setTimeout(resolve, after !== undefined ? after * 1000 : 1000 * 2 ** tries));
+      }
+    }
+  }
+
   private async update(fn: (book: FriendshipBook) => void): Promise<void> {
     this.b = await this.d.store.update(this.self, fn);
   }
@@ -314,7 +331,9 @@ export class PortableFriends {
   // --- at login -------------------------------------------------------------
 
   /** The withdrawals this server is owed, each signed afresh: what
-   *  `beforeFriends` sends, before the roster is read. */
+   *  `beforeFriends` sends, before the roster is read. A server pacing
+   *  them is waited for, each try signed again, so the roster is not
+   *  read before them; one still pacing after that is the caller's. */
   presentWithdrawals(): Promise<void> {
     return this.run(async () => {
       // Another tab may have cut a friendship since this one last looked.
@@ -331,8 +350,11 @@ export class PortableFriends {
         else rounds.push([c]);
       }
       for (const round of rounds) {
-        const signed = await Promise.all(round.map((c) => this.signWithdrawal(c.pair, c.party, c.before, now)));
-        const ok = await this.d.conn.friendshipsPresent({ withdrawals: signed.map(b64) });
+        const ok = await this.paced(async () => {
+          const time = this.now();
+          const signed = await Promise.all(round.map((c) => this.signWithdrawal(c.pair, c.party, c.before, time)));
+          return this.d.conn.friendshipsPresent({ withdrawals: signed.map(b64) });
+        });
         const settled = new Set<KeptCutoff>();
         ok.withdrawals.forEach((r, i) => {
           if (r.result === 'stale') this.stale();
@@ -340,7 +362,10 @@ export class PortableFriends {
         });
         await this.update((b) => {
           for (const c of b.cutoffs) {
-            if ([...settled].some((s) => s.pair === c.pair && s.party === c.party)) c.owed = c.owed.filter((s) => s !== this.d.server);
+            // Another tab may have moved the cutoff on meanwhile; that one
+            // is still owed.
+            const covered = [...settled].some((s) => s.pair === c.pair && s.party === c.party && c.before <= s.before);
+            if (covered) c.owed = without(c.owed, this.d.server);
           }
         });
       }
@@ -373,17 +398,9 @@ export class PortableFriends {
       // withdrawal while this client was away (§5.1): present it again.
       await this.update((b) => {
         b.offers = b.offers.filter((o) => now <= o.expires + S);
+        this.note(b, accepted);
         for (const k of b.friendships) {
-          // A friend who rotated keeps their login, under a new key.
-          const here = accepted.find((f) => f.fingerprint === k.friend) ?? accepted.find((f) => f.login === k.logins[server]);
-          if (here) k.logins[server] = here.login;
-          // An entry's first hash is this account's own presentation.
-          if (here?.friendships?.[0] === k.hash) {
-            k.presented = addTo(k.presented, server);
-            k.bringTo = addTo(k.bringTo, server);
-          }
-          if (shown.has(k.hash)) k.seen = addTo(k.seen, server);
-          else if (k.seen.includes(server) && !here) {
+          if (!shown.has(k.hash) && k.seen.includes(server) && !this.entryOf(k, accepted)) {
             k.seen = without(k.seen, server);
             k.presented = without(k.presented, server);
           }
@@ -393,6 +410,29 @@ export class PortableFriends {
       await this.upgrade(accepted);
       await this.present();
     });
+  }
+
+  /** The entry that is `k`'s friend's: by key, or by login for a friend
+   *  who rotated, who keeps their login under a new key. */
+  private entryOf(k: KeptFriendship, accepted: Friend[]): Friend | undefined {
+    return accepted.find((f) => f.fingerprint === k.friend) ?? accepted.find((f) => f.login === k.logins[this.d.server]);
+  }
+
+  /** What accepted entries say of friendships already held: the login
+   *  here, that they are active here, and, an entry's first hash being
+   *  this account's own presentation, that it was presented here. */
+  private note(b: FriendshipBook, accepted: Friend[]): void {
+    const server = this.d.server;
+    const shown = new Set(accepted.flatMap((f) => f.friendships ?? []));
+    for (const k of b.friendships) {
+      const here = this.entryOf(k, accepted);
+      if (here) k.logins[server] = here.login;
+      if (here?.friendships?.[0] === k.hash) {
+        k.presented = addTo(k.presented, server);
+        k.bringTo = addTo(k.bringTo, server);
+      }
+      if (shown.has(k.hash)) k.seen = addTo(k.seen, server);
+    }
   }
 
   /** What accepted entries say: friendships to fetch, a rotation to
@@ -407,6 +447,7 @@ export class PortableFriends {
   onFriend(f: Friend): Promise<void> {
     return this.run(async () => {
       if (f.state === 'accepted') {
+        await this.update((b) => this.note(b, [f]));
         await this.entries([f]);
         await this.present();
         return;
@@ -441,7 +482,7 @@ export class PortableFriends {
     const own = new Set(entries.flatMap((f) => f.friendships?.slice(0, 1) ?? []));
     for (const f of entries) for (const h of f.friendships ?? []) if (!held.has(h)) login.set(h, f.login);
     for (const hashes of chunks([...login.keys()])) {
-      const ok = await this.d.conn.friendshipsFetch({ hashes });
+      const ok = await this.paced(() => this.d.conn.friendshipsFetch({ hashes }));
       for (const { hash, friendship } of ok.friendships) {
         if (!friendship) continue;
         let f: Friendship;
@@ -486,9 +527,11 @@ export class PortableFriends {
       const old = f.fingerprint && oldKey(f);
       return old && !this.b.moves.some((m) => m.from === old && m.to === f.fingerprint);
     });
-    if (!moved.length) return;
-    const ok = await this.d.conn.friendshipsFetch({ fingerprints: moved.map((f) => f.fingerprint!) });
-    for (const { fingerprint, records } of ok.rotations) {
+    const rotations = [];
+    for (const batch of chunks(moved)) {
+      rotations.push(...(await this.paced(() => this.d.conn.friendshipsFetch({ fingerprints: batch.map((f) => f.fingerprint!) }))).rotations);
+    }
+    for (const { fingerprint, records } of rotations) {
       const f = moved.find((m) => m.fingerprint === fingerprint);
       const old = f && oldKey(f);
       if (!old || !records.length) continue;
@@ -520,7 +563,7 @@ export class PortableFriends {
       if (!moved || !old.length) continue;
       const now = this.now();
       const w = await this.signWithdrawal(await this.pairWith(m.from), this.self, now, now);
-      const result = (await this.d.conn.friendshipsPresent({ withdrawals: [b64(w)] })).withdrawals[0]?.result;
+      const result = (await this.paced(() => this.d.conn.friendshipsPresent({ withdrawals: [b64(w)] }))).withdrawals[0]?.result;
       if (result === 'stale') this.stale();
       if (result !== 'ok' && result !== 'bad_signature') continue;
       await this.update((b) => {
@@ -567,25 +610,21 @@ export class PortableFriends {
       const had = latest.get(k.friend);
       if (!had || k.signedAt > had.signedAt) latest.set(k.friend, k);
     }
+    // A server pacing these is waited for; one that paces past it is
+    // told the caller, and what was not presented is presented later.
     const due: KeptFriendship[] = [];
     for (const k of latest.values()) {
       if (k.presented.includes(server)) continue;
       try {
-        await this.d.conn.findUser({ fingerprint: k.friend });
+        await this.paced(() => this.d.conn.findUser({ fingerprint: k.friend }));
         due.push(k);
       } catch (e) {
         // Not here, or not to be found: tried again at a later login.
-        if (code(e) !== 'no_such_user') break;
+        if (code(e) !== 'no_such_user') throw e;
       }
     }
     for (const round of chunks(due)) {
-      let ok: Awaited<ReturnType<KeeperConn['friendshipsPresent']>>;
-      try {
-        ok = await this.d.conn.friendshipsPresent({ friendships: round.map((k) => k.raw) });
-      } catch (e) {
-        if (code(e) === 'rate_limited') return;
-        throw e;
-      }
+      const ok = await this.paced(() => this.d.conn.friendshipsPresent({ friendships: round.map((k) => k.raw) }));
       for (const [i, r] of ok.friendships.entries()) {
         const k = round[i]!;
         if (r.result === 'ok') {
@@ -642,8 +681,11 @@ export class PortableFriends {
   private async cut(c: KeptCutoff, all: boolean): Promise<void> {
     await this.update((b) => {
       const gone = b.friendships.filter((k) => (all ? k.pair === c.pair : ends(c, k)));
-      const owed = new Set([...c.owed, ...gone.flatMap((k) => [...k.presented, ...k.seen])]);
+      // Owed where they were presented, this server aside, and wherever
+      // `c` names: this one too, where it refused the withdrawal.
+      const owed = new Set(gone.flatMap((k) => [...k.presented, ...k.seen]));
       owed.delete(this.d.server);
+      for (const s of c.owed) owed.add(s);
       const had = b.cutoffs.find((x) => x.pair === c.pair && x.party === c.party);
       if (had) {
         had.before = Math.max(had.before, c.before);
@@ -695,8 +737,9 @@ export class PortableFriends {
    *  accept otherwise. An offer under a key other than the one a
    *  friendship with this login holds, with no checked rotation to it,
    *  is someone new (§10): a request is accepted plainly, and an
-   *  upgrade offer refused. */
-  accept(f: Friend): Promise<FriendStateOk> {
+   *  upgrade offer refused. One under a checked rotation is accepted
+   *  only with `confirmed`, the user's word on that exact move. */
+  accept(f: Friend, confirmed?: { from: string; to: string }): Promise<FriendStateOk> {
     return this.run(async () => {
       const plain = () => this.d.conn.friendRespond(f.login, true);
       if (!f.offer) return plain();
@@ -722,6 +765,9 @@ export class PortableFriends {
           `${f.login} offers under a key your friendship with them is not under, and no rotation to it checks, so it was not accepted.`,
         );
       }
+      if (old && (confirmed?.from !== old || confirmed.to !== from)) {
+        throw new Error(`${f.login}'s key has rotated; confirm the new key before accepting.`);
+      }
       const acceptance = await signFriendAcceptance(this.d.signer.key, {
         offer: offer.raw,
         from: this.identity,
@@ -744,29 +790,67 @@ export class PortableFriends {
     });
   }
 
+  /** The old key `f`'s offer would move a friendship from, once any
+   *  rotation its entry shows is followed: what the user is asked about
+   *  before `accept`. */
+  rotation(f: Friend): Promise<string | undefined> {
+    return this.run(async () => {
+      if (f.state === 'accepted') await this.followRotations([f]);
+      return this.rotatedFrom(f.fingerprint);
+    });
+  }
+
+  /** Every key that may be `f`'s: the one shown, the ones its login was
+   *  seen under here, and either end of a rotation between them. */
+  private keysOf(f: Friend): Set<string> {
+    const keys = new Set<string>(f.fingerprint ? [f.fingerprint] : []);
+    for (const k of this.b.friendships) if (k.logins[this.d.server] === f.login) keys.add(k.friend);
+    for (const m of this.b.moves) if (keys.has(m.to) || keys.has(m.from)) [m.from, m.to].forEach((x) => keys.add(x));
+    return keys;
+  }
+
+  /** Whether a portable friendship with `f`'s account is held, under any
+   *  of its keys. */
+  holds(f: Friend): boolean {
+    return [...this.keysOf(f)].some((x) => this.with(x).length);
+  }
+
   /** End the friendship with `f`: everywhere, with a withdrawal, where it
    *  is portable; here alone otherwise. A request is canceled plainly. */
   remove(f: Friend, block = false): Promise<void> {
     return this.run(async () => {
-      const friend = f.fingerprint ?? this.b.friendships.find((k) => k.logins[this.d.server] === f.login)?.friend;
-      const portable = f.state !== 'pending_out' && f.state !== 'pending_in' && this.with(friend).length > 0;
-      if (!portable || !friend) {
+      const server = this.d.server;
+      const keys = this.keysOf(f);
+      const held = [...keys].filter((x) => this.with(x).length);
+      const dropOffers = () => this.update((b) => void (b.offers = b.offers.filter((o) => !keys.has(o.to))));
+      if (f.state === 'pending_out' || f.state === 'pending_in' || !held.length) {
         await (block ? this.d.conn.block({ login: f.login }) : this.d.conn.friendRemove(f.login));
-        if (friend) await this.update((b) => void (b.offers = b.offers.filter((o) => o.to !== friend)));
-        return;
+        return dropOffers();
       }
       const now = this.now();
-      const pair = await this.pairWith(friend);
-      const withdraw = b64(await this.signWithdrawal(pair, this.self, now, now));
+      const pairs = await Promise.all(held.map((x) => this.pairWith(x)));
+      const signed = await Promise.all(pairs.map(async (pair) => b64(await this.signWithdrawal(pair, this.self, now, now))));
+      // The shown key's pair ends the edge here; the others' go with it.
+      const first = Math.max(0, held.indexOf(f.fingerprint ?? ''));
+      const owed = pairs.map(() => [] as string[]);
       try {
+        const withdraw = signed[first]!;
         await (block ? this.d.conn.block({ login: f.login, withdraw }) : this.d.conn.friendRemove({ login: f.login, withdraw }));
       } catch (e) {
         // Removed here all the same; the other servers are owed it.
         if (code(e) !== 'stale') throw e;
         this.stale();
       }
-      await this.cut({ pair, party: this.self, before: now, owed: [] }, true);
-      await this.update((b) => void (b.offers = b.offers.filter((o) => o.to !== friend)));
+      const rest = signed.filter((_, i) => i !== first);
+      if (rest.length) {
+        const ok = await this.paced(() => this.d.conn.friendshipsPresent({ withdrawals: rest }));
+        ok.withdrawals.forEach((r, i) => {
+          if (r.result === 'stale') this.stale();
+          if (r.result !== 'ok' && r.result !== 'bad_signature') owed[i < first ? i : i + 1]!.push(server);
+        });
+      }
+      for (const [i, pair] of pairs.entries()) await this.cut({ pair, party: this.self, before: now, owed: owed[i]! }, true);
+      await dropOffers();
     });
   }
 
@@ -785,7 +869,7 @@ export class PortableFriends {
       }
       const now = this.now();
       const w = await this.signWithdrawal(k.pair, this.self, now, now);
-      const ok = await this.d.conn.friendshipsPresent({ withdrawals: [b64(w)] });
+      const ok = await this.paced(() => this.d.conn.friendshipsPresent({ withdrawals: [b64(w)] }));
       if (ok.withdrawals[0]?.result === 'stale') this.stale();
       await this.cut({ pair: k.pair, party: this.self, before: now, owed: ok.withdrawals[0]?.result === 'ok' ? [] : [this.d.server] }, true);
     });
@@ -808,8 +892,10 @@ export class PortableFriends {
 
   /** Leave `friend` out on this server, or bring them again. Leaving one
    *  out drops what this account presented for them here, where it
-   *  presented anything, and is not brought here again. */
-  leaveOut(friend: string, out: boolean): Promise<void> {
+   *  presented anything, and is not brought here again; with `login`,
+   *  the friend's account here, it ends an active friendship here
+   *  alone, the other servers' standing. */
+  leaveOut(friend: string, out: boolean, login?: string): Promise<void> {
     return this.run(async () => {
       const server = this.d.server;
       const presented = this.with(friend).some((k) => k.presented.includes(server));
@@ -822,7 +908,8 @@ export class PortableFriends {
           }
         }
       });
-      if (out && presented) await this.d.conn.friendRemove({ fingerprint: friend });
+      if (out && login) await this.d.conn.friendRemove(login);
+      else if (out && presented) await this.d.conn.friendRemove({ fingerprint: friend });
       if (!out) await this.present();
     });
   }

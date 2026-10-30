@@ -255,7 +255,9 @@ export class FriendsView {
    *  offer and the session may sign one. */
   private async accept(f: Friend): Promise<void> {
     const portable = this.hooks.portable();
-    const old = portable?.rotatedFrom(f.fingerprint);
+    // Asked after any rotation the entry shows is followed, so a fetch
+    // still in flight cannot skip the question.
+    const old = portable && f.offer ? await portable.rotation(f) : undefined;
     if (old) {
       const yes = await ask({
         title: `Accept ${friendName(f)}'s new key?`,
@@ -268,7 +270,8 @@ export class FriendsView {
       });
       if (!yes) return;
     }
-    await this.act((conn) => (portable && f.offer ? portable.accept(f) : conn.friendRespond(f.login, true)));
+    const move = old ? { from: old, to: f.fingerprint! } : undefined;
+    await this.act((conn) => (portable && f.offer ? portable.accept(f, move) : conn.friendRespond(f.login, true)));
   }
 
   /** Turned on, the user picks who comes along before anything is
@@ -303,7 +306,7 @@ export class FriendsView {
     return (logins && Object.values(logins)[0]) ?? `${fp.slice(0, 8)}…`;
   }
 
-  private async leaveOut(friend: string, out: boolean): Promise<void> {
+  private async leaveOut(friend: string, out: boolean, login?: string): Promise<void> {
     const portable = this.hooks.portable();
     if (!portable) return;
     if (out) {
@@ -315,7 +318,7 @@ export class FriendsView {
       });
       if (!yes) return;
     }
-    await this.act(() => portable.leaveOut(friend, out));
+    await this.act(() => portable.leaveOut(friend, out, login));
   }
 
   private async confirm(k: KeptFriendship, keep: boolean): Promise<void> {
@@ -497,6 +500,7 @@ export class FriendsView {
             f.offer ? this.button('Make portable', `upgrade:${f.login}`, () => void this.accept(f)) : null,
             this.button('Message', `msg:${f.login}`, () => this.hooks.message(f.login, friendName(f))),
             this.button('Rename', `alias:${f.login}`, () => void this.rename(f)),
+            portable ? this.button('Leave out here', `here:${f.login}`, () => void this.leaveOut(f.fingerprint!, true, f.login)) : null,
             this.button('Remove', `remove:${f.login}`, () => void this.remove(f, 'remove'), true),
           );
         }),

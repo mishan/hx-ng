@@ -2128,9 +2128,13 @@ export class App {
         if (!arg) return this.say(`Usage: /${word} <nick, account or fingerprint>`);
         const on = word === 'block';
         // A portable friend is blocked by login with a withdrawal, which
-        // ends the friendship on their other servers too.
-        const friend = on ? this.friends.book.get(arg) : undefined;
-        if (friend && this.portable?.with(friend.fingerprint).length) {
+        // ends the friendship on their other servers too, whether named
+        // by login or by the nick their session shows.
+        const shown = this.findUser(arg)?.identity?.fingerprint;
+        const friend = !on
+          ? undefined
+          : (this.friends.book.get(arg) ?? (shown ? this.friends.book.groups().friends.find((f) => f.fingerprint === shown) : undefined));
+        if (friend && this.portable?.holds(friend)) {
           await this.portable.remove(friend, true);
           return this.say(`Blocked ${arg}, and withdrew your friendship everywhere it travels.`);
         }

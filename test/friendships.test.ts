@@ -217,7 +217,10 @@ describe('portable friends', () => {
     expect(bob.keeper.rotatedFrom(SUCC)).toBe(ALICE);
     expect(bob.wire.sent('friend_respond')).toHaveLength(1);
 
-    await bob.keeper.accept(entry);
+    await expect(bob.keeper.accept(entry)).rejects.toThrow(/confirm/);
+    await expect(bob.keeper.accept(entry, { from: BOB, to: SUCC })).rejects.toThrow(/confirm/);
+    expect(await bob.keeper.rotation(entry)).toBe(ALICE);
+    await bob.keeper.accept(entry, { from: ALICE, to: SUCC });
     const made: string = bob.wire.sent('friend_respond')[1].friendship;
     expect(bob.keeper.with(SUCC).map((k) => [bob.keeper.adopted(k), k.bringTo])).toEqual([[true, ['ws://a']]]);
 
@@ -236,7 +239,7 @@ describe('portable friends', () => {
     bob.wire.on('friendships_fetch', rotations([b64hex(V.rotate.signed_hex)])).on('friendships_present', presentAll());
     const entry: Friend = { login: 'alice', state: 'accepted', fingerprint: SUCC, offer: await successorOffer() };
     await bob.keeper.onFriend(entry);
-    await bob.keeper.accept(entry);
+    await bob.keeper.accept(entry, { from: ALICE, to: SUCC });
     const hash = bytesToBase64url((await checkFriendship(base64urlToBytes(bob.wire.sent('friend_respond')[1].friendship), clock)).hash);
     const presented = bob.wire.sent('friendships_present').length;
     const newer = await party(await secondDevice('bob'), 'ws://a', bob.store, bob.wire);
@@ -398,6 +401,96 @@ describe('portable friends', () => {
     expect(wire.sent('friendships_present')).toEqual([]);
     await newer.keeper.confirm(hash, true);
     expect(wire.sent('friendships_present')).toHaveLength(1);
+  });
+
+  it('waits out a server pacing withdrawals, signing each try afresh, before the roster is read', async () => {
+    const { alice } = await befriend('ws://a');
+    const b = await party('alice', 'ws://b', alice.store, new Wire({ find_user: () => ({}), friendships_present: presentAll() }));
+    await b.keeper.setBring(true);
+    alice.wire.on('friend_remove', () => ({}));
+    await alice.keeper.remove({ login: 'bob', state: 'accepted', fingerprint: BOB });
+    let tries = 0;
+    const again = await party('alice', 'ws://b', alice.store, new Wire({
+      friendships_present: (p: any) => {
+        if (++tries === 1) throw new WireFailure({ code: 'rate_limited', text: 'slow', retry_after: 0 });
+        return presentAll()(p);
+      },
+    }));
+    await again.keeper.presentWithdrawals();
+    expect(again.wire.sent('friendships_present')).toHaveLength(2);
+    expect(again.keeper.book.cutoffs[0]!.owed).toEqual([]);
+  });
+
+  it('keeps owing a cutoff another tab moved on while the older one was being taken', async () => {
+    const { alice } = await befriend('ws://a');
+    const b = await party('alice', 'ws://b', alice.store, new Wire({ find_user: () => ({}), friendships_present: presentAll() }));
+    await b.keeper.setBring(true);
+    alice.wire.on('friend_remove', () => ({}));
+    await alice.keeper.remove({ login: 'bob', state: 'accepted', fingerprint: BOB });
+    clock += 60;
+    const again = await party('alice', 'ws://b', alice.store, new Wire({
+      friendships_present: async (p: any) => {
+        await alice.store.update(ALICE, (book) => void (book.cutoffs[0]!.before = clock));
+        return presentAll()(p);
+      },
+    }));
+    await again.keeper.presentWithdrawals();
+    expect(again.keeper.book.cutoffs[0]!.owed).toEqual(['ws://b']);
+  });
+
+  it("notes from a friend event a held friendship's login, and that it is active and presented on this server", async () => {
+    const { alice, hash } = await befriend('ws://a');
+    const b = await party('alice', 'ws://b', alice.store, new Wire({ friendships_present: presentAll() }));
+    await b.keeper.onFriend({ login: 'robert', state: 'accepted', fingerprint: BOB, friendships: [hash] });
+    const [k] = b.keeper.with(BOB);
+    expect([k!.logins['ws://b'], k!.seen, k!.presented]).toEqual(['robert', ['ws://a', 'ws://b'], ['ws://a', 'ws://b']]);
+  });
+
+  it.each([
+    { name: 'waits it out and presents', fails: 1, presented: true },
+    { name: 'says so where it paces on past that, presenting nothing', fails: 99, presented: false },
+  ])('bringing friends to a server that paces the lookups $name', async ({ fails, presented }) => {
+    const { alice } = await befriend('ws://a');
+    let tries = 0;
+    const b = await party('alice', 'ws://b', alice.store, new Wire({
+      find_user: () => {
+        if (++tries <= fails) throw new WireFailure({ code: 'rate_limited', text: 'slow', retry_after: 0 });
+        return {};
+      },
+      friendships_present: presentAll(),
+    }));
+    const bringing = b.keeper.setBring(true);
+    if (presented) await bringing;
+    else await expect(bringing).rejects.toThrow();
+    expect(b.wire.sent('friendships_present')).toHaveLength(presented ? 1 : 0);
+  });
+
+  it('keeps owing the server that refused a "Not mine" withdrawal as stale', async () => {
+    const { alice, hash } = await befriend('ws://a');
+    const newer = await party(await secondDevice(), 'ws://a', alice.store, new Wire({ friendships_present: presentAll('stale') }));
+    await newer.keeper.confirm(hash, false);
+    expect(newer.keeper.book.cutoffs.map((c) => c.owed)).toEqual([['ws://a']]);
+  });
+
+  it('removes a friend who rotated by withdrawing the pair of each key held', async () => {
+    const { bob } = await befriend('ws://a');
+    bob.wire.on('friendships_fetch', rotations([b64hex(V.rotate.signed_hex)])).on('friend_remove', () => ({}));
+    const entry: Friend = { login: 'alice', state: 'accepted', fingerprint: SUCC };
+    await bob.keeper.onFriend(entry);
+    await bob.keeper.remove(entry);
+    const pair = [fingerprintFromString(BOB)!, fingerprintFromString(ALICE)!] as const;
+    const [sent] = bob.wire.sent('friend_remove');
+    expect(sent.login).toBe('alice');
+    await checkFriendWithdrawal(base64urlToBytes(sent.withdraw), clock, pair);
+    expect(bob.keeper.with(ALICE)).toEqual([]);
+  });
+
+  it('leaves an active friend out here alone by removing their edge here plainly', async () => {
+    const { alice } = await befriend('ws://a');
+    alice.wire.on('friend_remove', () => ({}));
+    await alice.keeper.leaveOut(BOB, true, 'bob');
+    expect(alice.wire.sent('friend_remove')).toEqual([{ login: 'bob' }]);
+    expect([alice.keeper.choice.leftOut, alice.keeper.with(BOB).length]).toEqual([[BOB], 1]);
   });
 
   it('accepts plainly where the offer is not for this identity, and keeps nothing', async () => {

@@ -140,7 +140,7 @@ import { closedForReporter, ModerationView, problem as moderationProblem } from 
 import { AccountsView } from './accounts';
 import { FriendsView } from './friends';
 import { OwedReceipts } from '../friends';
-import { PortableFriends } from '../friendships';
+import { KeeperSlot, PortableFriends } from '../friendships';
 import { mayAdminister } from '../accounts';
 import { NewsView } from './news';
 import { appendLine, isAtBottom, keepingPlace, lineOf, renderTranscript, scrollToEnd, signedName, spoken, type TranscriptOptions } from './transcript';
@@ -491,9 +491,12 @@ export class App {
     onCount: () => this.renderRail(),
   });
   private friendsOpen = false;
-  /** This identity's portable friendships, on a session granted them. */
-  private portable: PortableFriends | null = null;
-  private portableOf: Session | null = null;
+  /** This identity's portable friendships, on a session granted them,
+   *  held for the connection's latest login. */
+  private portables = new KeeperSlot<PortableFriends, Session>();
+  private get portable(): PortableFriends | null {
+    return this.conn ? this.portables.get(this.conn) : null;
+  }
   /** The friend this session last told it is typing to, if any, and
    *  the timer saying it again while it is. */
   private typingTo: string | null = null;
@@ -749,7 +752,7 @@ export class App {
         // Nor is the keeper its: a login after a failed resume may be granted
         // no friendships, or prove another device, and `beforeFriends`
         // opens the one it was granted.
-        if (conn === this.conn) this.portable = null;
+        if (conn === this.conn) this.portables.reset();
         // Every login, not just the first: a resume that fails after a
         // server restart logs in again on this connection, and the
         // operator may have changed the banner, or taken it down.
@@ -827,17 +830,17 @@ export class App {
       onFriends: ({ friends }) => {
         if (conn !== this.conn) return;
         this.friends.onFriends(friends);
-        void this.portable?.onRoster(friends).then(
-          () => this.friends.portableChanged(),
-          (e: unknown) => this.say(`Portable friends could not be brought up to date: ${this.problem(e)}`),
+        const keeper = this.portable;
+        void keeper?.onRoster(friends).then(
+          () => this.portableDone(keeper),
+          (e: unknown) => this.portableDone(keeper, e),
         );
       },
       // Withdrawals go before the roster is read, so the keeper is opened
       // here, once the login reply has said whether it was granted.
       beforeFriends: async () => {
         if (conn !== this.conn) return;
-        await this.openPortable(conn, way.url);
-        await this.portable?.presentWithdrawals();
+        await (await this.openPortable(conn, way.url))?.presentWithdrawals();
       },
       onMissedHistory: (ok) => {
         void this.historyLines(ok).then((lines) => {
@@ -856,7 +859,7 @@ export class App {
         // nothing the replacement does.
         if (conn === this.conn) {
           this.dropOwed();
-          this.portable = null;
+          this.portables.reset();
         }
         this.media?.teardown();
         this.banner.clear();
@@ -1278,9 +1281,10 @@ export class App {
     });
     conn.on('friend', (d) => {
       this.friends.onFriend(d);
-      void this.portable?.onFriend(d.friend).then(
-        () => this.friends.portableChanged(),
-        (e: unknown) => this.say(`Portable friends could not be brought up to date: ${this.problem(e)}`),
+      const keeper = this.portable;
+      void keeper?.onFriend(d.friend).then(
+        () => this.portableDone(keeper),
+        (e: unknown) => this.portableDone(keeper, e),
       );
     });
     conn.on('friend_request', (d) => {
@@ -1918,27 +1922,33 @@ export class App {
   }
 
   /** The keeper for a session granted `friendships`, signing with the
-   *  device the session proved. Kept across the handshakes of one
-   *  connection. */
-  private async openPortable(conn: Session, server: string): Promise<void> {
-    if (!(conn instanceof Connection) || !conn.hasCap(CAP_FRIENDSHIPS) || !this.signer) {
-      this.portable = null;
-      return;
-    }
-    if (this.portable && this.portableOf === conn) return;
+   *  device the session proved. Kept across the handshakes of one login
+   *  on one connection. */
+  private async openPortable(conn: Session, server: string): Promise<PortableFriends | null> {
+    const signer = this.signer;
+    if (!(conn instanceof Connection) || !conn.hasCap(CAP_FRIENDSHIPS) || !signer) return null;
     try {
-      this.portable = await PortableFriends.open({
-        conn,
-        server,
-        signer: { key: this.signer.key, cert: this.signer.cert },
-        store: friendshipBooks,
-        say: (text) => this.say(text),
-      });
-      this.portableOf = conn;
+      return await this.portables.open(conn, () =>
+        PortableFriends.open({
+          conn,
+          server,
+          signer: { key: signer.key, cert: signer.cert },
+          store: friendshipBooks,
+          say: (text) => this.say(text),
+        }),
+      );
     } catch (e) {
-      this.portable = null;
       this.say(`Portable friends are not available in this browser: ${this.problem(e)}`);
+      return null;
     }
+  }
+
+  /** A keeper's act finished: drawn, or its failure told, only while it
+   *  is still the one this session holds. */
+  private portableDone(keeper: PortableFriends, e?: unknown): void {
+    if (keeper !== this.portable) return;
+    if (e === undefined) this.friends.portableChanged();
+    else this.say(`Portable friends could not be brought up to date: ${this.problem(e)}`);
   }
 
   /** The device a session proves, remembered with the tab for a resume,

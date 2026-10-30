@@ -22,7 +22,7 @@ import {
   type FriendshipsPresentOk,
 } from '@hotline-ng/client';
 
-import { MemoryBookStore, OFFER_LIFETIME_SECONDS, PortableFriends, type KeeperConn } from '../src/friendships';
+import { KeeperSlot, MemoryBookStore, OFFER_LIFETIME_SECONDS, PortableFriends, type KeeperConn } from '../src/friendships';
 import vectors from '../packages/hotline-ng/test/identity-vectors.json';
 
 const V: Record<string, any> = vectors;
@@ -410,5 +410,33 @@ describe('portable friends', () => {
     await other.keeper.accept({ login: 'bob', state: 'pending_in', offer } as Friend);
     expect(other.wire.sent('friend_respond')).toEqual([{ login: 'bob', accept: true }]);
     expect(other.keeper.book.friendships).toEqual([]);
+  });
+});
+
+describe('the keeper slot', () => {
+  const deferred = () => {
+    let resolve!: (k: string) => void;
+    return { promise: new Promise<string>((r) => (resolve = r)), resolve };
+  };
+
+  it.each([
+    { name: 'a new login', overtake: (slot: KeeperSlot<string, string>) => void slot.reset(), held: null },
+    { name: 'an open for another connection', overtake: (slot: KeeperSlot<string, string>) => void slot.open('b', async () => 'kb'), held: 'kb' },
+  ])('publishes nothing from an open that $name overtook while it was in flight', async ({ overtake, held }) => {
+    const slot = new KeeperSlot<string, string>();
+    const late = deferred();
+    const opening = slot.open('a', () => late.promise);
+    overtake(slot);
+    await Promise.resolve();
+    late.resolve('ka');
+    expect(await opening).toBeNull();
+    expect([slot.get('a'), slot.get('b')]).toEqual([null, held]);
+  });
+
+  it('keeps one keeper across the handshakes of one login', async () => {
+    const slot = new KeeperSlot<string, string>();
+    let opened = 0;
+    const make = async () => `k${++opened}`;
+    expect([await slot.open('a', make), await slot.open('a', make), opened]).toEqual(['k1', 'k1', 1]);
   });
 });

@@ -827,3 +827,36 @@ export class PortableFriends {
     });
   }
 }
+
+/** The keeper a connection holds for its latest login. An open that a
+ *  later login, or an open for another connection, overtook while it
+ *  was in flight publishes nothing, so a keeper never outlives the grant
+ *  and the signer it was opened with. */
+export class KeeperSlot<K, O> {
+  private generation = 0;
+  private owner: O | null = null;
+  private keeper: K | null = null;
+
+  /** The keeper `owner` holds now, if any. */
+  get(owner: O): K | null {
+    return owner === this.owner ? this.keeper : null;
+  }
+
+  /** A new login: whatever was held, or is being opened, is not its. */
+  reset(): void {
+    this.generation++;
+    this.owner = this.keeper = null;
+  }
+
+  /** The keeper `owner` holds, or the one `make` opens for it, published
+   *  only if nothing overtook it. */
+  async open(owner: O, make: () => Promise<K>): Promise<K | null> {
+    const held = this.get(owner);
+    if (held) return held;
+    const generation = ++this.generation;
+    const keeper = await make();
+    if (generation !== this.generation) return null;
+    [this.owner, this.keeper] = [owner, keeper];
+    return keeper;
+  }
+}

@@ -233,7 +233,7 @@ export class FriendsView {
 
   private async remove(f: Friend, how: 'remove' | 'withdraw' | 'decline'): Promise<void> {
     const portable = this.hooks.portable();
-    const everywhere = how === 'remove' && !!portable?.with(f.fingerprint).length;
+    const everywhere = how === 'remove' && !!portable?.holds(f);
     if (how === 'remove') {
       const yes = await ask({
         title: `Remove ${friendName(f)}?`,

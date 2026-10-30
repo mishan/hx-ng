@@ -746,6 +746,10 @@ export class App {
         // A new session: receipts owed under the last are not its to send.
         this.pendingReads.clear();
         this.dropOwed();
+        // Nor is the keeper its: a login after a failed resume may be granted
+        // no friendships, or prove another device, and `beforeFriends`
+        // opens the one it was granted.
+        if (conn === this.conn) this.portable = null;
         // Every login, not just the first: a resume that fails after a
         // server restart logs in again on this connection, and the
         // operator may have changed the banner, or taken it down.

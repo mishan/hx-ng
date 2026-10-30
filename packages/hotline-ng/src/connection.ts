@@ -344,7 +344,8 @@ export function hasSavedSession(url: string, store?: SessionStore, login?: strin
 }
 
 function savedFor(s: Saved | null, url: string, login?: string): s is Saved {
-  return !!s && s.url === url && (!login || s.login === login);
+  // Logins are case-insensitive on the server, so `Alice` resumes `alice`.
+  return !!s && s.url === url && (!login || s.login?.toLowerCase() === login.toLowerCase());
 }
 
 /** How many tries in a row may go astray before an upload gives up: with

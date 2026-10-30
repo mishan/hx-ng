@@ -340,6 +340,7 @@ describe('resume', () => {
     const store = memoryStore();
     await new Connection({ ...CREDS, sessionStore: store }).start();
     expect(hasSavedSession(CREDS.url, store, 'alice')).toBe(true);
+    expect(hasSavedSession(CREDS.url, store, 'Alice')).toBe(true);
     expect(hasSavedSession(CREDS.url, store)).toBe(true);
     expect(hasSavedSession(CREDS.url, store, 'bob')).toBe(false);
 

@@ -109,6 +109,7 @@ export {
   type ConnState,
   type Credentials,
   type FileUploadOptions,
+  type SessionStore,
   type SocketLike,
   type TraceEntry,
 } from './connection.js';

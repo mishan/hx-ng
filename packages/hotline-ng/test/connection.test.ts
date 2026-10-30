@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import { Connection, type ConnectionHooks, type Credentials } from '../src/connection';
+import { Connection, hasSavedSession, type ConnectionHooks, type Credentials } from '../src/connection';
 import { AuthError, SERVER_CHALLENGE_REFUSED } from '../src/identity';
 import type { HistoryLine, InboxOk, LoginOk, Room, SelfUser, User } from '../src/protocol';
 import { FakeServer as FakeHotline } from '../src/testing';
@@ -55,6 +55,16 @@ const historyLine = (id: number): HistoryLine => ({
   text: `line ${id}`,
   style: 'normal',
 });
+
+/** A store of the caller's, as an installed app's localStorage. */
+function memoryStore() {
+  const kept = new Map<string, string>();
+  return {
+    getItem: (k: string) => kept.get(k) ?? null,
+    setItem: (k: string, v: string) => void kept.set(k, v),
+    removeItem: (k: string) => void kept.delete(k),
+  };
+}
 
 let server: FakeServer;
 
@@ -261,6 +271,82 @@ describe('resume', () => {
     await conn.logout();
     await new Promise((resolve) => setTimeout(resolve, 1200));
     expect(server.sent('login')).toHaveLength(3);
+  });
+
+  it('ends a resume-only connection whose resume is refused on a reconnect', async () => {
+    await connect();
+    server.on('resume', () => ({ ok: { replay: 0, self: user(1, 'Alice') } }));
+    server.on('sync', () => ({ ok: { server: { name: 'Test', subject: 'hi' }, users: [], seq: 0 } }));
+    let ended: string | null = null;
+    const reloaded = new Connection(CREDS, { onEnded: (r) => (ended = r) });
+    await reloaded.start({ resumeOnly: true });
+
+    server.on('resume', () => ({ error: { code: 'session_expired', text: 'gone' } }));
+    reloaded.drop();
+    await new Promise((resolve) => setTimeout(resolve, 700));
+
+    // No password to log in with, so nothing is left to retry.
+    expect(ended).toBe('Your session has ended. Log in again.');
+    expect(reloaded.state).toBe('offline');
+    expect(server.sent('login')).toHaveLength(1);
+    expect(hasSavedSession(CREDS.url)).toBe(false);
+  });
+
+  it('keeps the record in a store the caller names, and only there', async () => {
+    const store = memoryStore();
+    await new Connection({ ...CREDS, sessionStore: store }).start();
+    expect(hasSavedSession(CREDS.url, store)).toBe(true);
+    expect(hasSavedSession(CREDS.url)).toBe(false);
+
+    server.on('resume', () => ({ ok: { replay: 0, self: user(1, 'Alice') } }));
+    server.on('sync', () => ({ ok: { server: { name: 'Test', subject: 'hi' }, users: [], seq: 0 } }));
+    const again = new Connection({ ...CREDS, sessionStore: store });
+    await again.start({ resumeOnly: true });
+    expect(server.sent('resume')[0]?.params).toMatchObject({ session: 's_1', token: 'tok' });
+
+    await again.logout();
+    expect(hasSavedSession(CREDS.url, store)).toBe(false);
+  });
+
+  it('leaves the record of a window that took its session over', async () => {
+    const store = memoryStore();
+    let ended: string | null = null;
+    await new Connection({ ...CREDS, sessionStore: store }, { onEnded: (r) => (ended = r) }).start();
+    const replaced = server.socket!;
+    server.on('resume', () => ({ ok: { replay: 0, self: user(1, 'Alice') } }));
+    server.on('sync', () => ({ ok: { server: { name: 'Test', subject: 'hi' }, users: [], seq: 0 } }));
+    await new Connection({ ...CREDS, sessionStore: store }).start({ resumeOnly: true });
+
+    replaced.close('replaced');
+    await settle();
+    expect(ended).toBe('This session was taken over by another connection.');
+    expect(hasSavedSession(CREDS.url, store)).toBe(true);
+  });
+
+  it('clears its record at logout after a later write to it failed', async () => {
+    const store = memoryStore();
+    const conn = new Connection({ ...CREDS, sessionStore: store });
+    await conn.start();
+    store.setItem = () => {
+      throw new Error('QuotaExceededError');
+    };
+    server.event('chat', { from: { uid: 2, nick: 'Bob' }, text: 'hi', style: 'normal' });
+    await settle();
+    await conn.logout();
+    expect(hasSavedSession(CREDS.url, store)).toBe(false);
+  });
+
+  it('resumes only the account asked for, where one is', async () => {
+    const store = memoryStore();
+    await new Connection({ ...CREDS, sessionStore: store }).start();
+    expect(hasSavedSession(CREDS.url, store, 'alice')).toBe(true);
+    expect(hasSavedSession(CREDS.url, store, 'Alice')).toBe(true);
+    expect(hasSavedSession(CREDS.url, store)).toBe(true);
+    expect(hasSavedSession(CREDS.url, store, 'bob')).toBe(false);
+
+    await new Connection({ ...CREDS, login: 'bob', sessionStore: store }).start();
+    expect(server.sent('resume')).toHaveLength(0);
+    expect(server.sent('login').map((f) => f.params.login)).toEqual(['alice', 'bob']);
   });
 
   it('goes on trying nothing once start is refused', async () => {

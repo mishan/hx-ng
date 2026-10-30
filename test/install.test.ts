@@ -1,6 +1,6 @@
 import { beforeAll, describe, expect, it, vi } from 'vitest';
 
-import { canInstall, install, listenForInstall, watchInstall } from '../src/install';
+import { canInstall, install, listenForInstall, sessionStore, watchInstall } from '../src/install';
 
 // The browser is an EventTarget, and Chromium's offer an Event with two
 // members added. That is all `src/install.ts` sees of either.
@@ -52,5 +52,42 @@ describe('install', () => {
     offer('accepted');
     browser.dispatchEvent(new Event('appinstalled'));
     expect(canInstall()).toBe(false);
+  });
+});
+
+describe('sessionStore', () => {
+  const host = (standalone: { media?: boolean; ios?: boolean }) => {
+    const local = { kind: 'local' } as unknown as Storage;
+    const session = { kind: 'session' } as unknown as Storage;
+    return {
+      local,
+      session,
+      host: {
+        matchMedia: (q: string) => ({ matches: q === '(display-mode: standalone)' && standalone.media === true }),
+        navigator: { standalone: standalone.ios },
+        localStorage: local,
+        sessionStorage: session,
+      } as unknown as Parameters<typeof sessionStore>[0],
+    };
+  };
+
+  it.each([
+    { name: 'a tab', standalone: {}, kept: 'session' },
+    { name: 'an installed app', standalone: { media: true }, kept: 'local' },
+    { name: 'an iOS home-screen app', standalone: { ios: true }, kept: 'local' },
+  ] as const)('keeps the resume record of $name in $kept storage', ({ standalone, kept }) => {
+    const h = host(standalone);
+    expect(sessionStore(h.host)).toBe(kept === 'local' ? h.local : h.session);
+  });
+
+  it('leaves the choice to the library where storage cannot be reached', () => {
+    const blocked = {
+      matchMedia: () => ({ matches: false }),
+      navigator: {},
+      get sessionStorage(): Storage {
+        throw new Error('SecurityError');
+      },
+    } as unknown as Parameters<typeof sessionStore>[0];
+    expect(sessionStore(blocked)).toBeUndefined();
   });
 });

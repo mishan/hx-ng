@@ -11,9 +11,21 @@ says how.
   `stale: true`: only the roster is new, so a caller that resets more
   on a snapshot can skip it.
 - `outranked` reads "That account or role may do…".
+- A connection started `resumeOnly` whose resume is refused on a
+  reconnect ends, with `onEnded`, rather than staying `reconnecting`.
 
 ### Added
 
+- `Credentials.sessionStore` keeps the resume record in a
+  `SessionStore` of the caller's (such as `localStorage`, for an
+  installed app) in place of `sessionStorage`, and `hasSavedSession`
+  takes the same store as a second argument. A connection clears the
+  record only while it holds what that connection last wrote or read,
+  so windows sharing a store do not clear each other's.
+- `hasSavedSession(url, store, login)` answers only for a session on
+  that account. The record keeps the account it is on, and `start`
+  resumes a saved session only when `Credentials.login` is empty or
+  names that account.
 - Instant messaging (hxd-ng's `docs/hotline-ng.md` §7.5):
   `Credentials.messaging` says `messaging` at login, and
   `Connection.messaging` is the login reply's `MessagingConfig`, and

@@ -359,8 +359,9 @@ export class App {
   /** The rooms a session that could not resume was in, joined again
    *  once the login after it has listed them (chat-rooms.md §2.3). */
   private rejoin: number[] = [];
-  /** Rooms left while `loadRooms` rejoins, which it then passes over. */
-  private leftWhileRejoining = new Set<number>();
+  /** Rooms left by choice, which `loadRooms` does not rejoin until the
+   *  user joins them again. */
+  private leftByChoice = new Set<number>();
   /** The active room's name, topic and the way in or out. */
   private roomBar = h('div', { class: 'room-bar', hidden: true });
   /** Bumped by anything that abandons an attachment. An upload that was
@@ -2622,10 +2623,9 @@ export class App {
     this.store.setRooms(list);
     const again = new Set([...this.rejoin, ...conn.roomHistoryIds.keys()]);
     this.rejoin = [];
-    this.leftWhileRejoining.clear();
     this.renderRail();
     for (const id of again) {
-      if (this.leftWhileRejoining.has(id)) continue;
+      if (this.leftByChoice.has(id)) continue;
       if (this.store.conversation(publicId(id))) await this.joinRoom(id).catch((e: unknown) => this.say(this.problem(e)));
     }
   }
@@ -2633,6 +2633,7 @@ export class App {
   private async joinRoom(room: number): Promise<void> {
     const conn = this.conn;
     if (!(conn instanceof Connection)) return;
+    this.leftByChoice.delete(room);
     const ok = await conn.roomJoin(room);
     const c = this.store.conversation(publicId(room));
     if (conn !== this.conn || !c?.room) return;
@@ -2648,14 +2649,18 @@ export class App {
   private async partRoom(room: number): Promise<void> {
     const conn = this.conn;
     if (!(conn instanceof Connection)) return;
-    await conn.roomPart(room);
+    // Before the request, so a listing that lands meanwhile does not rejoin it.
+    this.leftByChoice.add(room);
+    try {
+      await conn.roomPart(room);
+    } catch (e) {
+      this.leftByChoice.delete(room);
+      throw e;
+    }
     const c = this.store.conversation(publicId(room));
     if (conn !== this.conn || !c?.room) return;
     c.joined = false;
     c.members = undefined;
-    // Left by choice: a listing still to come rejoins it no more.
-    this.rejoin = this.rejoin.filter((id) => id !== room);
-    this.leftWhileRejoining.add(room);
     this.dropReply(c);
     this.renderRoom(c);
   }

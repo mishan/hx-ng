@@ -4,6 +4,7 @@ import type { User } from '@hotline-ng/client';
 
 import {
   addressOf,
+  Claims,
   continuesRun,
   LOBBY,
   Store,
@@ -500,5 +501,22 @@ describe('collapsing a run of lines', () => {
     expect(continuesRun(notice, chatLine)).toBe(false);
     expect(continuesRun(chatLine, notice)).toBe(false);
     expect(continuesRun(undefined, chatLine)).toBe(false);
+  });
+});
+
+describe('claims', () => {
+  it('keeps what its owner finished, and gives back what a replaced owner left under way', () => {
+    const [old, next] = [{}, {}];
+    const c = new Claims<object>();
+    c.take('shown', old);
+    c.settle('shown', old);
+    c.take('dropped', old);
+    expect([c.has('shown', old), c.has('dropped', old)]).toEqual([true, true]);
+    // The reader was replaced while `dropped` was still being read.
+    expect([c.has('shown', next), c.has('dropped', next)]).toEqual([true, false]);
+    c.take('dropped', next);
+    c.settle('dropped', old);
+    expect(c.has('dropped', next)).toBe(true);
+    expect(c.has('dropped', {})).toBe(false);
   });
 });

@@ -71,6 +71,7 @@ import { durationWords, DURATIONS, lineReport, parseDuration, personRef } from '
 import { notifyText } from '../news';
 import {
   messageAddress,
+  Claims,
   LOBBY,
   type Conversation,
   type ConvId,
@@ -511,8 +512,10 @@ export class App {
   private owedReads = new OwedReceipts();
   private owedRetry: number | null = null;
   /** Each instant message shown, by sender and guid: one handed over
-   *  again is acknowledged again and not shown twice. */
-  private imSeen = new Set<string>();
+   *  again is acknowledged again and not shown twice. Held by the reader
+   *  reading it until it is shown, so one a fresh login's new reader
+   *  dropped is shown when it comes again. */
+  private imSeen = new Claims<MessageReader>();
   /** The account typed at the connect form, or `null` for a guest. */
   private account: string | null = null;
   /** Notifications on this device, for this server and account. Shown
@@ -2488,14 +2491,14 @@ export class App {
     const login = d.from.login;
     const ack = () => void conn?.receipt(login, d.guid).catch(() => {});
     const key = `${login.toLowerCase()} ${d.guid}`;
-    if (this.imSeen.has(key) || this.store.hasMail(d)) {
+    const messages = this.messages;
+    if (this.imSeen.has(key, messages) || this.store.hasMail(d)) {
       this.store.noteCursor(d);
       return ack();
     }
-    this.imSeen.add(key);
+    this.imSeen.take(key, messages);
     if (d.approval) this.friends.noteApproval(login);
     this.checkClock(d.at, d.queued);
-    const messages = this.messages;
     const as: Events['msg'] = {
       from: { uid: 0, nick: d.from.nick, login, ...(d.from.fingerprint !== undefined ? { fingerprint: d.from.fingerprint } : {}) },
       text: d.text,
@@ -2508,6 +2511,7 @@ export class App {
     this.inOrder(async () => {
       const { signature, duplicate } = await read;
       if (messages !== this.messages || conn !== this.conn) return;
+      this.imSeen.settle(key, messages);
       if (duplicate) return ack();
       const friend = this.friends.book.get(login);
       const conv = this.store.openPm({ login, nick: friend?.alias ?? d.from.nick });

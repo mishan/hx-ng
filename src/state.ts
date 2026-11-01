@@ -199,6 +199,32 @@ export class Cursor {
   }
 }
 
+/** Keys taken while the work behind each is under way, held by whatever
+ *  began it, and kept once that is done. One left under way by an owner
+ *  since replaced counts for nothing, so a copy that comes again is
+ *  taken again rather than lost with the work that was dropped. */
+export class Claims<O> {
+  /** `null` once settled. */
+  private held = new Map<string, O | null>();
+
+  has(key: string, current: O): boolean {
+    const owner = this.held.get(key);
+    return owner === null || (owner !== undefined && owner === current);
+  }
+
+  take(key: string, owner: O): void {
+    this.held.set(key, owner);
+  }
+
+  settle(key: string, owner: O): void {
+    if (this.held.get(key) === owner) this.held.set(key, null);
+  }
+
+  clear(): void {
+    this.held.clear();
+  }
+}
+
 /** How many lines a transcript keeps. Long enough that scrolling back
  *  through an evening works, short enough that a room left open
  *  overnight does not grow without bound. */

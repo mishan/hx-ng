@@ -105,16 +105,68 @@ describe('deduplicating what arrives twice', () => {
     // arrives first is a race.
     const s = new Store();
     const c = s.openPm({ login: 'bob', nick: 'Bob' });
-    expect(s.hasMail(7)).toBe(false);
+    expect(s.hasMail({ id: 7 })).toBe(false);
     s.add(c.id, chat(1, 'hello', { id: 7 }));
-    expect(s.hasMail(7)).toBe(true);
+    expect(s.hasMail({ id: 7 })).toBe(true);
+  });
+
+  it('knows a stored message by its reference, whatever cursor it comes under', () => {
+    const s = new Store();
+    const pm = s.openPm({ login: 'bob', nick: 'Bob' });
+    s.add(pm.id, chat(1, 'live', { id: 3, ref: 'R' }));
+    s.skipMail({ login: 'bob' }, { id: 4, ref: 'S' });
+    // A merge of mailboxes renumbered them before the page was read.
+    expect(s.hasMail({ id: 9, ref: 'R' })).toBe(true);
+    expect(s.hasMail({ id: 10, ref: 'S' })).toBe(true);
+    expect(s.hasMail({ id: 3, ref: 'T' })).toBe(false);
+
+    s.closePm(pm.id);
+    expect(s.hasMail({ id: 9, ref: 'R' })).toBe(false);
+    expect(s.hasMail({ id: 10, ref: 'S' })).toBe(false);
+  });
+
+  it('starts a fresh login with no cursor of the last one, still knowing what it showed', () => {
+    const s = new Store();
+    const c = s.openPm({ login: 'bob', nick: 'Bob' });
+    s.add(c.id, chat(1, 'old', { id: 900, ref: 'R' }));
+    s.notePage(page([]));
+    s.notePage(page([900]));
+    s.readCursor.claim(900);
+    // An upgraded server, or another account, numbers the mailbox anew.
+    s.restartMail();
+    expect([s.oldestMailId, s.mailExhausted, s.readCursor.value]).toEqual([undefined, false, 0]);
+    expect([...c.mailIds.values()]).toEqual([0]);
+    expect(s.hasMail({ id: 3, ref: 'R' })).toBe(true);
+  });
+
+  it('forgets at a fresh login what it knew by a cursor alone', () => {
+    // A server before references: `id` is all there is, and the next
+    // login may be another mailbox's, or the same numbered anew.
+    const s = new Store();
+    const c = s.openPm({ login: 'bob', nick: 'Bob' });
+    s.add(c.id, chat(1, 'before', { id: 3 }));
+    s.add(c.id, chat(2, 'kept', { id: 4, ref: 'R' }));
+    s.restartMail();
+    expect(s.hasMail({ id: 3 })).toBe(false);
+    expect([...c.mailIds.keys()]).toEqual(['R']);
+    s.add(c.id, chat(3, 'a new 3', { id: 3 }));
+    expect(c.lines.map((l) => l.text)).toEqual(['before', 'kept', 'a new 3']);
+  });
+
+  it('moves a known message to the cursor a page gives it now', () => {
+    const s = new Store();
+    const c = s.openPm({ login: 'bob', nick: 'Bob' });
+    s.add(c.id, chat(1, 'live', { id: 3, ref: 'R' }));
+    s.noteCursor({ id: 12, ref: 'R' });
+    s.noteCursor({ id: 40, ref: 'unknown' });
+    expect([...c.mailIds.entries()]).toEqual([['R', 12]]);
   });
 
   it('remembers read mail too', () => {
     const s = new Store();
     const c = s.openPm({ login: 'bob', nick: 'Bob' });
     s.add(c.id, chat(1, 'read already', { id: 7 }), false);
-    expect(s.hasMail(7)).toBe(true);
+    expect(s.hasMail({ id: 7 })).toBe(true);
   });
 
   it('survives two threads for one person being merged', () => {
@@ -124,7 +176,7 @@ describe('deduplicating what arrives twice', () => {
     const byRoster = s.openPm({ uid: 9, nick: 'Bob' });
     s.add(byRoster.id, chat(2, 'live'));
     s.openPm({ uid: 9, login: 'bob', nick: 'Bob' });
-    expect(s.hasMail(42)).toBe(true);
+    expect(s.hasMail({ id: 42 })).toBe(true);
   });
 
   it('keeps ids for lines trimmed off the top of a transcript', () => {
@@ -134,7 +186,7 @@ describe('deduplicating what arrives twice', () => {
     const c = s.openPm({ login: 'bob', nick: 'Bob' });
     for (let i = 1; i <= 2100; i++) s.add(c.id, chat(i, `m${i}`, { id: i }));
     expect(c.lines.length).toBeLessThanOrEqual(2000);
-    expect(s.hasMail(1)).toBe(true);
+    expect(s.hasMail({ id: 1 })).toBe(true);
   });
 
   it('forgets a closed conversation’s mail even where its lines were trimmed', () => {
@@ -146,11 +198,11 @@ describe('deduplicating what arrives twice', () => {
     const c = s.openPm({ login: 'bob', nick: 'Bob' });
     for (let i = 1; i <= 2100; i++) s.add(c.id, chat(i, `m${i}`, { id: i }), false);
     expect(c.lines.some((l) => l.id === 1)).toBe(false); // trimmed off the top
-    expect(s.hasMail(1)).toBe(true);
+    expect(s.hasMail({ id: 1 })).toBe(true);
 
     s.closePm(c.id);
-    expect(s.hasMail(1)).toBe(false);
-    expect(s.hasMail(2100)).toBe(false);
+    expect(s.hasMail({ id: 1 })).toBe(false);
+    expect(s.hasMail({ id: 2100 })).toBe(false);
   });
 
   it('carries mail ids through a merge, so closing the survivor forgets both', () => {
@@ -162,8 +214,8 @@ describe('deduplicating what arrives twice', () => {
     const merged = s.openPm({ uid: 9, login: 'bob', nick: 'Bob' });
 
     s.closePm(merged.id);
-    expect(s.hasMail(71)).toBe(false);
-    expect(s.hasMail(72)).toBe(false);
+    expect(s.hasMail({ id: 71 })).toBe(false);
+    expect(s.hasMail({ id: 72 })).toBe(false);
   });
 
   it('forgets a closed conversation’s mail, so paging can restore it', () => {
@@ -174,7 +226,7 @@ describe('deduplicating what arrives twice', () => {
     const c = s.openPm({ login: 'bob', nick: 'Bob' });
     s.add(c.id, chat(1, 'stored', { id: 51 }), false);
     s.closePm(c.id);
-    expect(s.hasMail(51)).toBe(false);
+    expect(s.hasMail({ id: 51 })).toBe(false);
 
     const again = s.openPm({ login: 'bob', nick: 'Bob' });
     s.add(again.id, chat(1, 'stored', { id: 51 }), false);

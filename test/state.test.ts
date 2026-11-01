@@ -4,6 +4,7 @@ import type { User } from '@hotline-ng/client';
 
 import {
   addressOf,
+  Claims,
   continuesRun,
   LOBBY,
   Store,
@@ -352,12 +353,12 @@ describe('public chat history', () => {
     const s = new Store();
     s.mergeHistory([chat(1, 'history', { id: 7 })], false, 'older');
     expect(s.hasHistory(7)).toBe(true);
-    expect(s.hasMail(7)).toBe(false);
+    expect(s.hasMail({ id: 7 })).toBe(false);
     expect(s.historyExhausted).toBe(true);
 
     const pm = s.openPm({ login: 'alice', nick: 'Alice' });
     s.add(pm.id, chat(2, 'mail', { id: 7 }));
-    expect(s.hasMail(7)).toBe(true);
+    expect(s.hasMail({ id: 7 })).toBe(true);
   });
 });
 
@@ -500,5 +501,22 @@ describe('collapsing a run of lines', () => {
     expect(continuesRun(notice, chatLine)).toBe(false);
     expect(continuesRun(chatLine, notice)).toBe(false);
     expect(continuesRun(undefined, chatLine)).toBe(false);
+  });
+});
+
+describe('claims', () => {
+  it('keeps what its owner finished, and gives back what a replaced owner left under way', () => {
+    const [old, next] = [{}, {}];
+    const c = new Claims<object>();
+    c.take('shown', old);
+    c.settle('shown', old);
+    c.take('dropped', old);
+    expect([c.has('shown', old), c.has('dropped', old)]).toEqual([true, true]);
+    // The reader was replaced while `dropped` was still being read.
+    expect([c.has('shown', next), c.has('dropped', next)]).toEqual([true, false]);
+    c.take('dropped', next);
+    c.settle('dropped', old);
+    expect(c.has('dropped', next)).toBe(true);
+    expect(c.has('dropped', {})).toBe(false);
   });
 });

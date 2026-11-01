@@ -17,6 +17,7 @@
  */
 
 import type { Credentials, SocketLike } from './connection.js';
+import { bytesToBase64url } from './identity.js';
 import type {
   ChatOk,
   ChatParams,
@@ -254,7 +255,8 @@ export class FakeServer {
   private nextUid = 1;
   private nextRoom = 1;
   private nextLine = 0;
-  private nextMail = 0;
+  /** The last cursor each mailbox issued: each numbers its own mail. */
+  private readonly cursors = new Map<string, number>();
   private serial = 0;
 
   constructor(opts: FakeServerOptions = {}) {
@@ -378,7 +380,7 @@ export class FakeServer {
 
   /** The messages stored for `login`, oldest first. */
   mail(login: string): StoredMessage[] {
-    return this.stored.filter((m) => m.to === login).map(({ id, from, text, at, read }) => structuredClone({ id, from, text, at, read }));
+    return this.stored.filter((m) => m.to === login).map(({ id, ref, from, text, at, read }) => structuredClone({ id, ref, from, text, at, read }));
   }
 
   /** A line of public chat from `uid`, which must be in `room` if one
@@ -523,7 +525,8 @@ export class FakeServer {
         return this.inbox(s, p as InboxParams);
       case 'msg_read':
         if (!s.mailbox) throw refuse('no_inbox', 'This account has no inbox.');
-        for (const m of this.mailOf(s)) if (m.id <= Number(p.up_to)) m.read = true;
+        this.issued(s, p.up_to);
+        for (const m of this.mailOf(s)) if (m.id <= p.up_to) m.read = true;
         return this.counts(s);
       case 'rooms':
         return { list: this.visible().map((r) => this.view(r)) } satisfies RoomsOk;
@@ -714,10 +717,13 @@ export class FakeServer {
         prior.pending = false;
         for (const x of attached) this.emit(x, 'msg', this.waited(prior));
       }
-      return this.msgOk(s, prior);
+      return this.msgOk(prior);
     }
+    const id = (this.cursors.get(box) ?? 0) + 1;
+    this.cursors.set(box, id);
     const m: Mail = {
-      id: ++this.nextMail,
+      id,
+      ref: bytesToBase64url(crypto.getRandomValues(new Uint8Array(16))),
       from: { nick: from.nick, ...(s.mailbox ? { login: s.mailbox } : {}) },
       text: p.text,
       at,
@@ -728,13 +734,13 @@ export class FakeServer {
     };
     this.stored.push(m);
     if (key) this.mailGuids.set(key, m);
-    for (const x of attached) this.emit(x, 'msg', { from, text: m.text, at, queued: false, id: m.id });
-    return this.msgOk(s, m);
+    for (const x of attached) this.emit(x, 'msg', { from, text: m.text, at, queued: false, id: m.id, ref: m.ref });
+    return this.msgOk(m);
   }
 
-  /** The id is for a sender with an inbox to find it in (§7.1). */
-  private msgOk(s: Session, m: Mail): MsgOk {
-    return m.pending ? { queued: true, ...(s.mailbox ? { id: m.id } : {}) } : { queued: false };
+  /** The cursor is the recipient's alone; the reference is both parties'. */
+  private msgOk(m: Mail): MsgOk {
+    return { queued: m.pending, ref: m.ref };
   }
 
   private waited(m: Mail): Events['msg'] {
@@ -745,6 +751,7 @@ export class FakeServer {
       at: m.at,
       queued: true,
       id: m.id,
+      ref: m.ref,
     };
   }
 
@@ -760,11 +767,14 @@ export class FakeServer {
     if (!s.mailbox) throw refuse('no_inbox', 'This account has no inbox.');
     const limit = p.limit ?? 50;
     if (!Number.isInteger(limit) || limit < 1 || limit > 200) throw refuse('bad_request', 'limit is 1 to 200.');
+    // Omitted or null is no bound, as hxd-ng's `Option<u64>` reads it.
+    const before = p.before ?? undefined;
+    if (before !== undefined) this.issued(s, before);
     const messages = this.mailOf(s)
-      .filter((m) => !p.before || m.id < p.before)
+      .filter((m) => before === undefined || m.id < before)
       .reverse()
       .slice(0, limit)
-      .map(({ id, from, text, at, read }): StoredMessage => ({ id, from, text, at, read }));
+      .map(({ id, ref, from, text, at, read }): StoredMessage => ({ id, ref, from, text, at, read }));
     return { messages, ...this.counts(s) };
   }
 
@@ -945,6 +955,14 @@ export class FakeServer {
   private lastId(room: number): { last_id?: number } {
     const last = this.kept.get(room)!.at(-1)?.id;
     return last === undefined ? {} : { last_id: last };
+  }
+
+  /** A cursor past the last this mailbox issued names nothing it was
+   *  sent, so is refused rather than read as "everything" (§7.1); one
+   *  that is no unsigned integer is a malformed request. */
+  private issued(s: Session, cursor: unknown): void {
+    if (typeof cursor !== 'number' || !Number.isInteger(cursor) || cursor < 0) throw refuse('bad_request', 'A cursor is an unsigned integer.');
+    if (cursor > (this.cursors.get(s.mailbox!) ?? 0)) throw refuse('bad_request', 'That cursor is not this mailbox\'s.');
   }
 
   private mailOf(s: Session): Mail[] {

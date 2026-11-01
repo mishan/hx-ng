@@ -430,7 +430,8 @@ export interface ConnectionHooks {
    * this hook a `resync_required` silently eats mail.
    *
    * Newest first, and it may overlap messages already on screen — match
-   * on `id` rather than appending blindly.
+   * on `ref` rather than appending blindly, since a merge of mailboxes
+   * may renumber `id`; on `id` only from a server that sends no `ref`.
    */
   onMissedMail?: (ok: InboxOk) => void;
   /** Public-chat pages recovered after an unreplayable outbox gap,
@@ -874,7 +875,7 @@ export class Connection {
       // holding more than this needs the caller to page back with
       // `inbox({ before })`, and there is no way to know that from
       // here — the client's position is a seq and the mailbox is
-      // numbered in message ids, which do not convert.
+      // numbered in its own cursors, which do not convert.
       this.hooks.onMissedMail(await this.inbox({ limit: 200 }));
     } catch (e) {
       this.trace('in', 'missed-mail-failed', String(e instanceof Error ? e.message : e), true);

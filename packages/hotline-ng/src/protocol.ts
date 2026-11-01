@@ -513,12 +513,13 @@ export function newGuid(): string {
 export interface MsgOk {
   /** True when the message waited rather than going to a live session. */
   queued: boolean;
-  /** A queued message's id, as the recipient's `msg` event will carry
-   *  it, when the sender's own account has an inbox. */
-  id?: number;
+  /** The stored message's reference, as the recipient's `msg` event and
+   *  `inbox` row carry it: present whenever a message was stored, a
+   *  request aside. */
+  ref?: string;
   /** With `messaging`, a `to_login` that became a message request: the
    *  one answer it has, stored, held or dropped, with `queued` true and
-   *  no `id`. */
+   *  no `ref`. */
   requested?: true;
 }
 
@@ -535,7 +536,13 @@ export interface InboxCounts {
  * which is absent exactly when there is nobody to reply to.
  */
 export interface StoredMessage {
+  /** This mailbox's cursor: what `inbox` pages by and `msg_read` takes.
+   *  A merge of mailboxes can renumber it. */
   id: number;
+  /** The message's reference, shared with its sender and never changed:
+   *  what to tell one message from another by. Absent from a server
+   *  before references. */
+  ref?: string;
   from: { nick: string; login?: string };
   text: string;
   /** Unix seconds, when it was sent. */
@@ -549,7 +556,7 @@ export interface StoredMessage {
 }
 
 export interface InboxParams {
-  /** Page backwards from this id, exclusive. */
+  /** Page backwards from this cursor, exclusive. */
   before?: number;
   /** 1–200, default 50. */
   limit?: number;
@@ -926,8 +933,10 @@ export interface MessagingUserOk {
 }
 
 export interface RequestMessage {
-  /** The inbox id a `report` names it by. */
+  /** The inbox cursor a `report` names it by. */
   id: number;
+  /** Absent from a server before references. */
+  ref?: string;
   text: string;
   /** Unix seconds. */
   at: number;
@@ -1549,7 +1558,7 @@ export type ReportKind = 'line' | 'media' | 'msg' | 'user' | 'article';
  * Filing a report: exactly one target, and a reason, which is required
  * and at most 1024 characters.
  *
- * `msg` is an inbox id, and only its recipient may name it; the server
+ * `msg` is an inbox cursor, and only its recipient may name it; the server
  * copies the stored body into the report. A private message with no
  * inbox row — a server without one, or one sent to a guest — is
  * reported as its sender (`user`) with the text pasted as `evidence`,
@@ -1599,7 +1608,9 @@ export interface ReportTarget {
   /** For `media`, the reported handle. For `line`, the image the line
    *  carried: the report made it this moderator's to fetch. */
   media?: string;
-  msg?: number;
+  /** The message's reference; from a server before references, the
+   *  number it named the message by. */
+  msg?: string | number;
   article?: number;
 }
 
@@ -1946,11 +1957,12 @@ export interface Events {
   room_changed: { room: Room };
   /** Archived, or no longer visible; a member was parted first. */
   room_removed: { room: number };
-  /** A private message. `id` is absent when nothing durable was stored
-   *  — a message between live sessions on a server with no inbox, or one
-   *  from a guest — and it is the handle `msg_read` takes. `at` is when
-   *  it was *sent*, not when it arrived, which is the whole difference
-   *  for mail that waited. */
+  /** A private message. `id` and `ref` are absent when nothing durable
+   *  was stored — a message between live sessions on a server with no
+   *  inbox, or one from a guest. `id` is this mailbox's cursor, which
+   *  `msg_read` takes; `ref` is the name the sender's reply gave it. `at`
+   *  is when it was *sent*, not when it arrived, which is the whole
+   *  difference for mail that waited. */
   msg: {
     /** `fingerprint` is the server's word for a sealed message's sender. */
     from: Sender & { fingerprint?: string };
@@ -1958,6 +1970,7 @@ export interface Events {
     at: number;
     queued: boolean;
     id?: number;
+    ref?: string;
     media?: Media;
     /** A signed message's detached form, or its link form, base64url. */
     signed?: string;
@@ -2077,7 +2090,8 @@ export interface Events {
   presence: { login: string; fingerprint?: string; state: FriendPresence; status_text?: string };
   /** An instant message, from a friend or under an approval. Acknowledge
    *  it with `receipt`: one that is not is handed over again at the next
-   *  `friends`. `id` is the inbox row, absent for one never stored. */
+   *  `friends`. `id` and `ref` are the inbox row's, absent for one never
+   *  stored. */
   im: {
     from: { login: string; nick: string; fingerprint?: string };
     text: string;
@@ -2086,6 +2100,7 @@ export interface Events {
     guid: string;
     queued: boolean;
     id?: number;
+    ref?: string;
     signed?: string;
     /** It came under an approval rather than a friendship. */
     approval?: true;

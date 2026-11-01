@@ -776,8 +776,14 @@ export class App {
         loggedIn = true;
         // A login, not a resume: the device is the one it proved, and on
         // a reconnect the key is checked again before it is signed to. A
-        // replaced connection's login proves nothing for this one.
-        if (conn === this.conn) this.useDevice(way.url, active);
+        // replaced connection's login proves nothing for this one. A new
+        // reader, too, so a message the last session was still reading
+        // lands as a replaced one's does, and no cursor it remembered
+        // stands for this session's.
+        if (conn === this.conn) {
+          this.messages = new MessageReader(null, sealedReplay);
+          this.useDevice(way.url, active);
+        }
         if (started) void this.repin();
         this.banner.show(conn);
         // Present whenever the *server* keeps mail — which is not the

@@ -2649,6 +2649,8 @@ export class App {
     if (conn !== this.conn || !c?.room) return;
     c.joined = false;
     c.members = undefined;
+    // Left by choice: a listing still to come rejoins it no more.
+    this.rejoin = this.rejoin.filter((id) => id !== room);
     this.dropReply(c);
     this.renderRoom(c);
   }

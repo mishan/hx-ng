@@ -1634,6 +1634,8 @@ button.ghost.danger:hover { color: var(--admin); border-color: var(--admin); }
   body.show-drawer .rail { transform: none; visibility: visible; transition: transform 0.18s ease; }
   body.show-drawer .scrim { opacity: 1; pointer-events: auto; }
   .rail-head { display: block; }
+  /* A drawer is a column again, where the group's rule shows. */
+  .rail-group { display: block; }
   .rail-item { width: 100%; flex: none; }
 
   /* What the title bar had no room for. The buttons keep the look they

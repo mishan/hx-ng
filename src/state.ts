@@ -7,6 +7,7 @@ import type {
   HistoryMedia,
   InboxCounts,
   InboxOk,
+  ReplyTarget,
   ServerInfo,
   Status,
   User,
@@ -76,6 +77,8 @@ export interface Line {
   guid?: string;
   /** How far a friend has told of one this client sent. */
   receipt?: 'delivered' | 'read';
+  /** What it answers, as the server carried it (`replies`). */
+  re?: ReplyTarget;
 }
 
 export type ConvId = string;
@@ -771,6 +774,7 @@ function blank(line: Line): string | undefined {
   line.from = undefined;
   line.signature = undefined;
   line.signed = undefined;
+  line.re = undefined;
   if (line.media) {
     const { id: _gone, ...rest } = line.media;
     line.media = { ...rest, removed: true };

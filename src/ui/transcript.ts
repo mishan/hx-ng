@@ -16,6 +16,7 @@
 
 import { signerLabel, type ContactOf } from '../contacts';
 import { lineReport } from '../moderation';
+import type { Quote } from '../replies';
 import type { LineSignature } from '../signing';
 import { continuesRun, type Conversation, type Line } from '../state';
 import type { Store } from '../state';
@@ -39,6 +40,10 @@ export interface TranscriptOptions {
   moderator?: boolean;
   /** The contact pinned to a signer, which names what it signed. */
   contact?: ContactOf;
+  /** Whether a line offers to be replied to. */
+  replyable?: (line: Line) => boolean;
+  /** What a line's `re` is drawn as. */
+  quote?: (line: Line) => Quote;
 }
 
 /** The line each drawn row is, for a click on one of its buttons to
@@ -50,6 +55,11 @@ const rows = new WeakMap<Element, Line>();
 export function lineOf(el: Element): Line | undefined {
   const row = el.closest('.line');
   return row ? rows.get(row) : undefined;
+}
+
+/** The row `line` is drawn as in `transcript`, if it is. */
+export function rowOf(transcript: HTMLElement, line: Line): HTMLElement | undefined {
+  return [...transcript.children].find((el): el is HTMLElement => rows.get(el) === line);
 }
 
 export function renderTranscript(
@@ -137,16 +147,18 @@ function lineEl(
  *  finds the line with `lineOf` and does the rest. */
 function actions(line: Line, conv: Conversation, store: Store, opts: TranscriptOptions): HTMLElement | null {
   const report = lineReport(line, conv, store.self, (uid) => store.user(uid) !== undefined) !== null;
+  const reply = opts.replyable?.(line) === true;
   const redact =
     !!opts.moderator &&
     conv.kind === 'lobby' &&
     line.id !== undefined &&
     !line.deleted &&
     (line.kind === 'chat' || line.kind === 'action');
-  if (!report && !redact) return null;
+  if (!report && !redact && !reply) return null;
   return h(
     'span',
     { class: 'line-actions' },
+    reply ? h('button', { type: 'button', class: 'ghost small', dataset: { act: 'reply' }, title: 'Reply to this' }, 'Reply') : null,
     report ? h('button', { type: 'button', class: 'ghost small', dataset: { act: 'report' }, title: 'Tell the moderators about this' }, 'Report') : null,
     redact ? h('button', { type: 'button', class: 'ghost small danger', dataset: { act: 'redact' }, title: 'Remove this line for everyone' }, 'Redact') : null,
   );
@@ -220,6 +232,7 @@ function chatLine(
       ...signatureTag(line.signature),
       sameSpeaker ? null : who.compared,
       sameSpeaker ? null : who.aside,
+      quoteOf(line, opts),
       ...body.nodes,
       line.receipt ? h('span', { class: 'tag receipt', title: 'As their client told it' }, line.receipt) : null,
       // An image is a block under the text, not a word in it: a line
@@ -229,6 +242,25 @@ function chatLine(
       line.media ? mediaEl(line.media, media) : null,
     ),
   );
+}
+
+/** What a reply answers, above what it says: plain text, cut short, and
+ *  a button to the line where that is on screen. One still being
+ *  fetched says so; one this client cannot show says only that. */
+function quoteOf(line: Line, opts: TranscriptOptions): HTMLElement | null {
+  const q = line.re && opts.quote?.(line);
+  if (!q) return null;
+  if (q.state !== 'found') {
+    const text = q.state === 'pending' ? 'Replying to an earlier message…' : 'Original message unavailable';
+    return h('div', { class: 'quote muted', dataset: q.state === 'pending' ? { pending: String(q.id) } : {} }, text);
+  }
+  const label = `Replying to ${q.nick}: ${q.excerpt}`;
+  // A nick in its own direction, so a right-to-left one cannot reorder
+  // the excerpt beside it.
+  const kids = [h('bdi', { class: 'quote-nick' }, q.nick), ' ', h('span', { class: 'quote-text' }, q.excerpt)];
+  return q.line
+    ? h('button', { type: 'button', class: 'quote', dataset: { act: 'quote' }, ariaLabel: label, title: 'Show the message this answers' }, ...kids)
+    : h('div', { class: 'quote', role: 'note', ariaLabel: label }, ...kids);
 }
 
 /** Whether a line carries a signature that parsed, or a deniable box
@@ -418,6 +450,7 @@ function eventLine(line: Line, prev: Line | undefined, media: MediaCache, opts: 
       ...actor,
       who?.compared ?? null,
       who?.aside ?? null,
+      quoteOf(line, opts),
       // A news notice is one link to the article it is about; the shell
       // handles the click, since only it can open the reader.
       ...(line.article !== undefined

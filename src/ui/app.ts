@@ -359,6 +359,8 @@ export class App {
   /** The rooms a session that could not resume was in, joined again
    *  once the login after it has listed them (chat-rooms.md §2.3). */
   private rejoin: number[] = [];
+  /** Rooms left while `loadRooms` rejoins, which it then passes over. */
+  private leftWhileRejoining = new Set<number>();
   /** The active room's name, topic and the way in or out. */
   private roomBar = h('div', { class: 'room-bar', hidden: true });
   /** Bumped by anything that abandons an attachment. An upload that was
@@ -2620,8 +2622,10 @@ export class App {
     this.store.setRooms(list);
     const again = new Set([...this.rejoin, ...conn.roomHistoryIds.keys()]);
     this.rejoin = [];
+    this.leftWhileRejoining.clear();
     this.renderRail();
     for (const id of again) {
+      if (this.leftWhileRejoining.has(id)) continue;
       if (this.store.conversation(publicId(id))) await this.joinRoom(id).catch((e: unknown) => this.say(this.problem(e)));
     }
   }
@@ -2651,6 +2655,7 @@ export class App {
     c.members = undefined;
     // Left by choice: a listing still to come rejoins it no more.
     this.rejoin = this.rejoin.filter((id) => id !== room);
+    this.leftWhileRejoining.add(room);
     this.dropReply(c);
     this.renderRoom(c);
   }

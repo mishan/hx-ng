@@ -430,7 +430,8 @@ export interface ConnectionHooks {
    * this hook a `resync_required` silently eats mail.
    *
    * Newest first, and it may overlap messages already on screen — match
-   * on `id` rather than appending blindly.
+   * on `ref` rather than appending blindly, since a merge of mailboxes
+   * may renumber `id`; on `id` only from a server that sends no `ref`.
    */
   onMissedMail?: (ok: InboxOk) => void;
   /** Public-chat pages recovered after an unreplayable outbox gap,

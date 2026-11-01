@@ -227,6 +227,8 @@ describe('the fake server', () => {
       () => carol.inbox({ before: 2 }),
       () => carol.request('msg_read', {}),
       () => carol.request('msg_read', { up_to: 0.5 }),
+      () => carol.request('msg_read', { up_to: -1 }),
+      () => carol.inbox({ before: -1 }),
     ];
     for (const ask of refused) await expect(ask()).rejects.toMatchObject({ wire: { code: 'bad_request' } });
     expect(await carol.inbox({ before: 1 })).toMatchObject({ messages: [], unread: 1 });

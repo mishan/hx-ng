@@ -139,6 +139,20 @@ describe('deduplicating what arrives twice', () => {
     expect(s.hasMail({ id: 3, ref: 'R' })).toBe(true);
   });
 
+  it('forgets at a fresh login what it knew by a cursor alone', () => {
+    // A server before references: `id` is all there is, and the next
+    // login may be another mailbox's, or the same numbered anew.
+    const s = new Store();
+    const c = s.openPm({ login: 'bob', nick: 'Bob' });
+    s.add(c.id, chat(1, 'before', { id: 3 }));
+    s.add(c.id, chat(2, 'kept', { id: 4, ref: 'R' }));
+    s.restartMail();
+    expect(s.hasMail({ id: 3 })).toBe(false);
+    expect([...c.mailIds.keys()]).toEqual(['R']);
+    s.add(c.id, chat(3, 'a new 3', { id: 3 }));
+    expect(c.lines.map((l) => l.text)).toEqual(['before', 'kept', 'a new 3']);
+  });
+
   it('moves a known message to the cursor a page gives it now', () => {
     const s = new Store();
     const c = s.openPm({ login: 'bob', nick: 'Bob' });

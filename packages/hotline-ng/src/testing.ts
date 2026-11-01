@@ -525,7 +525,6 @@ export class FakeServer {
         return this.inbox(s, p as InboxParams);
       case 'msg_read':
         if (!s.mailbox) throw refuse('no_inbox', 'This account has no inbox.');
-        if (!Number.isInteger(p.up_to)) throw refuse('bad_request', 'up_to is a cursor.');
         this.issued(s, p.up_to);
         for (const m of this.mailOf(s)) if (m.id <= p.up_to) m.read = true;
         return this.counts(s);
@@ -957,8 +956,10 @@ export class FakeServer {
   }
 
   /** A cursor past the last this mailbox issued names nothing it was
-   *  sent, so is refused rather than read as "everything" (§7.1). */
-  private issued(s: Session, cursor: number): void {
+   *  sent, so is refused rather than read as "everything" (§7.1); one
+   *  that is no unsigned integer is a malformed request. */
+  private issued(s: Session, cursor: unknown): void {
+    if (typeof cursor !== 'number' || !Number.isInteger(cursor) || cursor < 0) throw refuse('bad_request', 'A cursor is an unsigned integer.');
     if (cursor > (this.cursors.get(s.mailbox!) ?? 0)) throw refuse('bad_request', 'That cursor is not this mailbox\'s.');
   }
 

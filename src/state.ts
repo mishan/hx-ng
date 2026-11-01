@@ -492,13 +492,19 @@ export class Store {
   /** A login, not a resume: its mailbox may be numbered anew, by a
    *  server upgraded since or for another account, so no cursor of the
    *  last session's holds. What was shown stays known by its `ref`, and a
-   *  page that lists it again gives it this session's (`noteCursor`). */
+   *  page that lists it again gives it this session's (`noteCursor`);
+   *  what was known by a cursor alone is forgotten, as that cursor may
+   *  name another message now. */
   restartMail(): void {
     this.oldestMailId = undefined;
     this.mailExhausted = false;
     this.readCursor = new Cursor();
+    for (const key of this.seenMail) if (key.startsWith('#')) this.seenMail.delete(key);
     for (const c of this.conversations.values()) {
-      for (const key of c.mailIds.keys()) c.mailIds.set(key, 0);
+      for (const key of c.mailIds.keys()) {
+        if (key.startsWith('#')) c.mailIds.delete(key);
+        else c.mailIds.set(key, 0);
+      }
     }
   }
 

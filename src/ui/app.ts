@@ -2482,8 +2482,7 @@ export class App {
     const login = d.from.login;
     const ack = () => void conn?.receipt(login, d.guid).catch(() => {});
     const key = `${login.toLowerCase()} ${d.guid}`;
-    if (this.imSeen.has(key)) return ack();
-    if (this.store.hasMail(d)) {
+    if (this.imSeen.has(key) || this.store.hasMail(d)) {
       this.store.noteCursor(d);
       return ack();
     }

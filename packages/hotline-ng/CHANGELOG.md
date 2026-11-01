@@ -13,6 +13,14 @@ says how.
 - `outranked` reads "That account or role may do…".
 - A connection started `resumeOnly` whose resume is refused on a
   reconnect ends, with `onEnded`, rather than staying `reconnecting`.
+- Breaking: `MsgOk` has no `id`. A stored message's `id` is its place
+  in the recipient's mailbox, shown to the recipient alone, and `ref`
+  names it to both parties (hxd-ng's `docs/hotline-ng.md` §7.1):
+  `MsgOk.ref`, and `ref` on the `msg` and `im` events, `StoredMessage`
+  and `RequestMessage`, absent from a server before references.
+  `ReportTarget.msg` is that `ref`, or a number from such a server.
+  `FakeServer` numbers each mailbox by itself and refuses a cursor one
+  never issued `bad_request`, as the server does.
 
 ### Added
 

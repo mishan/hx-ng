@@ -147,18 +147,22 @@ describe('the fake server', () => {
   it('queues a message for an absent account and delivers it after the next login', async () => {
     const server = new FakeServer({ accounts: ACCOUNTS });
     const alice = await connect(server, 'alice');
-    expect(await alice.msg({ to_login: 'bob', text: 'later' })).toEqual({ queued: true, id: 1 });
+    const sent = await alice.msg({ to_login: 'bob', text: 'later' });
+    expect(sent).toEqual({ queued: true, ref: expect.stringMatching(/^[A-Za-z0-9_-]{22}$/) });
 
     const bob = new Connection(server.credentials({ login: 'bob', password: 'pw' }));
     const mail = heard(bob, 'msg');
     await bob.start();
     await waitFor('the mail', () => mail.length === 1);
-    expect(mail[0]).toMatchObject({ text: 'later', queued: true, from: { uid: alice.self!.uid, login: 'alice' } });
+    expect(mail[0]).toMatchObject({ text: 'later', queued: true, id: 1, ref: sent.ref, from: { uid: alice.self!.uid, login: 'alice' } });
     const box = await bob.inbox();
-    expect(box).toMatchObject({ unread: 1, total: 1, messages: [{ text: 'later', read: false }] });
+    expect(box).toMatchObject({ unread: 1, total: 1, messages: [{ id: 1, ref: sent.ref, text: 'later', read: false }] });
     expect(await bob.msgRead(box.messages[0]!.id)).toEqual({ unread: 0, total: 1 });
 
-    expect(await bob.msg({ to: alice.self!.uid, text: 'now' })).toEqual({ queued: false });
+    // Stored though delivered at once, so it has a reference too.
+    const now = await bob.msg({ to: alice.self!.uid, text: 'now' });
+    expect(now).toEqual({ queued: false, ref: expect.any(String) });
+    expect(now.ref).not.toBe(sent.ref);
     const bot = server.addUser({ nick: 'Bot' });
     expect(server.message(bot, { to: bob.self!.uid, text: 'beep' })).toEqual({ queued: false });
     await waitFor('the bot', () => mail.length === 2);
@@ -166,7 +170,7 @@ describe('the fake server', () => {
     await expect(bob.msg({ to_login: 'nobody', text: '?' })).rejects.toMatchObject({ wire: { code: 'no_such_user' } });
   });
 
-  it('stores no plain guest\'s mail, an identity\'s without an id, and gives an account without a password no inbox', async () => {
+  it('stores no plain guest\'s mail, an identity\'s with a reference, and gives an account without a password no inbox', async () => {
     const server = new FakeServer({ accounts: [...ACCOUNTS, { login: 'kiosk', password: '' }] });
     const guest = new Connection(server.credentials());
     await guest.start();
@@ -181,6 +185,7 @@ describe('the fake server', () => {
     await waitFor('the replay', () => mail.length === 1);
     expect(mail[0]).toMatchObject({ text: 'psst', queued: false });
     expect(mail[0]).not.toHaveProperty('id');
+    expect(mail[0]).not.toHaveProperty('ref');
     expect(await alice.inbox()).toMatchObject({ total: 0 });
 
     const kiosk = new Connection(server.credentials({ login: 'kiosk', password: '' }));
@@ -192,7 +197,7 @@ describe('the fake server', () => {
 
     const proved = new Connection(server.credentials({ identity: { getToken: async () => server.identityToken() } }));
     await proved.start();
-    expect(await proved.msg({ to_login: 'bob', text: 'from a key' })).toEqual({ queued: true });
+    expect(await proved.msg({ to_login: 'bob', text: 'from a key' })).toEqual({ queued: true, ref: expect.any(String) });
     const bob = new Connection(server.credentials({ login: 'bob', password: 'pw' }));
     const bobMail = heard(bob, 'msg');
     await bob.start();
@@ -202,6 +207,32 @@ describe('the fake server', () => {
     expect((await bob.inbox()).messages[0]?.from).toEqual({ nick: 'guest' });
   });
 
+  it('numbers each mailbox by itself and refuses a cursor it never issued', async () => {
+    const server = new FakeServer({ accounts: [...ACCOUNTS, { login: 'carol', password: 'pw' }] });
+    const alice = await connect(server, 'alice');
+    const bob = await connect(server, 'bob');
+    const carol = await connect(server, 'carol');
+    const bobMail = heard(bob, 'msg');
+    const carolMail = heard(carol, 'msg');
+    await alice.msg({ to_login: 'bob', text: 'one' });
+    await alice.msg({ to_login: 'carol', text: 'two' });
+    await alice.msg({ to_login: 'bob', text: 'three' });
+    await waitFor('the mail', () => bobMail.length === 2 && carolMail.length === 1);
+    expect(bobMail.map((m) => m.id)).toEqual([1, 2]);
+    expect(carolMail.map((m) => m.id)).toEqual([1]);
+    expect((await carol.inbox()).messages.map((m) => m.text)).toEqual(['two']);
+
+    const refused = [
+      () => carol.msgRead(2),
+      () => carol.inbox({ before: 2 }),
+      () => carol.request('msg_read', {}),
+      () => carol.request('msg_read', { up_to: 0.5 }),
+    ];
+    for (const ask of refused) await expect(ask()).rejects.toMatchObject({ wire: { code: 'bad_request' } });
+    expect(await carol.inbox({ before: 1 })).toMatchObject({ messages: [], unread: 1 });
+    expect(server.mail('bob').map((m) => [m.id, m.text])).toEqual([[1, 'one'], [2, 'three']]);
+  });
+
   it('takes a retried message under its guid as the one it repeats, waiting or delivered', async () => {
     const server = new FakeServer({ accounts: ACCOUNTS });
     const alice = await connect(server, 'alice');
@@ -209,13 +240,13 @@ describe('the fake server', () => {
     const first = await alice.msg(waiting);
     // Either case and without hyphens, the same guid.
     expect(await alice.msg({ ...waiting, guid: '0f8fad5bd9cb469fa16570867728950e' })).toEqual(first);
-    expect(first).toMatchObject({ queued: true });
+    expect(first).toMatchObject({ queued: true, ref: expect.any(String) });
 
     const bob = new Connection(server.credentials({ login: 'bob', password: 'pw' }));
     const mail = heard(bob, 'msg');
     await bob.start();
     // Now it is delivered, and a retry says so.
-    expect(await alice.msg(waiting)).toEqual({ queued: false });
+    expect(await alice.msg(waiting)).toEqual({ queued: false, ref: first.ref });
     const live = { to_login: 'bob', text: 'live', guid: '6ba7b810-9dad-11d1-80b4-00c04fd430c8' };
     await alice.msg(live);
     await alice.msg(live);
@@ -261,7 +292,7 @@ describe('the fake server', () => {
     await waitFor('the mail', () => mail.length === 1);
     expect(mail[0]?.from).toMatchObject({ uid: bot, login: 'bot' });
     expect(server.uidOf('bot')).toBe(bot);
-    expect(await alice.msg({ to_login: 'bot', text: 'ack' })).toEqual({ queued: false });
+    expect(await alice.msg({ to_login: 'bot', text: 'ack' })).toEqual({ queued: false, ref: expect.any(String) });
   });
 
   it('serves only the families its caps say', async () => {

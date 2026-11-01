@@ -71,7 +71,6 @@ import { durationWords, DURATIONS, lineReport, parseDuration, personRef } from '
 import { notifyText } from '../news';
 import {
   messageAddress,
-  Cursor,
   LOBBY,
   type Conversation,
   type ConvId,
@@ -452,10 +451,6 @@ export class App {
   /** The bottom of the drawer, which holds the title bar's buttons while
    *  the layout is a phone's. Empty, and not drawn, otherwise. */
   private drawerFoot = h('div', { class: 'rail-foot' });
-  /** How far `msg_read` has been told we have got. Selecting the same
-   *  conversation twice does not ask again, and two marks in flight
-   *  cannot write each other's answers. */
-  private readCursor = new Cursor();
   private meButton = h('button', { class: 'identity', title: 'Change your icon' });
   /** Transcript, attachment chip and composer: the half of the main
    *  column the news reader takes the place of while it is open. */
@@ -767,6 +762,7 @@ export class App {
       onLogin: (ok) => {
         this.store.server = ok.server;
         this.store.forgetPmUids();
+        this.store.restartMail();
         // A new session: receipts owed under the last are not its to send.
         this.pendingReads.clear();
         this.dropOwed();
@@ -1240,7 +1236,7 @@ export class App {
       // would make a week-old message read as having just arrived.
       // The login flush and an `inbox` page carry the same rows, and
       // which arrives first is a race. Whichever loses is dropped here.
-      if (d.id !== undefined && this.store.hasMail(d.id)) return;
+      if (this.store.hasMail(d)) return;
       this.checkClock(d.at, d.queued);
       // Read before it is shown, in its place among the lines, as a chat
       // line is; a sealed one opened there too.
@@ -1255,7 +1251,7 @@ export class App {
       this.inOrder(async () => {
         const opened = await read;
         if (messages !== this.messages) return void (opened && messages.unshown(opened).catch(() => {}));
-        if (d.id !== undefined && this.store.hasMail(d.id)) return;
+        if (this.store.hasMail(d)) return;
         if (!opened) {
           const conv = this.store.openPm({ uid: d.from.uid, login: d.from.login, nick: d.from.nick });
           this.push(conv.id, {
@@ -1267,7 +1263,7 @@ export class App {
         }
         const { signature, duplicate } = opened;
         if (duplicate) {
-          if (d.id !== undefined) this.store.skipMail({ uid: d.from.uid, login: d.from.login }, d.id);
+          this.store.skipMail({ uid: d.from.uid, login: d.from.login }, d);
           return;
         }
         const conv = this.store.openPm({ uid: d.from.uid, login: d.from.login, nick: d.from.nick });
@@ -1283,6 +1279,7 @@ export class App {
           text: opened.text ?? d.text,
           queued: d.queued,
           id: d.id,
+          ref: d.ref,
           media: d.media,
           ...(signature ? { signature } : {}),
           ...(signed !== undefined ? { signed } : {}),
@@ -2485,7 +2482,7 @@ export class App {
     const login = d.from.login;
     const ack = () => void conn?.receipt(login, d.guid).catch(() => {});
     const key = `${login.toLowerCase()} ${d.guid}`;
-    if (this.imSeen.has(key) || (d.id !== undefined && this.store.hasMail(d.id))) return ack();
+    if (this.imSeen.has(key) || this.store.hasMail(d)) return ack();
     this.imSeen.add(key);
     if (d.approval) this.friends.noteApproval(login);
     this.checkClock(d.at, d.queued);
@@ -2513,6 +2510,7 @@ export class App {
         text: d.text,
         queued: d.queued,
         id: d.id,
+        ref: d.ref,
         guid: d.guid,
         ...(signature ? { signature } : {}),
         ...(d.signed !== undefined ? { signed: d.signed } : {}),
@@ -2954,9 +2952,12 @@ export class App {
     const reads = await Promise.all(sent.map((m) => messages.stored(m).catch(() => unreadable(m.signed))));
     if (messages !== this.messages) return 0;
     for (const [i, m] of sent.entries()) {
-      if (this.store.hasMail(m.id)) continue;
+      if (this.store.hasMail(m)) {
+        this.store.noteCursor(m);
+        continue;
+      }
       if (reads[i]?.duplicate) {
-        this.store.skipMail({ login: m.from.login }, m.id);
+        this.store.skipMail({ login: m.from.login }, m);
         continue;
       }
       const conv = this.store.openPm({ login: m.from.login, nick: m.from.nick });
@@ -2973,6 +2974,7 @@ export class App {
           text: m.text,
           queued: true,
           id: m.id,
+          ref: m.ref,
           // Live `msg` events carry this; a page of the mailbox has to
           // as well, or a private image disappears on reload and on
           // every older page.
@@ -3058,9 +3060,9 @@ export class App {
     // Only mail we received has an id worth marking, a copy left out as
     // a duplicate included; our own half of the conversation is local
     // and never had one.
-    for (const id of conv.mailIds) if (id > top) top = id;
+    for (const id of conv.mailIds.values()) if (id > top) top = id;
 
-    const claim = this.readCursor.claim(top);
+    const claim = this.store.readCursor.claim(top);
     if (!claim) return;
     try {
       const counts = await conn.msgRead(claim.to);

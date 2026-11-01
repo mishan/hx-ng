@@ -874,7 +874,7 @@ export class Connection {
       // holding more than this needs the caller to page back with
       // `inbox({ before })`, and there is no way to know that from
       // here — the client's position is a seq and the mailbox is
-      // numbered in message ids, which do not convert.
+      // numbered in its own cursors, which do not convert.
       this.hooks.onMissedMail(await this.inbox({ limit: 200 }));
     } catch (e) {
       this.trace('in', 'missed-mail-failed', String(e instanceof Error ? e.message : e), true);

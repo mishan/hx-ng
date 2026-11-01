@@ -42,6 +42,9 @@ export interface Line {
   queued?: boolean;
   /** The store's id, when it has one. `msg_read` marks up to it. */
   id?: number;
+  /** A stored private message's reference, which names it to both
+   *  parties. */
+  ref?: string;
   /** A moderated history row keeps its id and timestamp but no text. */
   deleted?: boolean;
   /** The image this line carried: a handle and the server's own
@@ -103,11 +106,12 @@ export interface Conversation {
   title: string;
   lines: Line[];
   unread: number;
-  /** Every stored-message id this conversation has held, including ones
-   *  whose lines have since been trimmed off the top. Kept so closing
-   *  can hand them all back — `lines` alone would forget the trimmed
-   *  ones and leave them permanently skipped by later paging. */
-  mailIds: Set<number>;
+  /** Every stored message this conversation has held, by `mailKey`, to
+   *  its cursor (0 when this session has not been told one), including
+   *  ones whose lines have since been trimmed off the top. Kept so
+   *  closing can hand them all back — `lines` alone would forget the
+   *  trimmed ones and leave them permanently skipped by later paging. */
+  mailIds: Map<string, number>;
   /** Its private messages are sealed deniably (hxd-ng's
    *  `docs/e2e-messages.md` §3.11), by the user's choice for it. */
   deniable?: boolean;
@@ -197,6 +201,17 @@ export class Cursor {
  *  overnight does not grow without bound. */
 const MAX_LINES = 2000;
 
+/** A stored message as an event or a page names it: `id` is absent when
+ *  nothing was stored. */
+type MailName = { id?: number; ref?: string };
+
+/** What tells one stored message from another: its `ref`, which a merge
+ *  of mailboxes leaves alone where it renumbers cursors, or the cursor
+ *  from a server that sends no `ref`. */
+function mailKey(id: number, ref: string | undefined): string {
+  return ref ?? `#${id}`;
+}
+
 export class Store {
   server: ServerInfo = { name: '', subject: '' };
   self: User | null = null;
@@ -232,6 +247,10 @@ export class Store {
    * `mailExhausted`, below, and not the absence of this.
    */
   oldestMailId?: number;
+  /** How far `msg_read` has been told we have got. Selecting the same
+   *  conversation twice does not ask again, and two marks in flight
+   *  cannot write each other's answers. */
+  readCursor = new Cursor();
   /** True once a page has come back with **no rows at all**. Not "no rows
    *  this client had yet to see": those are different, and conflating
    *  them stops paging early over mail the login flush happened to
@@ -245,10 +264,10 @@ export class Store {
   /** Ids of lines a page carried and this client left out (`skipHistory`). */
   private skippedHistory = new Set<number>();
   /**
-   * Stored message ids this client has already placed. Mail arrives
-   * twice by design — the login flush pushes `msg` events for what is
-   * unread while `inbox` lists the same rows — so both paths check here
-   * first.
+   * Stored messages this client has already placed, by `mailKey`. Mail
+   * arrives twice by design — the login flush pushes `msg` events for
+   * what is unread while `inbox` lists the same rows — so both paths
+   * check here first.
    *
    * Trimming a transcript past `MAX_LINES` deliberately leaves ids here:
    * those messages were shown and scrolled past, and a later page must
@@ -259,7 +278,7 @@ export class Store {
    * conversation keeps its own `mailIds` rather than letting `closePm`
    * read the ids back off lines that trimming may have removed.
    */
-  private seenMail = new Set<number>();
+  private seenMail = new Set<string>();
   /** Every name a PM conversation answers to, mapped to its id. One
    *  conversation may sit under two keys — a uid and a login — which is
    *  what stops the same person appearing twice. */
@@ -283,7 +302,7 @@ export class Store {
       title: 'Lobby',
       lines: [],
       unread: 0,
-      mailIds: new Set(),
+      mailIds: new Map(),
     });
   }
 
@@ -414,7 +433,7 @@ export class Store {
     let c = byLogin ?? byUid ?? byNick;
     if (!c) {
       const id = `pm:${++this.pmSeq}`;
-      c = { id, kind: 'pm', peer: {}, title: who.nick, lines: [], unread: 0, mailIds: new Set() };
+      c = { id, kind: 'pm', peer: {}, title: who.nick, lines: [], unread: 0, mailIds: new Map() };
       this.conversations.set(id, c);
       if (nameless) this.pmIndex.set(nickKey(who.nick), id);
     }
@@ -435,7 +454,7 @@ export class Store {
     into.lines = [...into.lines, ...from.lines].sort((a, b) => a.t - b.t);
     if (into.lines.length > MAX_LINES) into.lines.splice(0, into.lines.length - MAX_LINES);
     into.unread += from.unread;
-    for (const id of from.mailIds) into.mailIds.add(id);
+    for (const [key, id] of from.mailIds) into.mailIds.set(key, id);
     into.peer = { uid: into.peer.uid ?? from.peer.uid, login: into.peer.login ?? from.peer.login };
     into.verified ??= from.verified;
     into.deniable ??= from.deniable;
@@ -454,7 +473,7 @@ export class Store {
     // rather than silently skipping every message it used to hold —
     // `mailIds` rather than `lines`, because trimming removes lines and
     // the ids behind them would otherwise be skipped for ever.
-    for (const mid of this.conversations.get(id)?.mailIds ?? []) this.seenMail.delete(mid);
+    for (const key of this.conversations.get(id)?.mailIds.keys() ?? []) this.seenMail.delete(key);
     this.conversations.delete(id);
     if (this.active === id) this.active = LOBBY;
   }
@@ -463,14 +482,37 @@ export class Store {
    *  seen, and held by the conversation it would have joined where that
    *  is open, so marking that one read marks it read too. None is opened
    *  for it. */
-  skipMail(who: Peer, mail: number): void {
-    this.seenMail.add(mail);
-    this.pmWith(who)?.mailIds.add(mail);
+  skipMail(who: Peer, mail: MailName): void {
+    if (mail.id === undefined) return;
+    const key = mailKey(mail.id, mail.ref);
+    this.seenMail.add(key);
+    this.pmWith(who)?.mailIds.set(key, mail.id);
+  }
+
+  /** A login, not a resume: its mailbox may be numbered anew, by a
+   *  server upgraded since or for another account, so no cursor of the
+   *  last session's holds. What was shown stays known by its `ref`, and a
+   *  page that lists it again gives it this session's (`noteCursor`). */
+  restartMail(): void {
+    this.oldestMailId = undefined;
+    this.mailExhausted = false;
+    this.readCursor = new Cursor();
+    for (const c of this.conversations.values()) {
+      for (const key of c.mailIds.keys()) c.mailIds.set(key, 0);
+    }
+  }
+
+  /** A message already placed, listed under the cursor it has now: a
+   *  merge into a mailbox that had issued cursors numbers what moved
+   *  anew, and `msg_read` takes the new one. */
+  noteCursor(mail: { id: number; ref?: string }): void {
+    const key = mailKey(mail.id, mail.ref);
+    for (const c of this.conversations.values()) if (c.mailIds.has(key)) c.mailIds.set(key, mail.id);
   }
 
   /** Is this stored message already on screen? */
-  hasMail(id: number): boolean {
-    return this.seenMail.has(id);
+  hasMail(mail: MailName): boolean {
+    return mail.id !== undefined && this.seenMail.has(mailKey(mail.id, mail.ref));
   }
 
   /**
@@ -586,8 +628,9 @@ export class Store {
       if (this.seenHistory.has(line.id)) return undefined;
       this.recordHistoryId(line.id);
     } else if (line.id !== undefined) {
-      this.seenMail.add(line.id);
-      c.mailIds.add(line.id);
+      const key = mailKey(line.id, line.ref);
+      this.seenMail.add(key);
+      c.mailIds.set(key, line.id);
     }
     c.lines.push(line);
     if (line.local && line.guid !== undefined && c.peer.login !== undefined) {

@@ -352,12 +352,12 @@ describe('public chat history', () => {
     const s = new Store();
     s.mergeHistory([chat(1, 'history', { id: 7 })], false, 'older');
     expect(s.hasHistory(7)).toBe(true);
-    expect(s.hasMail(7)).toBe(false);
+    expect(s.hasMail({ id: 7 })).toBe(false);
     expect(s.historyExhausted).toBe(true);
 
     const pm = s.openPm({ login: 'alice', nick: 'Alice' });
     s.add(pm.id, chat(2, 'mail', { id: 7 }));
-    expect(s.hasMail(7)).toBe(true);
+    expect(s.hasMail({ id: 7 })).toBe(true);
   });
 });
 

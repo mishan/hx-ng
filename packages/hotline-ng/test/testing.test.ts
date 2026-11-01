@@ -229,9 +229,14 @@ describe('the fake server', () => {
       () => carol.request('msg_read', { up_to: 0.5 }),
       () => carol.request('msg_read', { up_to: -1 }),
       () => carol.inbox({ before: -1 }),
+      () => carol.request('inbox', { before: false }),
+      () => carol.request('inbox', { before: '' }),
     ];
     for (const ask of refused) await expect(ask()).rejects.toMatchObject({ wire: { code: 'bad_request' } });
     expect(await carol.inbox({ before: 1 })).toMatchObject({ messages: [], unread: 1 });
+    // As hxd-ng's optional u64 reads them: 0 is below every cursor, null is none.
+    expect(await carol.inbox({ before: 0 })).toMatchObject({ messages: [] });
+    expect(await carol.request('inbox', { before: null })).toMatchObject({ messages: [{ text: 'two' }] });
     expect(server.mail('bob').map((m) => [m.id, m.text])).toEqual([[1, 'one'], [2, 'three']]);
   });
 

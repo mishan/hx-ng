@@ -45,6 +45,9 @@ export interface Line {
   /** A stored private message's reference, which names it to both
    *  parties. */
   ref?: string;
+  /** A private message from before this login: its `id` is gone until a
+   *  page gives it this session's, and its `from.uid` names nobody now. */
+  stale?: true;
   /** A moderated history row keeps its id and timestamp but no text. */
   deleted?: boolean;
   /** The image this line carried: a handle and the server's own
@@ -505,15 +508,27 @@ export class Store {
         if (key.startsWith('#')) c.mailIds.delete(key);
         else c.mailIds.set(key, 0);
       }
+      if (c.kind !== 'pm') continue;
+      // A report names a message by its cursor, or its sender by uid.
+      for (const line of c.lines) {
+        line.stale = true;
+        delete line.id;
+      }
     }
   }
 
   /** A message already placed, listed under the cursor it has now: a
    *  merge into a mailbox that had issued cursors numbers what moved
    *  anew, and `msg_read` takes the new one. */
-  noteCursor(mail: { id: number; ref?: string }): void {
+  noteCursor(mail: MailName): void {
+    if (mail.id === undefined) return;
     const key = mailKey(mail.id, mail.ref);
-    for (const c of this.conversations.values()) if (c.mailIds.has(key)) c.mailIds.set(key, mail.id);
+    for (const c of this.conversations.values()) {
+      if (!c.mailIds.has(key)) continue;
+      c.mailIds.set(key, mail.id);
+      if (mail.ref === undefined) continue;
+      for (const line of c.lines) if (line.ref === mail.ref) line.id = mail.id;
+    }
   }
 
   /** Is this stored message already on screen? */

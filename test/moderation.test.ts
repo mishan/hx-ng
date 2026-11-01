@@ -54,6 +54,31 @@ describe('naming a person', () => {
   });
 });
 
+describe('reporting a private message across cursors', () => {
+  const me = { uid: 1, nick: 'Me' };
+  const chat = (text: string, over: Partial<Line>): Line => ({ t: 1, kind: 'chat', text, ...over });
+
+  it('reports a message by the cursor it has now, after a merge renumbers it or a fresh login', () => {
+    const s = new Store();
+    const pm = s.openPm({ uid: 5, nick: 'Bob' });
+    s.add(pm.id, chat('stored', { id: 3, ref: 'R', from: { uid: 5, nick: 'Bob' } }));
+    s.add(pm.id, chat('from a guest', { from: { uid: 6, nick: 'Guest' } }));
+    const [stored, guest] = pm.lines;
+    s.noteCursor({ id: 12, ref: 'R' });
+    expect(lineReport(stored!, pm, me)).toEqual({ msg: 12 });
+
+    // Another session's cursor and uid may name someone else now.
+    s.restartMail();
+    expect(lineReport(stored!, pm, me)).toBeNull();
+    expect(lineReport(guest!, pm, me)).toBeNull();
+    s.noteCursor({ id: 2, ref: 'R' });
+    expect(lineReport(stored!, pm, me)).toEqual({ msg: 2 });
+
+    s.add(pm.id, chat('from a guest now', { from: { uid: 6, nick: 'Guest' } }));
+    expect(lineReport(pm.lines.at(-1)!, pm, me)).toEqual({ user: { uid: 6 }, evidence: 'from a guest now' });
+  });
+});
+
 describe('what reporting a line names', () => {
   const s = new Store();
   const lobby = s.conversation(LOBBY)!;

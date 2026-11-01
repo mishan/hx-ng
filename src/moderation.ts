@@ -116,7 +116,7 @@ export function lineReport(
   // or somebody else. A login outlives them.
   const who: PersonRef | null = from?.login
     ? { login: from.login }
-    : from?.uid !== undefined && from.uid > 0 && here(from.uid)
+    : from?.uid !== undefined && from.uid > 0 && !line.stale && here(from.uid)
       ? { uid: from.uid }
       : null;
   return who ? { user: who, evidence: line.text } : null;

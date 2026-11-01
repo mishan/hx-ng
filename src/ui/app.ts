@@ -1236,7 +1236,7 @@ export class App {
       // would make a week-old message read as having just arrived.
       // The login flush and an `inbox` page carry the same rows, and
       // which arrives first is a race. Whichever loses is dropped here.
-      if (this.store.hasMail(d)) return;
+      if (this.store.hasMail(d)) return this.store.noteCursor(d);
       this.checkClock(d.at, d.queued);
       // Read before it is shown, in its place among the lines, as a chat
       // line is; a sealed one opened there too.
@@ -1251,7 +1251,7 @@ export class App {
       this.inOrder(async () => {
         const opened = await read;
         if (messages !== this.messages) return void (opened && messages.unshown(opened).catch(() => {}));
-        if (this.store.hasMail(d)) return;
+        if (this.store.hasMail(d)) return this.store.noteCursor(d);
         if (!opened) {
           const conv = this.store.openPm({ uid: d.from.uid, login: d.from.login, nick: d.from.nick });
           this.push(conv.id, {
@@ -2482,7 +2482,11 @@ export class App {
     const login = d.from.login;
     const ack = () => void conn?.receipt(login, d.guid).catch(() => {});
     const key = `${login.toLowerCase()} ${d.guid}`;
-    if (this.imSeen.has(key) || this.store.hasMail(d)) return ack();
+    if (this.imSeen.has(key)) return ack();
+    if (this.store.hasMail(d)) {
+      this.store.noteCursor(d);
+      return ack();
+    }
     this.imSeen.add(key);
     if (d.approval) this.friends.noteApproval(login);
     this.checkClock(d.at, d.queued);

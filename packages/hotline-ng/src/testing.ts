@@ -767,9 +767,11 @@ export class FakeServer {
     if (!s.mailbox) throw refuse('no_inbox', 'This account has no inbox.');
     const limit = p.limit ?? 50;
     if (!Number.isInteger(limit) || limit < 1 || limit > 200) throw refuse('bad_request', 'limit is 1 to 200.');
-    if (p.before) this.issued(s, p.before);
+    // Omitted or null is no bound, as hxd-ng's `Option<u64>` reads it.
+    const before = p.before ?? undefined;
+    if (before !== undefined) this.issued(s, before);
     const messages = this.mailOf(s)
-      .filter((m) => !p.before || m.id < p.before)
+      .filter((m) => before === undefined || m.id < before)
       .reverse()
       .slice(0, limit)
       .map(({ id, ref, from, text, at, read }): StoredMessage => ({ id, ref, from, text, at, read }));

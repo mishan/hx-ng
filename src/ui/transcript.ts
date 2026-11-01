@@ -150,7 +150,7 @@ function actions(line: Line, conv: Conversation, store: Store, opts: TranscriptO
   const reply = opts.replyable?.(line) === true;
   const redact =
     !!opts.moderator &&
-    conv.kind === 'lobby' &&
+    conv.kind !== 'pm' &&
     line.id !== undefined &&
     !line.deleted &&
     (line.kind === 'chat' || line.kind === 'action');
@@ -252,7 +252,7 @@ function quoteOf(line: Line, opts: TranscriptOptions): HTMLElement | null {
   if (!q) return null;
   if (q.state !== 'found') {
     const text = q.state === 'pending' ? 'Replying to an earlier message…' : 'Original message unavailable';
-    return h('div', { class: 'quote muted', dataset: q.state === 'pending' ? { pending: String(q.id) } : {} }, text);
+    return h('div', { class: 'quote muted', dataset: q.state === 'pending' ? { pending: String(q.id), room: String(q.room) } : {} }, text);
   }
   const label = `Replying to ${q.nick}: ${q.excerpt}`;
   // A nick in its own direction, so a right-to-left one cannot reorder

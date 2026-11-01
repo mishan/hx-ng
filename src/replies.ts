@@ -5,7 +5,7 @@
 
 import { WireFailure, type HistoryLine, type HistoryOk, type ReplyKind, type ReplyTarget } from '@hotline-ng/client';
 
-import type { ConvId, Conversation, Line } from './state';
+import { roomOf, type ConvId, type Conversation, type Line } from './state';
 
 /** How much of the answered text a quote shows. */
 export const EXCERPT_CHARS = 120;
@@ -35,7 +35,8 @@ export interface Replying {
  *  seen, in another room or of a kind it cannot look up. */
 export type Quote =
   | { state: 'found'; nick: string; excerpt: string; line?: Line }
-  | { state: 'pending'; id: number }
+  /** A line of `room` still to fetch, from that room's own log. */
+  | { state: 'pending'; id: number; room: number }
   | { state: 'missing' };
 
 /** Plain text on one line, cut at `max` characters. */
@@ -55,7 +56,10 @@ function said(line: { text: string; media?: unknown }): string {
  *  keeps that kind. */
 export function replyTarget(line: Line, conv: Conversation, targets: readonly ReplyKind[]): ReplyTarget | null {
   if ((line.kind !== 'chat' && line.kind !== 'action') || line.deleted || line.hidden) return null;
-  if (conv.kind === 'lobby') return line.id !== undefined && targets.includes('line') ? { line: line.id } : null;
+  if (conv.kind !== 'pm') {
+    const room = roomOf(conv);
+    return line.id !== undefined && targets.includes('line') ? { line: line.id, ...(room ? { room } : {}) } : null;
+  }
   // One this client sent has a guid whether it went as an instant
   // message or not, so its own are named by reference alone.
   if (!line.local && line.guid !== undefined && line.from?.login && targets.includes('im')) {
@@ -75,24 +79,23 @@ const sameLogin = (a: string | undefined | null, b: string): boolean => !!a && a
 
 /**
  * The quote for a line carrying `re`, from what this client holds:
- * `conv`'s own lines for a message, the lobby's and those fetched for a
- * line. Never across conversations: a reference to another pair's
- * message shows nothing, as the server meant it to.
+ * `conv`'s own lines, and for a line those fetched from its room. Never
+ * across conversations: a reference to another pair's message, or a
+ * line of another room, shows nothing, as the server meant it to.
  */
 export function resolveQuote(
   re: ReplyTarget,
   conv: Conversation,
-  o: { lobby: Conversation; fetched: ReadonlyMap<number, HistoryLine | null>; me: string | null },
+  o: { fetched: ReadonlyMap<number, HistoryLine | null>; me: string | null },
 ): Quote {
   const found = (line: Line | undefined): Quote =>
     !line || line.deleted || line.hidden ? { state: 'missing' } : { state: 'found', nick: line.local ? 'you' : (line.from?.nick ?? ''), excerpt: said(line), line };
   if ('line' in re) {
-    // This client joins no room, so a room's line is never one it holds.
-    if (conv.kind !== 'lobby' || re.room) return { state: 'missing' };
-    const held = o.lobby.lines.find((l) => l.id === re.line);
+    if (conv.kind === 'pm' || (re.room ?? 0) !== roomOf(conv)) return { state: 'missing' };
+    const held = conv.lines.find((l) => l.id === re.line);
     if (held) return found(held);
     const fetched = o.fetched.get(re.line);
-    if (fetched === undefined) return { state: 'pending', id: re.line };
+    if (fetched === undefined) return { state: 'pending', id: re.line, room: re.room ?? 0 };
     return !fetched || fetched.deleted ? { state: 'missing' } : { state: 'found', nick: fetched.from.nick ?? '', excerpt: said(fetched) };
   }
   if (conv.kind !== 'pm') return { state: 'missing' };

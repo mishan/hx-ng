@@ -135,6 +135,12 @@ export interface ServerOptions {
  *  guest-only, unattested identity server — enough to exercise enrollment
  *  and login without also needing a registrar or an existing account. */
 export async function startServer(ngPort: number, opts: ServerOptions = {}): Promise<RunningServer> {
+  const httpBase = `http://127.0.0.1:${ngPort}`;
+  // A server a killed run left behind would answer the wait below in
+  // this one's place, with none of its accounts.
+  if (await fetch(`${httpBase}/.well-known/hotline`).then(() => true, () => false)) {
+    throw new Error(`${httpBase} is already answering: a server from an earlier run still holds the port`);
+  }
   const dir = mkdtempSync(join(tmpdir(), 'hxd-ng-e2e-'));
   for (const [path, body] of Object.entries(opts.files ?? {})) {
     mkdirSync(dirname(join(dir, path)), { recursive: true });
@@ -165,8 +171,8 @@ ${opts.sections ?? IDENTITY_SECTIONS}`,
     if (code !== null && code !== 0) console.error(`hxd exited ${code}:\n${log}`);
   });
 
-  const httpBase = `http://127.0.0.1:${ngPort}`;
   await waitForPort(`${httpBase}/.well-known/hotline`, 10_000);
+  if (proc.exitCode !== null) throw new Error(`hxd exited ${proc.exitCode}:\n${log}`);
   for (const [login, toml] of Object.entries(opts.accounts ?? {})) {
     writeFileSync(join(dir, 'accounts', `${login}.toml`), toml);
   }

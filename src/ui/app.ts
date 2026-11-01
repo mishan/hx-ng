@@ -27,6 +27,7 @@ import {
   CAP_FRIENDSHIPS,
   CAP_HISTORY,
   CAP_INBOX,
+  CAP_ROOMS,
   CAP_SIGNED,
   BAD_SIGNATURE,
   CERT_CHANGED,
@@ -59,6 +60,8 @@ import {
   type PersonRef,
   type RemoteVideo,
   type ReportParams,
+  type Room,
+  type RoomPartReason,
   type User,
   type VideoKind,
 } from '@hotline-ng/client';
@@ -73,6 +76,9 @@ import {
   messageAddress,
   Claims,
   LOBBY,
+  publicId,
+  roomOf,
+  routePublic,
   type Conversation,
   type ConvId,
   type Line,
@@ -214,6 +220,24 @@ function pendingFromUrl(): PendingOpen | null {
 
 const HISTORY_REFUSALS = new Set(['not_available', 'access_denied', 'bad_request']);
 
+/** A room's history refusals that stand for that room: it is gone, or
+ *  wants a connection this one is not. */
+const ROOM_REFUSALS = new Set(['no_such_room', 'encryption_required']);
+
+/** How long to wait before asking again after `e`, or `null` for a
+ *  failure that is not a rate limit. */
+function rateLimitWait(e: unknown): number | null {
+  if (!(e instanceof WireFailure) || e.wire.code !== RATE_LIMITED) return null;
+  return (e.wire.retry_after ?? 1) * 1000;
+}
+
+/** Why the server parted this session from a room, as the room is told. */
+const PARTED: Record<RoomPartReason, string> = {
+  access: 'your account may no longer read it',
+  archived: 'it was archived',
+  insecure: 'it now admits encrypted connections only',
+};
+
 const THEME_KEY = 'hxd-ng.theme';
 const SELF_VIEW_KEY = 'hxd-ng.selfview';
 const MARKDOWN_KEY = 'hxd-ng.markdown';
@@ -288,7 +312,8 @@ export class App {
    *  two sessions writing into one page. */
   private connecting = false;
   private sessionStore = sessionStore();
-  private historyLoading = false;
+  /** The public conversations a page of history is being fetched for. */
+  private historyLoading = new Set<ConvId>();
   /** A server that refuses `history` refuses it for the whole session.
    *  The cap is echoed whether or not this account may read the log
    *  (hxd-ng's `docs/chat-history.md` §5), so an account without the
@@ -319,16 +344,23 @@ export class App {
   private replying: Replying | null = null;
   private replyChip = h('div', { class: 'attach-chip reply-chip', role: 'status', hidden: true });
   /** The lines quotes name that this client does not hold, fetched for
-   *  this connection. */
-  private quotes = new QuoteFetcher(async () => ({ lines: [], has_more: false }), () => {});
+   *  this connection, a fetcher for each room, since `history` takes one
+   *  room's ids at a time. */
+  private quotes = new Map<number, QuoteFetcher>();
   /** Quotes waiting on a line, fetched once they come on screen. */
   private quotesSeen = new IntersectionObserver((seen) => {
     for (const e of seen) {
       if (!e.isIntersecting) continue;
       this.quotesSeen.unobserve(e.target);
-      this.quotes.want(Number((e.target as HTMLElement).dataset.pending));
+      const { pending, room } = (e.target as HTMLElement).dataset;
+      this.quotesFor(Number(room)).want(Number(pending));
     }
   });
+  /** The rooms a session that could not resume was in, joined again
+   *  once the login after it has listed them (chat-rooms.md §2.3). */
+  private rejoin: number[] = [];
+  /** The active room's name, topic and the way in or out. */
+  private roomBar = h('div', { class: 'room-bar', hidden: true });
   /** Bumped by anything that abandons an attachment. An upload that was
    *  already in flight lands afterwards and must not resurrect the chip
    *  or become the image on the next line — the user has removed it,
@@ -423,7 +455,9 @@ export class App {
     ariaLabel: 'Message',
     spellcheck: true,
   });
-  private composerHint = h('span', { class: 'composer-hint' });
+  private composerHint = h('span', { class: 'composer-hint', id: 'composer-hint' });
+  /** Why nothing can be sent here, whole, which the hint says in a word. */
+  private composerWhy = h('span', { id: 'composer-why', hidden: true });
   /** This conversation's sealed messages go deniably, or signed. */
   private deniableBtn = h('button', { type: 'button', class: 'ghost deniable-switch', hidden: true }, 'deniable');
   /** This conversation's fingerprint, compared or not, and the way to
@@ -777,7 +811,7 @@ export class App {
       onTrace: (e) => this.debug.push(e),
       onState: (s, detail) => this.onState(s, detail),
       onModuleFailed: () => this.checkForUpdate(true),
-      onLogin: (ok) => {
+      onLogin: (ok, replaced) => {
         this.store.server = ok.server;
         this.store.forgetPmUids();
         this.store.restartMail();
@@ -810,6 +844,15 @@ export class App {
         // it asks, so this is a provisional yes that the first `inbox`
         // call confirms or withdraws.
         this.store.mail = ok.inbox ?? null;
+        // A fresh session is in no room; the rooms the last one was in
+        // are joined again once this one has asked for the listing.
+        this.rejoin = [...new Set([...replaced.rooms, ...this.store.rooms().filter((c) => c.joined).map(roomOf)])];
+        for (const c of this.store.rooms()) {
+          c.joined = false;
+          c.members = undefined;
+        }
+        this.store.setRooms(ok.rooms?.list ?? []);
+        if (started && conn instanceof Connection) void this.loadRooms(conn);
         if (this.media) this.media.limits = ok.video ?? null;
         if (ok.server.agreement) {
           this.store.add(LOBBY, {
@@ -819,10 +862,15 @@ export class App {
           });
         }
       },
-      onSnapshot: ({ self, users, server, stale }) => {
+      onSnapshot: ({ self, users, server, rooms, stale }) => {
         this.store.self = self;
         this.store.server = server;
         this.store.replaceRoster(users);
+        if (rooms) {
+          this.store.setRooms(rooms.list);
+          const joined = new Set(rooms.joined.map((r) => r.id));
+          for (const c of this.store.rooms()) c.joined = joined.has(roomOf(c));
+        }
         if (!stale) this.certs.clear();
         this.sealedRows.clear();
         for (const u of users) this.noteSealed(u);
@@ -884,13 +932,14 @@ export class App {
         if (conn !== this.conn) return;
         await (await this.openPortable(conn, way.url))?.presentWithdrawals();
       },
-      onMissedHistory: (ok) => {
-        void this.historyLines(ok).then((lines) => {
+      onMissedHistory: (ok, room) => {
+        const id = publicId(room);
+        void this.historyLines(ok, room).then((lines) => {
           if (!lines) return;
-          if (this.store.mergeHistory(lines, ok.has_more, 'newer') && this.store.active === LOBBY) {
+          if (this.store.mergeHistory(lines, ok.has_more, 'newer', id) && this.store.active === id) {
             this.renderTranscript();
           }
-          this.blank([...this.redacted]);
+          this.blank([...this.redacted], id);
         });
       },
       onEnded: (reason) => {
@@ -994,13 +1043,8 @@ export class App {
     // receipt it was still sending may have been owed again since.
     this.dropOwed();
     this.conn = conn;
-    this.quotes.close();
-    this.quotes = new QuoteFetcher(
-      (ids) => conn.history({ ids }),
-      () => {
-        if (conn === this.conn && this.store.active === LOBBY) keepingPlace(this.transcript, () => this.renderTranscript());
-      },
-    );
+    for (const q of this.quotes.values()) q.close();
+    this.quotes.clear();
     this.cancelReply();
     this.images.attach(conn);
     avatars.attach(conn);
@@ -1069,6 +1113,7 @@ export class App {
         this.say(e instanceof WireFailure ? errorText(e.wire) : e.message),
       );
     }
+    if (conn instanceof Connection) void this.loadRooms(conn);
     if (this.pingTimer !== null) clearInterval(this.pingTimer);
     this.pingTimer = window.setInterval(() => {
       if (conn.state === 'online') void conn.ping().then(() => this.renderPill());
@@ -1197,10 +1242,12 @@ export class App {
       const text = `${gone?.nick ?? `uid ${d.uid}`} left.`;
       this.inOrder(() => this.push(LOBBY, { t: Date.now(), kind: 'notice', text }));
       this.renderRoster();
+      this.renderRoomBar();
     });
 
     conn.on('chat', (d) => {
-      if (d.id !== undefined && this.store.hasHistory(d.id)) return;
+      const conv = d.room ? this.store.memberOf(d.room).id : LOBBY;
+      if (d.id !== undefined && this.store.hasHistory(d.id, conv)) return;
       // `at` is required by the current wire, but pre-history servers
       // did not send it. Keep those servers usable while deployments
       // roll forward.
@@ -1214,7 +1261,7 @@ export class App {
       this.inOrder(async () => {
         const { signature, duplicate } = await read;
         if (duplicate || lines !== this.lines) return;
-        this.push(LOBBY, {
+        this.push(conv, {
           t: at * 1000,
           kind: styleToKind(d.style),
           from: d.from,
@@ -1225,7 +1272,7 @@ export class App {
           ...(d.signed !== undefined ? { signed: d.signed } : {}),
           ...(d.re ? { re: d.re } : {}),
         });
-        if (d.id !== undefined && this.redacted.has(d.id)) this.blank([d.id]);
+        if (d.id !== undefined && this.redacted.has(d.id)) this.blank([d.id], conv);
       });
     });
 
@@ -1241,8 +1288,8 @@ export class App {
     // go of any image it carried. The reader stays where they were.
     conn.on('chat_redacted', (d) => {
       this.redacted.add(d.id);
-      this.quotes.redacted(d.id);
-      this.inOrder(() => this.blank([d.id]));
+      this.quotesFor(d.room ?? 0).redacted(d.id);
+      this.inOrder(() => this.blank([d.id], publicId(d.room)));
     });
 
     // A purge of a flood, told as one event for many lines rather than
@@ -1250,9 +1297,9 @@ export class App {
     conn.on('chat_purged', (d) => {
       for (const id of d.ids) {
         this.redacted.add(id);
-        this.quotes.redacted(id);
+        this.quotesFor(d.room ?? 0).redacted(id);
       }
-      this.inOrder(() => this.blank(d.ids));
+      this.inOrder(() => this.blank(d.ids, publicId(d.room)));
     });
 
     conn.on('report', (d) => this.moderation.onReport(d));
@@ -1384,7 +1431,8 @@ export class App {
     conn.on('news_notify', (d) => this.onNewsNotify(d));
 
     conn.on('notice', (d) => {
-      this.push(LOBBY, { t: Date.now(), kind: 'notice', text: d.text });
+      const { conv, line } = routePublic(this.store, { ev: 'notice', data: d });
+      this.push(conv.id, line);
     });
 
     conn.on('broadcast', (d) => {
@@ -1392,9 +1440,51 @@ export class App {
     });
 
     conn.on('subject', (d) => {
-      this.store.server = { ...this.store.server, subject: d.subject };
-      this.renderTopbar();
-      this.push(LOBBY, { t: Date.now(), kind: 'notice', text: `Subject: ${d.subject}` });
+      const { conv, line } = routePublic(this.store, { ev: 'subject', data: d });
+      if (conv.kind === 'lobby') this.renderTopbar();
+      else this.renderRoomBar();
+      this.push(conv.id, line);
+    });
+
+    // Rooms (hxd-ng's docs/chat-rooms.md §7.3), heard once `loadRooms`
+    // has asked for them.
+    conn.on('room_added', (d) => this.onRoom(d.room));
+    conn.on('room_changed', (d) => this.onRoom(d.room));
+    conn.on('room_removed', (d) => {
+      const c = this.store.conversation(publicId(d.room));
+      if (!c) return;
+      this.dropReply(c);
+      // Said where it outlives the room's own transcript.
+      if (c.joined || this.store.active === c.id) {
+        this.push(LOBBY, { t: Date.now(), kind: 'system', local: true, text: `${c.title} is gone: it was archived, or your account may no longer see it.` });
+      }
+      this.store.removeRoom(d.room);
+      this.renderRail();
+      this.renderRoomBar();
+      this.renderTranscript();
+      this.renderComposerHint();
+    });
+    conn.on('room_member_joined', (d) => {
+      const c = this.store.conversation(publicId(d.room));
+      if (!c?.members) return;
+      c.members.add(d.user.uid);
+      this.renderRoomBar();
+      // Comings and goings are no reason for a badge.
+      this.push(c.id, { t: Date.now(), kind: 'notice', text: `${d.user.nick} joined ${c.title}.` }, false);
+    });
+    conn.on('room_member_parted', (d) => {
+      const c = this.store.conversation(publicId(d.room));
+      if (!c?.room) return;
+      if (d.uid !== this.store.self?.uid) {
+        c.members?.delete(d.uid);
+        this.renderRoomBar();
+        return this.push(c.id, { t: Date.now(), kind: 'notice', text: `${this.store.nickOf(d.uid)} left ${c.title}.` }, false);
+      }
+      c.joined = false;
+      c.members = undefined;
+      this.dropReply(c);
+      this.push(c.id, { t: Date.now(), kind: 'system', local: true, text: `You were removed from ${c.title}${d.reason ? `: ${PARTED[d.reason]}` : ''}.` });
+      this.renderRoom(c);
     });
 
     conn.on('kicked', () => {
@@ -1467,6 +1557,14 @@ export class App {
     this.clearAttachment();
 
     const conv = this.store.conversation(this.store.active);
+    // Before the reply is taken, which would otherwise say it went
+    // without one for a reason that is not this one.
+    const cannot = conv && this.whyNoPost(conv);
+    if (cannot) {
+      this.restoreAttachment(attached);
+      this.restoreComposer(text, 'normal');
+      return this.say(cannot);
+    }
     const reply = conv ? this.takeReply(conv) : undefined;
     const re = reply?.re;
     if (conv?.kind === 'pm') {
@@ -1528,7 +1626,7 @@ export class App {
     }
     // Public chat echoes, so the sender's own copy comes back off the
     // wire with the image on it; nothing is pushed locally here.
-    await this.sendChat(text, 'normal', attached?.media.id, re).catch((e: unknown) => {
+    await this.sendChat(text, 'normal', attached?.media.id, re, conv ? roomOf(conv) : 0).catch((e: unknown) => {
       this.restoreAttachment(attached);
       this.restoreReply(reply);
       throw e;
@@ -1541,7 +1639,20 @@ export class App {
   private mayReply(conv: Conversation): boolean {
     const conn = this.conn;
     if (!(conn instanceof Connection) || !conn.replies) return false;
+    // A room's lines go unsigned whatever the lobby's do.
+    if (conv.kind === 'room') return this.whyNoPost(conv) === null;
     return conv.kind === 'lobby' ? !this.signLobby : this.pmSigning !== 'always' && !(this.sealPms && conn.sealing);
+  }
+
+  /** Why nothing can be sent in this room, or `null` where it can, or
+   *  for anything but a room. */
+  private whyNoPost(conv: Conversation): string | null {
+    const room = conv.room;
+    if (!room) return null;
+    if (!conv.joined) return `Join ${conv.title} to talk here.`;
+    if (!room.may_post) return `${conv.title} is read-only: you may read it but not post here.`;
+    if (room.signed) return `${conv.title} takes signed lines only, which this client does not sign in rooms yet.`;
+    return null;
   }
 
   private reply(line: Line, conv: Conversation): void {
@@ -1570,6 +1681,11 @@ export class App {
     this.showReply();
   }
 
+  /** A reply aimed at `conv`, which can no longer take it. */
+  private dropReply(conv: Conversation): void {
+    if (this.replying?.conv === conv.id) this.cancelReply();
+  }
+
   /** The reply a send to `conv` carries, taken off the composer; none
    *  where one is no longer offered, which is said. */
   private takeReply(conv: Conversation): Replying | undefined {
@@ -1588,25 +1704,42 @@ export class App {
     this.showReply();
   }
 
-  private quoteSources(): Parameters<typeof resolveQuote>[2] {
-    return { lobby: this.store.conversation(LOBBY)!, fetched: this.quotes.lines, me: this.store.me() };
+  private quoteSources(conv: Conversation): Parameters<typeof resolveQuote>[2] {
+    return { fetched: this.quotesFor(roomOf(conv)).lines, me: this.store.me() };
   }
 
-  /** A lobby line, with a `guid` where the server honors one, and signed
-   *  where this user signs the lobby and the server carries it. */
-  private async sendChat(text: string, style: ChatStyle, media?: string, re?: Replying['re']): Promise<void> {
+  /** The fetcher of a room's quoted lines, for this connection. */
+  private quotesFor(room: number): QuoteFetcher {
+    let q = this.quotes.get(room);
+    if (q) return q;
+    const conn = this.conn;
+    q = new QuoteFetcher(
+      async (ids) => (conn ? conn.history({ ids, ...(room ? { room } : {}) }) : { lines: [], has_more: false }),
+      () => {
+        if (conn === this.conn && this.store.active === publicId(room)) keepingPlace(this.transcript, () => this.renderTranscript());
+      },
+    );
+    this.quotes.set(room, q);
+    return q;
+  }
+
+  /** A line in the lobby or a room, with a `guid` where the server
+   *  honors one, and in the lobby, signed where this user signs it and
+   *  the server carries it. */
+  private async sendChat(text: string, style: ChatStyle, media?: string, re?: Replying['re'], room = 0): Promise<void> {
     const conn = this.conn;
     if (!conn) return;
     if (!(conn instanceof Connection)) {
       await (style === 'action' ? conn.request('chat', { text, style }) : conn.chat({ text, media }));
       return;
     }
-    const params = { text, style, media };
+    const params = { text, style, media, ...(room ? { room } : {}) };
     // Only an unsigned line says what it answers: beside `signed`, `re`
     // is refused.
     const unsigned = { ...params, ...(conn.hasCap(CAP_CHAT_GUID) ? { guid: newGuid() } : {}), ...(re ? { re } : {}) };
-    // A media-only line has no text to sign, and goes as it is.
-    if (!text) return void (await conn.chat(unsigned));
+    // A media-only line has no text to sign, and goes as it is; so does
+    // a room's, which `signs` says nothing about.
+    if (!text || room) return void (await conn.chat(unsigned));
     const restore = () => this.restoreComposer(text, style);
     if (!this.signLobby) return void (await this.sendUnsigned(conn, 'lobby', { unsigned: () => conn.chat(unsigned), restore }));
     const id = crypto.getRandomValues(new Uint8Array(16));
@@ -2126,12 +2259,12 @@ export class App {
     this.shown = this.shown.then(fn).catch((e: unknown) => this.say(`A line could not be shown: ${this.problem(e)}`));
   }
 
-  /** Blank lines a moderator redacted, those held among them. */
-  private blank(ids: readonly number[]): void {
-    const done = this.store.redactAll(ids);
+  /** Blank lines a moderator redacted, those `conv` holds among them. */
+  private blank(ids: readonly number[], conv: ConvId = LOBBY): void {
+    const done = this.store.redactAll(ids, conv);
     if (!done.blanked) return;
     for (const handle of done.handles) this.images.revoke(handle);
-    if (this.store.active === LOBBY) keepingPlace(this.transcript, () => this.renderTranscript());
+    if (this.store.active === conv) keepingPlace(this.transcript, () => this.renderTranscript());
   }
 
   /** Why what is sent in `scope` goes unsigned with signing on there,
@@ -2215,9 +2348,13 @@ export class App {
     const [word, ...rest] = raw.slice(1).split(' ');
     const arg = rest.join(' ');
     switch ((word ?? '').toLowerCase()) {
-      case 'me':
-        if (arg) await this.sendChat(arg, 'action');
+      case 'me': {
+        const conv = this.store.conversation(this.store.active);
+        const cannot = conv && this.whyNoPost(conv);
+        if (cannot) return this.say(cannot);
+        if (arg) await this.sendChat(arg, 'action', undefined, undefined, conv ? roomOf(conv) : 0);
         return;
+      }
       case 'msg': {
         const [who, ...words] = rest;
         if (!who) return this.say('Usage: /msg <nick or account> <text>');
@@ -2244,9 +2381,9 @@ export class App {
       case 'history':
         if (!conn.hasCap(CAP_HISTORY)) return this.say('This server does not keep chat history.');
         if (this.historyRefused) return this.say('This server will not show you its chat history.');
-        if (this.store.active !== LOBBY) return this.say('Chat history belongs to the lobby.');
-        if (this.store.historyExhausted) return this.say('That is the beginning of the conversation.');
-        await this.loadHistory();
+        if (!this.store.log(this.store.active)) return this.say('Chat history belongs to the lobby and the rooms.');
+        if (this.store.log(this.store.active)!.exhausted) return this.say('That is the beginning of the conversation.');
+        await this.loadHistory({ conv: this.store.active });
         return;
 
       // Blocking is account-level and outlives any session, which is why
@@ -2435,9 +2572,16 @@ export class App {
     else this.seen(conv);
     this.noteTyping();
     this.renderRail();
+    this.renderRoomBar();
     this.renderTranscript();
     this.renderComposerHint();
-    this.composer.focus();
+    // A room not joined is read from its history, which it needs no
+    // joining to page, brought up to date each time it is shown.
+    if (conv.kind === 'room' && (!conv.joined || !conv.lines.length)) {
+      void this.loadHistory({ initial: true, conv: id }).catch((e: unknown) => this.say(this.problem(e)));
+    }
+    if (conv.kind === 'room' && !conv.joined) this.roomBar.querySelector<HTMLElement>('.room-join')?.focus();
+    else this.composer.focus();
   }
 
   /** The reader is looking at this conversation now: its badge goes, and
@@ -2453,6 +2597,100 @@ export class App {
     this.markRead(conv).catch((e: Error) =>
       this.say(e instanceof WireFailure ? errorText(e.wire) : e.message),
     );
+  }
+
+  // --- rooms (hxd-ng's docs/chat-rooms.md) -------------------------------
+
+  /** Ask for the rooms, which is also what has the server tell this
+   *  session of them from now on (§7), then join again those a login in
+   *  place of a resume left, and join once more those a resume kept,
+   *  which answers who is in them; asked again later when rate limited. */
+  private async loadRooms(conn: Connection): Promise<void> {
+    if (!conn.hasCap(CAP_ROOMS)) return;
+    let list: Room[];
+    try {
+      list = (await conn.rooms()).list;
+    } catch (e) {
+      const wait = rateLimitWait(e);
+      if (wait !== null) window.setTimeout(() => conn === this.conn && void this.loadRooms(conn), wait);
+      else if (conn === this.conn) this.say(`The rooms could not be listed: ${this.problem(e)}`);
+      return;
+    }
+    if (conn !== this.conn) return;
+    this.store.setRooms(list);
+    const again = new Set([...this.rejoin, ...conn.roomHistoryIds.keys()]);
+    this.rejoin = [];
+    this.renderRail();
+    for (const id of again) {
+      if (this.store.conversation(publicId(id))) await this.joinRoom(id).catch((e: unknown) => this.say(this.problem(e)));
+    }
+  }
+
+  private async joinRoom(room: number): Promise<void> {
+    const conn = this.conn;
+    if (!(conn instanceof Connection)) return;
+    const ok = await conn.roomJoin(room);
+    const c = this.store.conversation(publicId(room));
+    if (conn !== this.conn || !c?.room) return;
+    c.joined = true;
+    c.members = new Set(ok.members);
+    c.room = { ...c.room, topic: ok.topic, may_post: ok.may_post, ...(ok.signed ? { signed: true } : {}) };
+    this.renderRoom(c);
+    // What was said since a preview was paged, or since it was last
+    // joined, ahead of what is heard from here on.
+    void this.loadHistory({ initial: true, conv: c.id }).catch((e: unknown) => this.say(this.problem(e)));
+  }
+
+  private async partRoom(room: number): Promise<void> {
+    const conn = this.conn;
+    if (!(conn instanceof Connection)) return;
+    await conn.roomPart(room);
+    const c = this.store.conversation(publicId(room));
+    if (conn !== this.conn || !c?.room) return;
+    c.joined = false;
+    c.members = undefined;
+    this.dropReply(c);
+    this.renderRoom(c);
+  }
+
+  /** A room shown, or shown again changed. */
+  private onRoom(room: Room): void {
+    this.renderRoom(this.store.putRoom(room));
+  }
+
+  /** A room's membership or what it lets this session do changed: where
+   *  it is on screen, so did its box and which lines offer a reply. */
+  private renderRoom(c: Conversation): void {
+    this.renderRail();
+    if (this.store.active !== c.id) return;
+    this.renderRoomBar();
+    this.renderComposerHint();
+    keepingPlace(this.transcript, () => this.renderTranscript());
+  }
+
+  private renderRoomBar(): void {
+    const conv = this.store.conversation(this.store.active);
+    const room = conv?.room;
+    this.roomBar.hidden = !room;
+    if (!conv || !room) return;
+    // The button is drawn anew, Join for Leave: one that had the focus
+    // hands it on rather than dropping it to the page.
+    const focused = this.roomBar.contains(document.activeElement);
+    const act = h(
+      'button',
+      { type: 'button', class: `ghost small ${conv.joined ? 'room-leave' : 'room-join'}` },
+      conv.joined ? `Leave ${conv.title}` : `Join ${conv.title}`,
+    );
+    act.onclick = () => void (conv.joined ? this.partRoom(room.id) : this.joinRoom(room.id)).catch((e: unknown) => this.say(this.problem(e)));
+    fill(
+      this.roomBar,
+      h('h2', { class: 'room-name' }, conv.title),
+      room.topic ? h('span', { class: 'room-topic' }, room.topic) : null,
+      h('span', { class: 'room-members' }, `${conv.members?.size ?? room.members} here`),
+      room.secure ? h('span', { class: 'rail-tag', title: 'Only encrypted connections may join or read it' }, 'secure') : null,
+      act,
+    );
+    if (focused) act.focus();
   }
 
   private closeConversation(id: ConvId): void {
@@ -2759,12 +2997,12 @@ export class App {
     const who = signedName(line.signature, line.from?.nick ?? '').name || 'someone';
     const pasted = 'user' in target && target.user !== undefined;
     const reason = await this.reportReason(
-      `Report ${who}’s ${conv.kind === 'lobby' ? 'line' : 'message'}`,
+      `Report ${who}’s ${conv.kind !== 'pm' ? 'line' : 'message'}`,
       line.sealed && line.signed === undefined
         ? 'It was sealed deniably, so it carries no signature: the words go with your report as your account of them, and the moderators cannot check that they were sent.'
         : pasted
           ? 'The server kept no copy of it, so the words go with your report as your account of them.'
-          : conv.kind === 'lobby'
+          : conv.kind !== 'pm'
             ? 'The moderators are shown the line.'
             : 'The moderators are shown the message: reporting it is you choosing to show them.',
     );
@@ -2913,15 +3151,15 @@ export class App {
 
   /** A page of history as lines, each signature read and a copy of a
    *  signed line already here left out. */
-  private async historyLines(ok: HistoryOk): Promise<Line[] | null> {
+  private async historyLines(ok: HistoryOk, room = 0): Promise<Line[] | null> {
     const lines = this.lines;
     const reads = await Promise.all(
-      ok.lines.map((line) => (line.deleted ? null : lines.history(line).catch(() => unreadable(line.signed)))),
+      ok.lines.map((line) => (line.deleted ? null : lines.history(line, room).catch(() => unreadable(line.signed)))),
     );
     // Read for a session since replaced: its page is not this one's.
     if (lines !== this.lines) return null;
     // Paging still moves past what is left out.
-    this.store.skipHistory(ok.lines.filter((_, i) => reads[i]?.duplicate).map((line) => line.id));
+    this.store.skipHistory(ok.lines.filter((_, i) => reads[i]?.duplicate).map((line) => line.id), publicId(room));
     return ok.lines.flatMap((line, i): Line[] => {
       const read = reads[i];
       if (read?.duplicate) return [];
@@ -2991,23 +3229,31 @@ export class App {
     return check.pinned();
   }
 
-  /** Load the newest public page at login, then page backwards whenever
-   *  the reader reaches the top. Redrawing after a prepend changes the
-   *  scroll height, so move the viewport by exactly that delta rather
-   *  than making the line under their eyes jump. */
-  private async loadHistory(opts: { initial?: boolean } = {}): Promise<void> {
+  /** Load the newest public page of the lobby or a room, at login or
+   *  when a room is first shown, then page backwards whenever the reader
+   *  reaches the top. Redrawing after a prepend changes the scroll
+   *  height, so move the viewport by exactly that delta rather than
+   *  making the line under their eyes jump. A transcript that already
+   *  holds lines is brought up to date forwards instead (`catchUp`). A
+   *  rate limit asks again once the server says. */
+  private async loadHistory(opts: { initial?: boolean; conv?: ConvId } = {}): Promise<void> {
     const conn = this.conn;
-    if (!conn || this.historyLoading || this.historyRefused || !conn.hasCap(CAP_HISTORY)) return;
+    const id = opts.conv ?? LOBBY;
+    const c = this.store.conversation(id);
+    const log = c?.log;
+    if (!conn || !c || !log || this.historyLoading.has(id) || this.historyRefused || !conn.hasCap(CAP_HISTORY)) return;
     // Asking a socket that is down only ever answers "not connected",
     // and the scroll handler would ask again on the next scroll.
     if (conn.state !== 'online') return;
-    if (!opts.initial && this.store.historyExhausted) return;
+    if (!opts.initial && log.exhausted) return;
 
-    this.historyLoading = true;
+    this.historyLoading.add(id);
+    const room = roomOf(c);
     try {
-      const before = opts.initial ? undefined : this.store.oldestHistoryId;
-      const page = await conn.history(before === undefined ? {} : { before });
-      const lines = await this.historyLines(page);
+      if (opts.initial && log.newest !== undefined) return await this.catchUp(conn, c, room);
+      const before = opts.initial ? undefined : log.oldest;
+      const page = await conn.history({ ...(before === undefined ? {} : { before }), ...(room ? { room } : {}) });
+      const lines = await this.historyLines(page, room);
       if (!lines) return;
       // Measured here rather than before the request: a live line
       // arriving while it was in flight has already changed the height,
@@ -3015,14 +3261,14 @@ export class App {
       // arithmetic exists to prevent.
       const oldHeight = this.transcript.scrollHeight;
       const oldTop = this.transcript.scrollTop;
-      const added = this.store.mergeHistory(lines, page.has_more, 'older');
-      if (added && this.store.active === LOBBY) {
+      const added = this.store.mergeHistory(lines, page.has_more, 'older', id);
+      if (added && this.store.active === id) {
         this.renderTranscript();
         if (!opts.initial) {
           this.transcript.scrollTop = oldTop + this.transcript.scrollHeight - oldHeight;
         }
       }
-      this.blank([...this.redacted]);
+      this.blank([...this.redacted], id);
     } catch (e) {
       // A refusal is about this account and this server, not about this
       // request: remember it rather than rediscovering it every time
@@ -3032,10 +3278,33 @@ export class App {
         this.historyRefused = true;
         if (opts.initial) return;
       }
+      const wait = rateLimitWait(e);
+      if (wait !== null) {
+        window.setTimeout(() => conn === this.conn && void this.loadHistory(opts).catch((err: unknown) => this.say(this.problem(err))), wait);
+        return;
+      }
+      // One room's refusal, such as a secure room on this connection, is
+      // that room's: its history is not asked for again.
+      if (e instanceof WireFailure && ROOM_REFUSALS.has(e.wire.code)) log.exhausted = true;
       throw e;
     } finally {
-      this.historyLoading = false;
+      this.historyLoading.delete(id);
     }
+  }
+
+  /** Page forwards from the newest line held, as a resync's catch-up
+   *  does: a newest page would leave a gap between what a preview, a
+   *  part or a lost session last held and what is heard from now on. */
+  private async catchUp(conn: Session, c: Conversation, room: number): Promise<void> {
+    for (;;) {
+      const after = c.log!.newest ?? 0;
+      const page = await conn.history({ after, limit: 200, ...(room ? { room } : {}) });
+      const lines = await this.historyLines(page, room);
+      if (!lines) return;
+      if (this.store.mergeHistory(lines, page.has_more, 'newer', c.id) && this.store.active === c.id) this.renderTranscript();
+      if (!page.has_more || c.log!.newest === after) break;
+    }
+    this.blank([...this.redacted], c.id);
   }
 
   // --- mail -------------------------------------------------------------
@@ -3286,6 +3555,7 @@ export class App {
     this.renderTopbar();
     this.renderRail();
     this.renderRoster();
+    this.renderRoomBar();
     this.renderTranscript();
     this.renderCallbar();
     this.renderPill();
@@ -3327,7 +3597,7 @@ export class App {
   }
 
   private renderRail(): void {
-    const items = [...this.store.conversations.values()].map((c) => {
+    const items = [...this.store.conversations.values()].filter((c) => c.kind !== 'room').map((c) => {
       const active =
         !this.newsOpen && !this.filesOpen && !this.reportsOpen && !this.accountsOpen && !this.friendsOpen && c.id === this.store.active;
       // Only a conversation whose other half is on the roster has a face
@@ -3455,6 +3725,25 @@ export class App {
       );
       accounts.onclick = () => this.showAccounts(true);
     }
+    const rooms = this.store.rooms().map((c) => {
+      const active = this.store.active === c.id && !this.newsOpen && !this.filesOpen && !this.reportsOpen && !this.accountsOpen && !this.friendsOpen;
+      const r = c.room!;
+      const el = h(
+        'button',
+        {
+          class: `rail-item${active ? ' on' : ''}${c.unread ? ' unread' : ''}${c.joined ? '' : ' joinable'}`,
+          ariaCurrent: active ? 'page' : null,
+          title: [r.topic, `${c.members?.size ?? r.members} here`].filter(Boolean).join(' · '),
+          dataset: { key: `c:${c.id}` },
+        },
+        h('span', { class: 'rail-glyph', ariaHidden: 'true' }, '#'),
+        h('span', { class: 'rail-title' }, r.name),
+        c.joined ? null : h('span', { class: 'sr-only' }, ', not joined'),
+        c.unread ? badge(c.unread) : null,
+      );
+      el.onclick = () => this.select(c.id);
+      return el;
+    });
     const [lobby, ...rest] = items;
     // Everything above the drawer's foot is redrawn and the foot is left
     // where it is: taken out and put back, it would drop the focus from
@@ -3464,9 +3753,23 @@ export class App {
     if (this.drawerFoot.parentNode !== this.rail) this.rail.append(this.drawerFoot);
     while (this.rail.firstChild !== this.drawerFoot) this.rail.firstChild!.remove();
     this.drawerFoot.before(
-      ...[h('h2', { class: 'rail-head' }, 'Conversations'), lobby, news, files, friends, reports, accounts, ...rest].filter(
-        (el): el is HTMLElement => !!el,
-      ),
+      ...[
+        h('h2', { class: 'rail-head' }, 'Conversations'),
+        lobby,
+        // Under the lobby, the first of them (chat-rooms.md §10), and
+        // only where the server shows this session a room: one without
+        // rooms, or with none it may see, has no section.
+        // A group of their own, so what follows is not read as a room.
+        rooms.length
+          ? h('div', { class: 'rail-group', role: 'group', ariaLabel: 'Rooms' }, h('h2', { class: 'rail-head rail-rooms' }, 'Rooms'), ...rooms)
+          : null,
+        news,
+        files,
+        friends,
+        reports,
+        accounts,
+        ...rest,
+      ].filter((el): el is HTMLElement => !!el),
     );
     if (focused) this.rail.querySelector<HTMLElement>(`[data-key="${CSS.escape(focused)}"]`)?.focus();
     this.paintMenuUnread();
@@ -3516,7 +3819,7 @@ export class App {
       moderator: this.conn?.moderator ?? false,
       contact: this.contactOf(),
       replyable: (line) => may && startReply(line, conv!, targets!) !== null,
-      quote: (line) => resolveQuote(line.re!, conv!, this.quoteSources()),
+      quote: (line) => resolveQuote(line.re!, conv!, this.quoteSources(conv!)),
     };
   }
 
@@ -3558,7 +3861,13 @@ export class App {
   private renderComposerHint(): void {
     const conv = this.store.conversation(this.store.active);
     const pm = conv?.kind === 'pm';
-    this.composer.placeholder = pm ? `Message ${conv.title}…` : 'Say something to everyone…';
+    // A room this session cannot send in says why where the line would
+    // be written; the box still takes commands, and `send` refuses a
+    // line with the same words.
+    const cannot = conv ? this.whyNoPost(conv) : null;
+    this.attachBtn.disabled = cannot !== null;
+    this.composer.placeholder =
+      cannot ?? (pm ? `Message ${conv.title}…` : conv?.kind === 'room' ? `Message ${conv.title}…` : 'Say something to everyone…');
     // `transport` is on every roster row whether or not the server runs
     // the identity endpoints, and this is what it is for: a private
     // message to a session on a plain TCP legacy socket crosses the
@@ -3569,8 +3878,22 @@ export class App {
     // in the clear, and nothing here can say it is not.
     const transport = peer?.transport;
     const deniable = pm && this.sealsDeniably(conv);
+    this.composerWhy.textContent = cannot ?? '';
+    // What the hint says about where a line goes, or why none can go, is
+    // the box's description.
+    this.composer.setAttribute('aria-describedby', cannot ? this.composerWhy.id : this.composerHint.id);
+    const shared =
+      conv?.kind !== 'room'
+        ? 'public chat'
+        : !cannot
+          ? `public chat in ${conv.title}`
+          : !conv.joined
+            ? 'not joined'
+            : conv.room!.may_post
+              ? 'signed lines only'
+              : 'read-only';
     this.composerHint.textContent = !pm
-      ? 'public chat'
+      ? shared
       : transport === 'cleartext'
         ? `private message — ${peer?.nick} is on an unencrypted connection`
         : transport === 'unknown'
@@ -3830,13 +4153,9 @@ export class App {
     let pinned = true;
     this.transcript.addEventListener('scroll', () => {
       pinned = isAtBottom(this.transcript);
-      if (
-        !pinned &&
-        this.transcript.scrollTop < 64 &&
-        this.store.active === LOBBY &&
-        !this.store.historyExhausted
-      ) {
-        void this.loadHistory().catch((e: Error) =>
+      const log = this.store.log(this.store.active);
+      if (!pinned && this.transcript.scrollTop < 64 && log && !log.exhausted) {
+        void this.loadHistory({ conv: this.store.active }).catch((e: Error) =>
           this.say(e instanceof WireFailure ? errorText(e.wire) : e.message),
         );
       }
@@ -3858,7 +4177,7 @@ export class App {
         }
         if (act.dataset.act === 'reply') return this.reply(line, conv);
         if (act.dataset.act === 'quote') {
-          const q = line.re && resolveQuote(line.re, conv, this.quoteSources());
+          const q = line.re && resolveQuote(line.re, conv, this.quoteSources(conv));
           const row = q && q.state === 'found' && q.line ? rowOf(this.transcript, q.line) : undefined;
           if (!row) return;
           const still = matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -3891,6 +4210,7 @@ export class App {
     });
 
     this.chatPane.append(
+      this.roomBar,
       this.transcript,
       this.heard,
       // The chip sits above the composer rather than inside it: the
@@ -3898,7 +4218,7 @@ export class App {
       // already sent to the server that the next line will carry.
       this.attachChip,
       this.replyChip,
-      h('div', { class: 'composer' }, this.attachBtn, this.composer, this.compareBtn, this.deniableBtn, this.composerHint, this.filePicker),
+      h('div', { class: 'composer' }, this.attachBtn, this.composer, this.compareBtn, this.deniableBtn, this.composerHint, this.composerWhy, this.filePicker),
     );
 
     this.shell.append(

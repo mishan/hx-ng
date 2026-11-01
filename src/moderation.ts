@@ -98,7 +98,7 @@ export function lineReport(
   // those lines and keeps `/report`; the other way round, every line of
   // one's own would offer to report oneself.
   if (from?.uid === undefined && !from?.login && me && from?.nick === me.nick) return null;
-  if (line.id !== undefined) return conv.kind === 'lobby' ? { line: line.id } : { msg: line.id };
+  if (line.id !== undefined) return conv.kind !== 'pm' ? { line: line.id } : { msg: line.id };
   const state = line.signature?.state;
   if (line.sealed) {
     // A signed box's whole map carries its own text and names its

@@ -1,12 +1,14 @@
 import { describe, expect, it } from 'vitest';
 
-import type { User } from '@hotline-ng/client';
+import type { Room, User } from '@hotline-ng/client';
 
 import {
   addressOf,
   Claims,
   continuesRun,
   LOBBY,
+  publicId,
+  routePublic,
   Store,
   statusLabel,
   styleToKind,
@@ -306,9 +308,9 @@ describe('public chat history', () => {
 
     expect(added).toBe(2);
     expect(s.conversation(LOBBY)!.lines.map((line) => line.id)).toEqual([1, 2, 3]);
-    expect(s.oldestHistoryId).toBe(1);
-    expect(s.newestHistoryId).toBe(3);
-    expect(s.historyExhausted).toBe(false);
+    expect(s.log()!.oldest).toBe(1);
+    expect(s.log()!.newest).toBe(3);
+    expect(s.log()!.exhausted).toBe(false);
   });
 
   it('keeps the page it just fetched when the transcript is already full', () => {
@@ -324,17 +326,17 @@ describe('public chat history', () => {
     const lines = s.conversation(LOBBY)!.lines;
     expect(lines).toHaveLength(2000);
     expect(lines[0]!.id).toBe(1);
-    expect(s.oldestHistoryId).toBe(1);
+    expect(s.log()!.oldest).toBe(1);
     // The newest lines made room instead, and their ids went with them,
     // so a catch-up can bring them back rather than filtering them out.
     expect(s.hasHistory(3000)).toBe(false);
-    expect(s.newestHistoryId).toBe(2800);
+    expect(s.log()!.newest).toBe(2800);
   });
 
   it('pages past lines it left out, and forgets them with the window they fell in', () => {
     const s = new Store();
     s.skipHistory([4000]);
-    expect(s.oldestHistoryId).toBe(4000);
+    expect(s.log()!.oldest).toBe(4000);
 
     // An older page trims the newest end: a left-out id above what is
     // kept must not hold the catch-up cursor there.
@@ -345,7 +347,7 @@ describe('public chat history', () => {
       true,
       'older',
     );
-    expect(s.newestHistoryId).toBe(2000);
+    expect(s.log()!.newest).toBe(2000);
     expect(s.hasHistory(6000)).toBe(false);
   });
 
@@ -354,11 +356,100 @@ describe('public chat history', () => {
     s.mergeHistory([chat(1, 'history', { id: 7 })], false, 'older');
     expect(s.hasHistory(7)).toBe(true);
     expect(s.hasMail({ id: 7 })).toBe(false);
-    expect(s.historyExhausted).toBe(true);
+    expect(s.log()!.exhausted).toBe(true);
 
     const pm = s.openPm({ login: 'alice', nick: 'Alice' });
     s.add(pm.id, chat(2, 'mail', { id: 7 }));
     expect(s.hasMail({ id: 7 })).toBe(true);
+  });
+});
+
+describe('rooms', () => {
+  const room = (id: number, name: string, position = 0): Room => ({ id, name, topic: '', position, members: 0, may_post: true });
+
+  it('lists the joined first, then the rest by position and name, and lets go of one no longer shown', () => {
+    const s = new Store();
+    s.setRooms([room(1, 'zeta'), room(2, 'beta', 1), room(3, 'alpha')]);
+    s.conversation(publicId(2))!.joined = true;
+    expect(s.rooms().map((c) => c.title)).toEqual(['#beta', '#alpha', '#zeta']);
+
+    s.active = publicId(3);
+    s.setRooms([room(1, 'zeta'), room(2, 'renamed', 1)]);
+    expect(s.rooms().map((c) => c.title)).toEqual(['#renamed', '#zeta']);
+    expect(s.conversation(publicId(3))).toBeUndefined();
+    expect(s.active).toBe(LOBBY);
+  });
+
+  it('keeps a room shown again with its lines, its unread and its membership', () => {
+    const s = new Store();
+    const c = s.putRoom(room(4, 'lounge'));
+    c.joined = true;
+    s.add(c.id, chat(1, 'hi', { id: 10 }));
+    s.putRoom({ ...room(4, 'lounge'), topic: 'quiet', may_post: false });
+    expect(c).toMatchObject({ joined: true, unread: 1, room: { topic: 'quiet', may_post: false } });
+    expect(c.lines.map((l) => l.text)).toEqual(['hi']);
+  });
+
+  it("pages, deduplicates and redacts each room's lines apart from the lobby's", () => {
+    const s = new Store();
+    const c = s.putRoom(room(4, 'lounge'));
+    s.add(LOBBY, chat(1, 'lobby', { id: 5 }));
+    s.add(c.id, chat(3, 'live', { id: 8 }));
+    s.mergeHistory([chat(2, 'older', { id: 6 }), chat(3, 'live', { id: 8 })], false, 'older', c.id);
+
+    expect(c.lines.map((l) => l.id)).toEqual([6, 8]);
+    expect(s.log(c.id)).toMatchObject({ oldest: 6, newest: 8, exhausted: true });
+    expect(s.log()).toMatchObject({ oldest: 5, newest: 5, exhausted: false });
+    expect(s.hasHistory(6)).toBe(false);
+    expect(s.add(c.id, chat(4, 'again', { id: 8 }))).toBeUndefined();
+
+    expect(s.redact(6)).toBeUndefined();
+    expect(s.redact(6, c.id)).toEqual({ handle: undefined });
+    expect(s.redactAll([5, 8], c.id)).toEqual({ blanked: 1, handles: [] });
+    expect(s.conversation(LOBBY)!.lines[0]!.deleted).toBeUndefined();
+  });
+});
+
+describe('a notice or a subject', () => {
+  const room = (id: number, name: string): Room => ({ id, name, topic: 'old', position: 0, members: 0, may_post: true });
+
+  it('lands in the room it names, the topic its own, and in the lobby without one', () => {
+    const s = new Store();
+    s.server = { name: 'S', subject: 'lobby subject' };
+    const lounge = s.putRoom(room(4, 'lounge'));
+    s.putRoom(room(5, 'den'));
+
+    expect(routePublic(s, { ev: 'notice', data: { text: 'kicked', room: 4 } })).toMatchObject({ conv: lounge, line: { kind: 'notice', text: 'kicked' } });
+    expect(routePublic(s, { ev: 'notice', data: { text: 'hello' } }).conv.id).toBe(LOBBY);
+    expect(routePublic(s, { ev: 'subject', data: { subject: 'quiet', room: 4 } })).toMatchObject({ conv: lounge, line: { text: 'Topic: quiet' } });
+    expect(lounge.room!.topic).toBe('quiet');
+    expect(s.conversation(publicId(5))!.room!.topic).toBe('old');
+    expect(s.server.subject).toBe('lobby subject');
+    expect(routePublic(s, { ev: 'subject', data: { subject: 'new' } })).toMatchObject({ conv: { id: LOBBY }, line: { text: 'Subject: new' } });
+    expect(s.server.subject).toBe('new');
+  });
+
+  it('holds a room a member is told of before any listing names it, until one leaves it out', () => {
+    const s = new Store();
+    const { conv } = routePublic(s, { ev: 'notice', data: { text: 'replayed', room: 7 } });
+    s.add(conv.id, chat(1, 'replayed line', { id: 3 }));
+    expect(conv).toMatchObject({ id: publicId(7), kind: 'room', joined: true });
+
+    s.setRooms([room(7, 'lounge')]);
+    expect(s.conversation(publicId(7))).toMatchObject({ title: '#lounge', joined: true, lines: [{ text: 'replayed line' }] });
+    s.setRooms([]);
+    expect(s.conversation(publicId(7))).toBeUndefined();
+  });
+});
+
+describe('who is in a room', () => {
+  it('loses someone who leaves the server', () => {
+    const s = new Store();
+    s.put(person(2, 'Bob'));
+    const c = s.putRoom({ id: 4, name: 'lounge', topic: '', position: 0, members: 2, may_post: true });
+    c.members = new Set([1, 2]);
+    s.remove(2);
+    expect([...c.members]).toEqual([1]);
   });
 });
 

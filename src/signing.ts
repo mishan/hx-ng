@@ -272,10 +272,10 @@ function aliasOf(pinned: PinnedKey): ServerAlias {
 }
 
 /**
- * Reads the lobby's lines against this host's pinned key, or for a
- * linked server's user against the key their row gives. A line from
- * anyone with no key to check it against is unverified, never verified
- * on the server's word.
+ * Reads public lines, the lobby's and each room's, against this host's
+ * pinned key, or for a linked server's user against the key their row
+ * gives. A line from anyone with no key to check it against is
+ * unverified, never verified on the server's word.
  */
 export class LineReader extends SignedMemory {
   constructor(private pinned: PinnedKey | null) {
@@ -287,11 +287,11 @@ export class LineReader extends SignedMemory {
     this.pinned = pinned;
   }
 
-  private scope(remote: { server_key?: string } | undefined): ChatScope {
-    if (remote) return { server: keyOf(remote.server_key), room: 0 };
+  private scope(remote: { server_key?: string } | undefined, room: number): ChatScope {
+    if (remote) return { server: keyOf(remote.server_key), room };
     const pinned = this.pinned;
-    if (!pinned) return { server: null, room: 0 };
-    return { server: pinned.key, room: 0, alias: aliasOf(pinned) };
+    if (!pinned) return { server: null, room };
+    return { server: pinned.key, room, alias: aliasOf(pinned) };
   }
 
   /** A `chat` event, with the sender's roster row as it stood. A line
@@ -303,18 +303,19 @@ export class LineReader extends SignedMemory {
     // then the certificate's is the name (§8).
     const sender: SignedSender = fingerprint ? { named: fingerprint } : remote ? 'certificate' : 'unknown';
     return this.serially(() =>
-      this.read(line, { at: line.at, sender, scope: this.scope(remote) }, remote && (remote.server || 'a linked server'), {
+      this.read(line, { at: line.at, sender, scope: this.scope(remote, line.room ?? 0) }, remote && (remote.server || 'a linked server'), {
         rowSigns: row?.identity?.signs === true,
         seenSigning: fingerprint !== undefined && this.signing.has(fingerprint),
       }),
     );
   }
 
-  /** A `history` line, which names no uid: its certificate is the name. */
-  history(line: HistoryLine): Promise<LineRead> {
+  /** A `history` line of `room`, which names no uid: its certificate is
+   *  the name. */
+  history(line: HistoryLine, room = 0): Promise<LineRead> {
     const remote = line.from.remote;
     return this.serially(() =>
-      this.read(line, { at: line.at, sender: 'certificate', scope: this.scope(remote) }, remote && 'a linked server', {}),
+      this.read(line, { at: line.at, sender: 'certificate', scope: this.scope(remote, room) }, remote && 'a linked server', {}),
     );
   }
 

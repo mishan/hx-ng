@@ -549,7 +549,7 @@ export class ClassicConnection implements Session {
       news: CLASSIC_NEWS,
     };
     this.setState('online');
-    this.hooks.onLogin?.(ok);
+    this.hooks.onLogin?.(ok, { rooms: [] });
     this.hooks.onSnapshot?.({ self, users, server });
     this.starting?.resolve();
     this.starting = null;

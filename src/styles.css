@@ -582,8 +582,8 @@ button.call:disabled { opacity: 0.45; cursor: default; }
 }
 .line.cont { padding-top: 0; }
 
-/* Report, and for a moderator Redact: out of the way until the pointer
-   is on the line, or on a touch screen until the line is tapped. */
+/* Reply, Report, and for a moderator Redact: out of the way until the
+   pointer is on the line, or on a touch screen until the line is tapped. */
 .line { position: relative; }
 .line-actions {
   position: absolute;
@@ -605,6 +605,31 @@ button.call:disabled { opacity: 0.45; cursor: default; }
   pointer-events: auto;
 }
 .line:not(.cont) { margin-top: 0.35rem; }
+
+/* What a reply answers: one muted line above it, cut short, and a way
+   back to the line where it is on screen. */
+.line .quote {
+  display: block;
+  max-width: 100%;
+  margin: 0 0 0.1rem;
+  padding: 0 0 0 0.45rem;
+  border: 0;
+  border-left: 2px solid var(--line);
+  background: none;
+  color: var(--muted);
+  font: inherit;
+  font-size: 0.78rem;
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.line button.quote { cursor: pointer; }
+.line button.quote:hover .quote-text { text-decoration: underline; }
+.quote-nick { font-weight: 600; }
+.line.flash { background: var(--accent-soft); transition: background 0.6s; }
+@media (prefers-reduced-motion: reduce) { .line.flash { transition: none; } }
+.reply-chip .reply-to { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .line .time {
   color: var(--muted);

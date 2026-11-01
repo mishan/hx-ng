@@ -57,6 +57,7 @@ import {
   type RequestAction,
   type RequestsClearOk,
   type RequestsClearParams,
+  type RepliesConfig,
   type RequestsOk,
   mergeRequests,
   type HistoryOk,
@@ -240,6 +241,10 @@ export interface Credentials {
    *  (§7.5), which the server grants only to a session proving a device
    *  of the account's linked identity, and then lists in `caps`. */
   friendships?: boolean;
+  /** Say `replies` at login: this client sends `re` and reads it on
+   *  what it is sent (§7.3). A resume keeps what the login was granted,
+   *  which `Connection.replies` says. */
+  replies?: boolean;
   /** Opens each socket in place of the global `WebSocket`: for a
    *  runtime without one, or a test's fake server
    *  (`@hotline-ng/client/testing`). */
@@ -309,6 +314,7 @@ interface Saved {
   roles?: RolesConfig | null;
   files?: FilesConfig | null;
   messaging?: MessagingConfig | null;
+  replies?: RepliesConfig | null;
   /** The session speaks the friend family: its login said so, or it
    *  has sent one of the family's requests. */
   speaks?: boolean;
@@ -543,6 +549,10 @@ export class Connection {
    *  from the login reply or the saved session. `null` means the server
    *  has no such family. */
   messaging: MessagingConfig | null = null;
+  /** The kinds of target this session may name in `re` and is sent,
+   *  from the login reply or the saved session. `null` means it was not
+   *  granted `replies`: send no `re`. */
+  replies: RepliesConfig | null = null;
   /** This session speaks the friend family, so is sent its events. */
   private speaks = false;
   /** Round-trip time of the last explicit `ping`, in milliseconds. */
@@ -609,6 +619,7 @@ export class Connection {
       this.roles = saved.roles ?? null;
       this.files = saved.files ?? null;
       this.messaging = saved.messaging ?? null;
+      this.replies = saved.replies ?? null;
       this.speaks = saved.speaks ?? false;
     } else if (opts.resumeOnly) {
       throw new Error('no session to resume');
@@ -735,6 +746,7 @@ export class Connection {
     this.speaks = this.creds.messaging === true;
     if (this.speaks) params.messaging = true;
     if (this.speaks && this.creds.friendships) params.friendships = true;
+    if (this.creds.replies) params.replies = true;
 
     const ok = await this.request<LoginOk>('login', params);
     this.signing = ok.signs ?? null;
@@ -761,6 +773,7 @@ export class Connection {
     this.roles = ok.roles ?? null;
     this.files = ok.files ?? null;
     this.messaging = ok.messaging ?? null;
+    this.replies = ok.replies ?? null;
     // Only a session that may detach is worth remembering: without the
     // permission a resume can only ever answer session_expired, and
     // storing a token we know is useless just invites a confusing
@@ -1146,6 +1159,9 @@ export class Connection {
    *  older rows; `after` catches up toward newer ones. */
   async history(params: HistoryParams = {}): Promise<HistoryOk> {
     const page = await this.request<HistoryOk>('history', params);
+    // Lines by id are no run of the log: one past the cursor would carry
+    // it over the lines between, which the next catch-up would skip.
+    if (params.ids !== undefined) return page;
     let advanced = false;
     for (const line of page.lines) advanced = this.noteHistoryId(line.id, params.room) || advanced;
     if (advanced) this.persist();
@@ -2092,6 +2108,7 @@ export class Connection {
       roles: this.roles,
       files: this.files,
       messaging: this.messaging,
+      replies: this.replies,
       speaks: this.speaks,
       writer: this.writer,
       login: this.self?.identity?.account ?? this.creds.login,

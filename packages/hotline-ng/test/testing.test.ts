@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import { Connection, WireFailure, type ConnectionHooks, type SocketLike } from '../src/connection';
-import type { Events, HistoryOk } from '../src/protocol';
+import { newGuid, type Events, type HistoryOk } from '../src/protocol';
 import { FakeServer } from '../src/testing';
 
 const ACCOUNTS = [
@@ -476,5 +476,153 @@ describe('the fake server', () => {
       [0, 'lost'],
       [lounge, 'lost here'],
     ]);
+  });
+});
+
+describe('replies on the fake server', () => {
+  async function asking(server: FakeServer, login: string, heard?: Events['msg'][]): Promise<Connection> {
+    const conn = new Connection(server.credentials({ login, password: 'pw', replies: true }));
+    if (heard) conn.on('msg', (d) => heard.push(d));
+    await conn.start();
+    return conn;
+  }
+  const REF = 'AAAAAAAAAAAAAAAAAAAAAA';
+
+  it('grants replies to a login that asks, with the targets it keeps, and keeps them across a reload', async () => {
+    const saved = new Map<string, string>();
+    const store = { getItem: (k: string) => saved.get(k) ?? null, setItem: (k: string, v: string) => void saved.set(k, v), removeItem: (k: string) => void saved.delete(k) };
+    const server = new FakeServer({ accounts: ACCOUNTS });
+    const creds = server.credentials({ login: 'alice', password: 'pw', replies: true, sessionStore: store });
+    const alice = new Connection(creds);
+    await alice.start();
+    expect(alice.hasCap('replies')).toBe(true);
+    expect(alice.replies).toEqual({ targets: ['line', 'pm'] });
+    const reload = new Connection(creds);
+    await reload.start({ resumeOnly: true });
+    expect(reload.replies).toEqual({ targets: ['line', 'pm'] });
+
+    const bob = await connect(server, 'bob');
+    expect([bob.hasCap('replies'), bob.replies, bob.login?.replies]).toEqual([false, null, undefined]);
+    for (const [caps, targets] of [
+      [['inbox', 'replies'], ['pm']],
+      [['history', 'replies'], ['line']],
+    ] as const) {
+      const conn = await asking(new FakeServer({ accounts: ACCOUNTS, caps: [...caps] }), 'alice');
+      expect(conn.replies?.targets).toEqual(targets);
+    }
+    for (const caps of [['replies'], ['history', 'inbox']]) {
+      const conn = await asking(new FakeServer({ accounts: ACCOUNTS, caps }), 'alice');
+      expect([conn.hasCap('replies'), conn.replies]).toEqual([false, null]);
+    }
+  });
+
+  it('carries a line\'s re as sent to the sessions that asked, live and in history, and ignores one from a session that did not', async () => {
+    const server = new FakeServer({ accounts: ACCOUNTS });
+    const alice = await asking(server, 'alice');
+    const bob = await connect(server, 'bob');
+    const aliceHeard = heard(alice, 'chat');
+    const bobHeard = heard(bob, 'chat');
+    const { id: asked } = await alice.chat({ text: 'lunch?' });
+    const re = { line: asked! };
+    await alice.chat({ text: 'me?', re });
+    // Never refused for pointing at nothing.
+    await alice.chat({ text: 'dangling', re: { line: asked! + 1000, room: 0 } });
+    await bob.chat({ text: 'unasked', re });
+    await waitFor('the lines', () => aliceHeard.length === 4 && bobHeard.length === 4);
+    expect(aliceHeard.map((d) => d.re)).toEqual([undefined, re, { line: asked! + 1000 }, undefined]);
+    expect(bobHeard.every((d) => d.re === undefined)).toBe(true);
+    expect((await alice.history()).lines.map((l) => l.re)).toEqual([undefined, re, { line: asked! + 1000 }, undefined]);
+    expect((await bob.history()).lines.every((l) => l.re === undefined)).toBe(true);
+  });
+
+  it('refuses a target across rooms or of the wrong kind, a malformed one, one not kept, and one beside a signature, before membership', async () => {
+    const server = new FakeServer({ accounts: ACCOUNTS, rooms: [{ name: 'lounge' }] });
+    const alice = await asking(server, 'alice');
+    const bob = await asking(server, 'bob');
+    const room = alice.login!.rooms!.list[0]!.id;
+    await alice.roomJoin(room);
+    const { id: lobby } = await alice.chat({ text: 'in the lobby' });
+    const { ref } = await alice.msg({ to: bob.self!.uid, text: 'psst' });
+    for (const [what, send] of [
+      ['a lobby line from a room', () => alice.chat({ text: 'x', room, re: { line: lobby! } })],
+      ["a room's line from the lobby", () => alice.chat({ text: 'x', re: { line: lobby!, room } })],
+      ['a message from public chat', () => alice.chat({ text: 'x', re: { pm: ref! } })],
+      ['a line from a message', () => alice.msg({ to: bob.self!.uid, text: 'x', re: { line: lobby! } })],
+      ['an instant message, which it does not keep', () => alice.msg({ to: bob.self!.uid, text: 'x', re: { im: { login: 'bob', guid: newGuid() } } })],
+      ['a malformed target', () => alice.chat({ text: 'x', re: { line: 'one' } as never })],
+      ['a reference that is no reference', () => alice.msg({ to: bob.self!.uid, text: 'x', re: { pm: 'short' } })],
+      ['a signed line', () => alice.chat({ text: 'x', guid: newGuid(), signed: 'AAAA', re: { line: lobby! } })],
+      ['a malformed target, to a room not joined', () => bob.chat({ text: 'x', room, re: { line: -1 } })],
+    ] as const) {
+      await expect(send(), what).rejects.toMatchObject({ wire: { code: 'bad_request' } });
+    }
+    // Any reference at all, which the server does not look up.
+    await expect(alice.msg({ to: bob.self!.uid, text: 'ok', re: { pm: REF } })).resolves.toMatchObject({ queued: false });
+    await expect(alice.chat({ text: 'ok', room, re: { line: 1, room } })).resolves.toMatchObject({ id: expect.any(Number) });
+  });
+
+  it('carries a message\'s re live, held for an absent recipient, and on its inbox row', async () => {
+    const server = new FakeServer({ accounts: ACCOUNTS });
+    const alice = await asking(server, 'alice');
+    const bob = await asking(server, 'bob');
+    const got = heard(bob, 'msg');
+    const re = { pm: REF };
+    await alice.msg({ to: bob.self!.uid, text: 'live', re });
+    await waitFor('the message', () => got.length === 1);
+    expect(got[0]?.re).toEqual(re);
+    await bob.logout();
+    await alice.msg({ to_login: 'bob', text: 'held', re });
+    const flushed: Events['msg'][] = [];
+    const later = await asking(server, 'bob', flushed);
+    await waitFor('the flush', () => flushed.length === 1);
+    expect(flushed[0]).toMatchObject({ text: 'held', queued: true, re });
+    expect((await later.inbox()).messages.map((m) => [m.text, m.re])).toEqual([
+      ['held', re],
+      ['live', re],
+    ]);
+    expect((await connect(server, 'bob').then((c) => c.inbox())).messages.every((m) => m.re === undefined)).toBe(true);
+  });
+
+  it('answers history ids ascending, leaving out a missing line and another room\'s, and the highest past what one reply holds', async () => {
+    const server = new FakeServer({ accounts: ACCOUNTS, rooms: [{ name: 'lounge' }] });
+    const alice = await asking(server, 'alice');
+    const room = alice.login!.rooms!.list[0]!.id;
+    await alice.roomJoin(room);
+    const { id: hidden } = await alice.chat({ text: 'in the room', room });
+    const { id: first } = await alice.chat({ text: 'one' });
+    const { id: second } = await alice.chat({ text: 'two' });
+    const got = await alice.history({ ids: [second!, hidden!, first!, second! + 1000] });
+    expect([got.lines.map((l) => l.id), got.has_more]).toEqual([[first, second], false]);
+    expect((await alice.history({ room, ids: [hidden!, first!] })).lines.map((l) => l.id)).toEqual([hidden]);
+    for (const params of [{ ids: [] }, { ids: [-1] }, { ids: Array.from({ length: 51 }, (_, i) => i + 1) }, { ids: [first!], before: second! }]) {
+      await expect(alice.history(params), JSON.stringify(params)).rejects.toMatchObject({ wire: { code: 'bad_request' } });
+    }
+    expect((await alice.history({ ids: null as never })).lines.length).toBeGreaterThan(1);
+    // Any other session is served a page, as an unknown param is ignored.
+    const bob = await connect(server, 'bob');
+    expect((await bob.history({ ids: [first!] })).lines.map((l) => l.id)).toEqual([first, second]);
+
+    const said: number[] = [];
+    for (let i = 0; i < 24; i++) said.push((await alice.chat({ text: 'x'.repeat(4000) })).id!);
+    const part = await alice.history({ ids: said });
+    const shown = part.lines.map((l) => l.id);
+    expect(part.has_more).toBe(true);
+    expect(shown.length).toBeGreaterThan(0);
+    expect(shown).toEqual(said.slice(0, shown.length));
+    const rest = await alice.history({ ids: said.slice(shown.length) });
+    expect([rest.lines.length, rest.has_more]).toEqual([said.length - shown.length, false]);
+  });
+
+  it('moves no catch-up cursor for lines asked for by id', async () => {
+    const server = new FakeServer({ accounts: ACCOUNTS });
+    const alice = await asking(server, 'alice');
+    await alice.chat({ text: 'seen' });
+    await waitFor('the line', () => alice.lastHistoryId > 0);
+    const seen = alice.lastHistoryId;
+    // A line this session was never sent, past the ones it was: as a
+    // quote names one said while it was away.
+    server.handle('history', (p) => (p.ids ? { ok: { lines: [{ ...server.lines()[0]!, id: seen + 5 }], has_more: false } } : undefined));
+    await alice.history({ ids: [seen + 5] });
+    expect(alice.lastHistoryId).toBe(seen);
   });
 });

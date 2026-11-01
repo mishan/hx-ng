@@ -138,7 +138,7 @@ ng_requests = 0
     const line = alice.locator('.transcript .line.chat', { hasText: 'something unkind' });
     await expect(line).toBeVisible();
     // Nobody is offered a report of their own line.
-    await expect(bob.locator('.transcript .line.chat', { hasText: 'something unkind' }).locator('button[data-act]')).toHaveCount(0);
+    await expect(bob.locator('.transcript .line.chat', { hasText: 'something unkind' }).getByRole('button', { name: 'Report' })).toHaveCount(0);
 
     // A keyboard reaches the buttons too: out of sight until then, and
     // not out of the tab order.

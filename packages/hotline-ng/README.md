@@ -319,6 +319,24 @@ that has blocked you reads as missing, `no_such_user`, on every
 request that names it; your own block of it is `friend_add`'s
 `blocked`.
 
+### Replies
+
+A client that sends and reads `re` says so with `replies: true` in its
+`Credentials`; where the server keeps some kind of target, `caps` lists
+`replies` and `conn.replies.targets` says which: `line`, `pm`, `im`,
+`signed`. `chat` and `msg` then take `re`, naming what they answer, and
+the events, history lines and inbox rows carry the `re` they were sent
+with. The server never looks a target up, so drawing a quote is the
+reader's: from what it holds, or a line by `history({ ids })`, asking
+again for the ids past the last line a reply holds while `has_more`.
+A signed line or message cannot carry `re` yet.
+
+```ts
+const conn = new Connection({ ...creds, replies: true });
+await conn.start();
+if (conn.replies?.targets.includes('line')) await conn.chat({ text: 'yes', re: { line: asked } });
+```
+
 ### Portable friendships
 
 A friendship can belong to the two people rather than to one server:

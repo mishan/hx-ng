@@ -144,7 +144,8 @@ import { OwedReceipts } from '../friends';
 import { KeeperSlot, PortableFriends } from '../friendships';
 import { mayAdminister } from '../accounts';
 import { NewsView } from './news';
-import { appendLine, isAtBottom, keepingPlace, lineOf, renderTranscript, scrollToEnd, signedName, spoken, type TranscriptOptions } from './transcript';
+import { QuoteFetcher, resolveQuote, startReply, type Replying } from '../replies';
+import { appendLine, isAtBottom, keepingPlace, lineOf, renderTranscript, rowOf, scrollToEnd, signedName, spoken, type TranscriptOptions } from './transcript';
 import { wrapSelection } from './markdown';
 import { contentWords, disablePush, enablePush, pushEnabled, pushSupported, refreshPush } from '../push/client';
 import { awayCount, clearAway, showBadge } from '../push/badge';
@@ -314,6 +315,20 @@ export class App {
    *  will take them, and finding out at send time would lose the
    *  message with them. */
   private attached: { media: Media; name: string } | null = null;
+  /** The reply the composer is writing, shown above it. */
+  private replying: Replying | null = null;
+  private replyChip = h('div', { class: 'attach-chip reply-chip', role: 'status', hidden: true });
+  /** The lines quotes name that this client does not hold, fetched for
+   *  this connection. */
+  private quotes = new QuoteFetcher(async () => ({ lines: [], has_more: false }), () => {});
+  /** Quotes waiting on a line, fetched once they come on screen. */
+  private quotesSeen = new IntersectionObserver((seen) => {
+    for (const e of seen) {
+      if (!e.isIntersecting) continue;
+      this.quotesSeen.unobserve(e.target);
+      this.quotes.want(Number((e.target as HTMLElement).dataset.pending));
+    }
+  });
   /** Bumped by anything that abandons an attachment. An upload that was
    *  already in flight lands afterwards and must not resurrect the chip
    *  or become the image on the next line — the user has removed it,
@@ -961,6 +976,7 @@ export class App {
               ...creds,
               url: way.url,
               messaging: true,
+              replies: true,
               sessionStore: this.sessionStore,
               ...(signs ? { signs, sealed: true } : {}),
               ...(d.identity ? { friendships: true } : {}),
@@ -978,6 +994,14 @@ export class App {
     // receipt it was still sending may have been owed again since.
     this.dropOwed();
     this.conn = conn;
+    this.quotes.close();
+    this.quotes = new QuoteFetcher(
+      (ids) => conn.history({ ids }),
+      () => {
+        if (conn === this.conn && this.store.active === LOBBY) keepingPlace(this.transcript, () => this.renderTranscript());
+      },
+    );
+    this.cancelReply();
     this.images.attach(conn);
     avatars.attach(conn);
     // Voice and video ride the ng wire; a classic server has neither here.
@@ -1199,6 +1223,7 @@ export class App {
           media: d.media,
           ...(signature ? { signature } : {}),
           ...(d.signed !== undefined ? { signed: d.signed } : {}),
+          ...(d.re ? { re: d.re } : {}),
         });
         if (d.id !== undefined && this.redacted.has(d.id)) this.blank([d.id]);
       });
@@ -1216,13 +1241,17 @@ export class App {
     // go of any image it carried. The reader stays where they were.
     conn.on('chat_redacted', (d) => {
       this.redacted.add(d.id);
+      this.quotes.redacted(d.id);
       this.inOrder(() => this.blank([d.id]));
     });
 
     // A purge of a flood, told as one event for many lines rather than
     // one per line. Blank them all, then draw once.
     conn.on('chat_purged', (d) => {
-      for (const id of d.ids) this.redacted.add(id);
+      for (const id of d.ids) {
+        this.redacted.add(id);
+        this.quotes.redacted(id);
+      }
       this.inOrder(() => this.blank(d.ids));
     });
 
@@ -1294,6 +1323,7 @@ export class App {
           ...(signed !== undefined ? { signed } : {}),
           ...(sealed ? { sealed: true } : this.clearMark()),
           ...(opened.hidden ? { hidden: true } : {}),
+          ...(d.re ? { re: d.re } : {}),
         });
         const seen = sighting(signature, this.verifiedUnder(conv), d.from);
         if (seen) void rememberIdentity(conv, this.peerMemory, this.keyUrl, seen.fingerprint, seen.who, sealed ? { sealed: true } : {});
@@ -1437,10 +1467,13 @@ export class App {
     this.clearAttachment();
 
     const conv = this.store.conversation(this.store.active);
+    const reply = conv ? this.takeReply(conv) : undefined;
+    const re = reply?.re;
     if (conv?.kind === 'pm') {
       const to = this.addressFor(conv);
       if (!to) {
         this.restoreAttachment(attached);
+        this.restoreReply(reply);
         return this.say(
           `There is no way to reach ${conv.title}: they have left, and the message they sent named no account to answer.`,
         );
@@ -1453,8 +1486,8 @@ export class App {
       const media = attached?.media.id;
       const params: MsgParams =
         'to_login' in to
-          ? { to_login: to.to_login, text, guid, media }
-          : { to: to.to, text, guid, media };
+          ? { to_login: to.to_login, text, guid, media, re }
+          : { to: to.to, text, guid, media, re };
       // PMs have no echo, so the sender's own half is local, a line for
       // each message it went as.
       const me = this.store.self;
@@ -1472,12 +1505,17 @@ export class App {
           ...(signature ? { signature } : {}),
           ...(sealed !== undefined ? { sealed } : {}),
           ...(under !== undefined ? { guid: under } : {}),
+          ...(ok.ref !== undefined ? { ref: ok.ref } : {}),
+          ...(re && !sent ? { re } : {}),
         });
         sent += part.length;
         queued ||= ok.queued;
         requested ||= ok.requested === true;
       }).catch((e: unknown) => {
-        if (!sent) this.restoreAttachment(attached);
+        if (!sent) {
+          this.restoreAttachment(attached);
+          this.restoreReply(reply);
+        }
         this.restoreComposer(text.slice(sent), 'normal');
         throw e;
       });
@@ -1490,15 +1528,73 @@ export class App {
     }
     // Public chat echoes, so the sender's own copy comes back off the
     // wire with the image on it; nothing is pushed locally here.
-    await this.sendChat(text, 'normal', attached?.media.id).catch((e: unknown) => {
+    await this.sendChat(text, 'normal', attached?.media.id, re).catch((e: unknown) => {
       this.restoreAttachment(attached);
+      this.restoreReply(reply);
       throw e;
     });
   }
 
+  /** Whether a reply may be written here. A signed line or message
+   *  cannot carry `re` yet, so none is offered where this user signs or
+   *  seals what they send, rather than sending it unsigned. */
+  private mayReply(conv: Conversation): boolean {
+    const conn = this.conn;
+    if (!(conn instanceof Connection) || !conn.replies) return false;
+    return conv.kind === 'lobby' ? !this.signLobby : this.pmSigning !== 'always' && !(this.sealPms && conn.sealing);
+  }
+
+  private reply(line: Line, conv: Conversation): void {
+    const targets = this.conn instanceof Connection ? this.conn.replies?.targets : undefined;
+    const r = targets && this.mayReply(conv) ? startReply(line, conv, targets) : null;
+    if (!r) return;
+    this.replying = r;
+    this.showReply();
+    this.composer.focus();
+  }
+
+  private showReply(): void {
+    const r = this.replying;
+    this.replyChip.hidden = !r;
+    if (!r) return;
+    const cancel = h('button', { class: 'ghost', title: 'Cancel the reply', ariaLabel: 'Cancel the reply' }, '✕');
+    cancel.onclick = () => {
+      this.cancelReply();
+      this.composer.focus();
+    };
+    fill(this.replyChip, h('span', { class: 'reply-to' }, 'Replying to ', h('bdi', {}, r.nick), ': ', h('span', { class: 'quote-text' }, r.excerpt)), cancel);
+  }
+
+  private cancelReply(): void {
+    this.replying = null;
+    this.showReply();
+  }
+
+  /** The reply a send to `conv` carries, taken off the composer; none
+   *  where one is no longer offered, which is said. */
+  private takeReply(conv: Conversation): Replying | undefined {
+    const r = this.replying;
+    if (r?.conv !== conv.id) return undefined;
+    this.cancelReply();
+    if (this.mayReply(conv)) return r;
+    this.say(`Sent without saying it answers ${r.nick}: a signed or sealed message cannot carry a reply yet.`);
+    return undefined;
+  }
+
+  /** Put back a reply a send did not manage to make. */
+  private restoreReply(r: Replying | undefined): void {
+    if (!r || this.replying || this.store.active !== r.conv) return;
+    this.replying = r;
+    this.showReply();
+  }
+
+  private quoteSources(): Parameters<typeof resolveQuote>[2] {
+    return { lobby: this.store.conversation(LOBBY)!, fetched: this.quotes.lines, me: this.store.me() };
+  }
+
   /** A lobby line, with a `guid` where the server honors one, and signed
    *  where this user signs the lobby and the server carries it. */
-  private async sendChat(text: string, style: ChatStyle, media?: string): Promise<void> {
+  private async sendChat(text: string, style: ChatStyle, media?: string, re?: Replying['re']): Promise<void> {
     const conn = this.conn;
     if (!conn) return;
     if (!(conn instanceof Connection)) {
@@ -1506,7 +1602,9 @@ export class App {
       return;
     }
     const params = { text, style, media };
-    const unsigned = conn.hasCap(CAP_CHAT_GUID) ? { ...params, guid: newGuid() } : params;
+    // Only an unsigned line says what it answers: beside `signed`, `re`
+    // is refused.
+    const unsigned = { ...params, ...(conn.hasCap(CAP_CHAT_GUID) ? { guid: newGuid() } : {}), ...(re ? { re } : {}) };
     // A media-only line has no text to sign, and goes as it is.
     if (!text) return void (await conn.chat(unsigned));
     const restore = () => this.restoreComposer(text, style);
@@ -1552,7 +1650,7 @@ export class App {
     // Once one piece goes unsigned, so do the rest, rather than ask again.
     let sign = true;
     for (const [i, text] of parts.entries()) {
-      const part = i === 0 ? { ...params, text } : { ...params, text, guid: newGuid(), media: undefined };
+      const part = i === 0 ? { ...params, text } : { ...params, text, guid: newGuid(), media: undefined, re: undefined };
       const clear = await this.sendClear(conn, conv, part, sign);
       sign = clear.signature !== undefined;
       sent({ ...clear, text, guid: part.guid, ...this.clearMark() });
@@ -1721,7 +1819,7 @@ export class App {
         return signMsgRequest(this.signer!.key, { id, cert: this.signer!.cert, to: fingerprintFromString(to!)!, text: params.text }, sent);
       },
       signed: async (req) => ({
-        ok: await conn.msg({ ...params, ...req }),
+        ok: await conn.msg({ ...params, ...req, re: undefined }),
         signature: { state: 'verified', signer: this.proved, to: to!, sent, sentAtAnotherTime: false, signatureExpected: false },
       }),
       unsigned: async () => ({ ok: await conn.msg(params) }),
@@ -2325,6 +2423,7 @@ export class App {
     const conv = this.store.conversation(id);
     if (!conv) return;
     this.store.active = id;
+    if (this.replying && this.replying.conv !== id) this.cancelReply();
     // Closing the news reader sees what it uncovers, so this one goes
     // first: the conversation the reader was covering has still not
     // been looked at.
@@ -2527,6 +2626,7 @@ export class App {
         guid: d.guid,
         ...(signature ? { signature } : {}),
         ...(d.signed !== undefined ? { signed: d.signed } : {}),
+        ...(d.re ? { re: d.re } : {}),
       });
       ack();
       const seen = sighting(signature, this.verifiedUnder(conv), d.from);
@@ -2838,6 +2938,7 @@ export class App {
           media: line.media,
           ...(read?.signature ? { signature: read.signature } : {}),
           ...(line.signed !== undefined ? { signed: line.signed } : {}),
+          ...(line.re ? { re: line.re } : {}),
         },
       ];
     });
@@ -2994,6 +3095,7 @@ export class App {
           media: m.media,
           ...(signature ? { signature } : {}),
           ...(m.signed !== undefined ? { signed: m.signed } : {}),
+          ...(m.re ? { re: m.re } : {}),
           ...this.clearMark(),
         },
         !m.read,
@@ -3117,7 +3219,10 @@ export class App {
       // Appending one line assumes the DOM still matches the array it was
       // drawn from. A merge rewrites that array, so redraw instead.
       if (this.store.revision !== this.drawnRevision) this.renderTranscript();
-      else appendLine(this.transcript, line, conv, this.store, this.images, this.transcriptOptions());
+      else {
+        appendLine(this.transcript, line, conv, this.store, this.images, this.transcriptOptions());
+        this.watchQuotes();
+      }
       const mine = line.from?.uid !== undefined && line.from.uid === this.store.self?.uid;
       if (fresh && !mine && !this.store.covered) {
         this.heard.append(h('p', {}, spoken(line, this.contactOf())));
@@ -3396,12 +3501,29 @@ export class App {
 
   private renderTranscript(): void {
     const conv = this.store.conversation(this.store.active);
+    this.quotesSeen.disconnect();
     if (conv) renderTranscript(this.transcript, conv, this.store, this.images, this.transcriptOptions());
     this.drawnRevision = this.store.revision;
+    this.watchQuotes();
   }
 
   private transcriptOptions(): TranscriptOptions {
-    return { markdown: this.markdown, moderator: this.conn?.moderator ?? false, contact: this.contactOf() };
+    const conv = this.store.conversation(this.store.active);
+    const targets = this.conn instanceof Connection ? this.conn.replies?.targets : undefined;
+    const may = !!conv && !!targets && this.mayReply(conv);
+    return {
+      markdown: this.markdown,
+      moderator: this.conn?.moderator ?? false,
+      contact: this.contactOf(),
+      replyable: (line) => may && startReply(line, conv!, targets!) !== null,
+      quote: (line) => resolveQuote(line.re!, conv!, this.quoteSources()),
+    };
+  }
+
+  /** Watch the quotes still waiting on their line, to fetch it once
+   *  they are on screen. */
+  private watchQuotes(): void {
+    for (const el of this.transcript.querySelectorAll<HTMLElement>('.quote[data-pending]')) this.quotesSeen.observe(el);
   }
 
   private contactOf(): ContactOf {
@@ -3647,6 +3769,10 @@ export class App {
         this.autoGrow();
         return;
       }
+      if (e.key === 'Escape' && this.replying && !e.isComposing) {
+        e.preventDefault();
+        return this.cancelReply();
+      }
       if (e.key === 'Enter' && !e.shiftKey) {
         e.preventDefault();
         const text = this.composer.value.trim();
@@ -3730,6 +3856,20 @@ export class App {
           line.hidden = false;
           return keepingPlace(this.transcript, () => this.renderTranscript());
         }
+        if (act.dataset.act === 'reply') return this.reply(line, conv);
+        if (act.dataset.act === 'quote') {
+          const q = line.re && resolveQuote(line.re, conv, this.quoteSources());
+          const row = q && q.state === 'found' && q.line ? rowOf(this.transcript, q.line) : undefined;
+          if (!row) return;
+          const still = matchMedia('(prefers-reduced-motion: reduce)').matches;
+          row.scrollIntoView({ block: 'center', behavior: still ? 'auto' : 'smooth' });
+          // Where the reader's eyes went, a keyboard and a screen reader go.
+          row.tabIndex = -1;
+          row.focus({ preventScroll: true });
+          row.classList.add('flash');
+          setTimeout(() => row.classList.remove('flash'), 1500);
+          return;
+        }
         const run = act.dataset.act === 'redact' ? this.redactLine(line) : this.reportLine(line, conv);
         run.catch((err: unknown) => this.say(moderationProblem(err)));
         return;
@@ -3757,6 +3897,7 @@ export class App {
       // composer is one row of controls, and an attachment is a thing
       // already sent to the server that the next line will carry.
       this.attachChip,
+      this.replyChip,
       h('div', { class: 'composer' }, this.attachBtn, this.composer, this.compareBtn, this.deniableBtn, this.composerHint, this.filePicker),
     );
 

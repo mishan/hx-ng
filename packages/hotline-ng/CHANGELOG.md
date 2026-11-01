@@ -24,6 +24,16 @@ says how.
 
 ### Added
 
+- Replies (hxd-ng's `docs/hotline-ng.md` §7.3): `Credentials.replies`
+  says `replies` at login, and `Connection.replies` is the login
+  reply's `RepliesConfig`, the kinds of target the server keeps, saved
+  with the session; `CAP_REPLIES`. `ReplyTarget` is `re` on `chat` and
+  `msg`, on the `chat`, `msg` and `im` events, `HistoryLine`,
+  `StoredMessage` and `RequestMessage`; `history` takes `ids`.
+  `FakeServer` serves it as the server does: granted only to a login
+  that asks, `re` carried to such sessions alone, refused `bad_request`
+  across rooms or of the wrong kind, malformed, of a kind it does not
+  keep or beside `signed`, and `ids` answered within the server's bound.
 - `Credentials.sessionStore` keeps the resume record in a
   `SessionStore` of the caller's (such as `localStorage`, for an
   installed app) in place of `sessionStorage`, and `hasSavedSession`

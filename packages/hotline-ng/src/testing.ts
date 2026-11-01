@@ -34,6 +34,8 @@ import type {
   LoginParams,
   MsgOk,
   MsgParams,
+  ReplyKind,
+  ReplyTarget,
   ReqFrame,
   ResumeOk,
   ResumeParams,
@@ -93,17 +95,23 @@ export interface FakeServerOptions {
   /** What the login reply's `detach` says; nothing here times it. */
   grace?: number;
   /** The families served, as the login reply's `caps` lists them: of
-   *  these, `history`, `inbox`, `rooms` and `chat_guid` change what the
-   *  server does. `identity` says the server has the identity
+   *  these, `history`, `inbox`, `rooms`, `chat_guid` and `replies`
+   *  change what the server does, and `replies` is listed only to a
+   *  login that asks for it. `identity` says the server has the identity
    *  endpoints, and is listed to every session however it logged in, as
    *  the spec has it; this server does not serve them, and
    *  `identityToken` stands in for them. */
   caps?: string[];
 }
 
-const CAPS = ['history', 'inbox', 'rooms', 'chat_guid', 'identity'];
+const CAPS = ['history', 'inbox', 'rooms', 'chat_guid', 'replies', 'identity'];
 const GUID = /^(?:[0-9a-f]{32}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i;
 const MAX_JOINED = 32;
+/** hxd-ng's bounds on `history`'s `ids` (§7.3): how many one names, and
+ *  the bytes of the reply that answers them. */
+const IDS_MAX = 50;
+const IDS_REPLY_BYTES = 64 * 1024;
+const REF = /^[A-Za-z0-9_-]{22}$/;
 
 interface Session {
   uid: number;
@@ -125,6 +133,8 @@ interface Session {
   broken: boolean;
   /** Has it sent a request of the rooms family (chat-rooms.md §7)? */
   aware: boolean;
+  /** Was it granted `replies` (§7.3), so sends and is sent `re`? */
+  replies: boolean;
   ended: boolean;
 }
 
@@ -143,6 +153,31 @@ interface Mail extends StoredMessage {
   fromUid: number;
   /** Stored while its recipient had no attached session (§6.4). */
   pending: boolean;
+}
+
+/** The kind a target names. */
+function kindOf(re: ReplyTarget): ReplyKind {
+  return 'line' in re ? 'line' : 'pm' in re ? 'pm' : 'im' in re ? 'im' : 'signed';
+}
+
+const isU64 = (v: unknown): v is number => typeof v === 'number' && Number.isSafeInteger(v) && v >= 0;
+
+/** `re` as hxd-ng reads it: one kind, with nothing beside it but a
+ *  line's `room`, written back as it keeps it, the lobby's room left
+ *  out. `null` for anything else, which is refused. */
+function parseReply(v: unknown): ReplyTarget | null {
+  if (typeof v !== 'object' || v === null || Array.isArray(v)) return null;
+  const o = v as Record<string, unknown>;
+  const keys = Object.keys(o);
+  if ('line' in o) {
+    const room = o.room ?? 0;
+    if (!isU64(o.line) || !isU64(room) || room > 0xffffffff) return null;
+    if (keys.length !== ('room' in o ? 2 : 1)) return null;
+    return room ? { line: o.line, room } : { line: o.line };
+  }
+  if (keys.length !== 1) return null;
+  // `im` and `signed` are kinds this server does not keep, refused alike.
+  return typeof o.pm === 'string' && REF.test(o.pm) ? { pm: o.pm } : null;
 }
 
 class Refusal {
@@ -342,6 +377,8 @@ export class FakeServer {
       ...this.blank(uid, account),
       user: { uid, nick: user.nick, icon: user.icon ?? 128, admin: false, status: 'active', transport: 'encrypted' },
       scripted: true,
+      // The test plays a client that asked for every family served.
+      replies: this.targets().length > 0,
     };
     if (account && this.caps.has('inbox')) s.mailbox = account.login;
     if (user.fingerprint) this.prove(s, user.fingerprint);
@@ -384,12 +421,15 @@ export class FakeServer {
   }
 
   /** A line of public chat from `uid`, which must be in `room` if one
-   *  is named. Returns its id. */
-  say(uid: number, text: string, opts: { room?: number; style?: 'normal' | 'action' } = {}): number {
+   *  is named, answering `re` if one is given, which the server checks as
+   *  a `chat` from a client that said `replies`. Returns its id. */
+  say(uid: number, text: string, opts: { room?: number; style?: 'normal' | 'action'; re?: ReplyTarget } = {}): number {
     const s = this.live(uid);
     const room = opts.room ?? 0;
     if (room && !this.room(room).members.has(uid)) throw new Error(`${uid} is not in room ${room}`);
-    return this.relay(s, room, text, opts.style ?? 'normal');
+    const re = this.replyOf(s, opts.re, undefined, ['line', 'signed']);
+    this.sameRoom(re, room);
+    return this.relay(s, room, text, opts.style ?? 'normal', undefined, re);
   }
 
   /** A private message from `uid`, as `msg` would send it. */
@@ -487,7 +527,7 @@ export class FakeServer {
         answer({ ok: this.sync(s) });
         return this.flushMail(s);
       }
-      answer({ ok: this.dispatch(s, req, params) });
+      answer({ ok: this.dispatch(s, req, params, id) });
     } catch (e) {
       if (!(e instanceof Refusal)) throw e;
       answer({ error: e.error });
@@ -504,7 +544,7 @@ export class FakeServer {
     this.restatus(s, 'detached');
   }
 
-  private dispatch(s: Session, req: string, p: Record<string, any>): unknown {
+  private dispatch(s: Session, req: string, p: Record<string, any>, id: number): unknown {
     // What makes a session rooms-aware, before the request is acted on
     // (chat-rooms.md §7): the lobby's `room_topic` alone does not.
     if ((req.startsWith('room') && req !== 'room_topic') || Number(p.room)) {
@@ -518,7 +558,7 @@ export class FakeServer {
       case 'chat':
         return this.chat(s, p as ChatParams);
       case 'history':
-        return this.history(p as HistoryParams);
+        return this.history(s, p as HistoryParams, id);
       case 'msg':
         return this.sendMsg(s, p as MsgParams);
       case 'inbox':
@@ -563,6 +603,7 @@ export class FakeServer {
     s.user = { uid, nick, icon: p.icon ?? account?.icon ?? 128, admin: false, status: 'active', transport: 'encrypted' };
     if (proved) this.prove(s, String(uid).padStart(52, '0'));
     s.detachable = !!proved || !!account?.password;
+    s.replies = p.replies === true && this.targets().length > 0;
     s.socket = sock;
     sock.session = s;
     this.join(s);
@@ -574,8 +615,9 @@ export class FakeServer {
         server: { name: this.name, subject: this.subject },
         users: this.roster(),
         detach: s.detachable ? { grace: this.grace } : null,
-        caps: [...this.caps],
+        caps: [...this.caps].filter((c) => c !== 'replies' || s.replies),
         seq: 0,
+        ...(s.replies ? { replies: { targets: this.targets() } } : {}),
         ...(this.caps.has('history') ? { history: { max_lines: 10_000, max_days: 30 } } : {}),
         ...(this.caps.has('inbox') ? { inbox: this.counts(s) } : {}),
         ...(this.caps.has('rooms')
@@ -636,23 +678,28 @@ export class FakeServer {
   private chat(s: Session, p: ChatParams): ChatOk {
     if (typeof p.text !== 'string') throw refuse('bad_request', 'No text.');
     const room = p.room ?? 0;
-    if (room) this.member(s, room);
     const guid = this.caps.has('chat_guid') ? this.guid(p.guid) : undefined;
+    // Its form before the room, and its room after, as hxd-ng checks them.
+    const re = this.replyOf(s, p.re, p.signed, ['line', 'signed']);
+    if (room) this.member(s, room);
+    this.sameRoom(re, room);
     // A guid is its account's where one person is behind it, else the
     // identity's, else the session's (§7.3).
     const key = guid && `${this.durable(s) ?? `s:${s.id}`}|${room}|${guid}`;
     const prior = key ? this.guids.get(key) : undefined;
     if (prior !== undefined) return this.lineId(prior);
-    const id = this.relay(s, room, p.text, p.style ?? 'normal', guid && p.guid);
+    const id = this.relay(s, room, p.text, p.style ?? 'normal', guid && p.guid, re);
     if (key) this.guids.set(key, id);
     return this.lineId(id);
   }
 
-  private relay(s: Session, room: number, text: string, style: 'normal' | 'action', guid?: string): number {
+  private relay(s: Session, room: number, text: string, style: 'normal' | 'action', guid?: string, re?: ReplyTarget): number {
     const id = ++this.nextLine;
     const at = now();
     // Without `history` nothing is kept, and a line has no id.
-    if (this.caps.has('history')) this.kept.get(room)!.push({ id, at, from: { nick: s.user.nick, icon: s.user.icon }, text, style });
+    if (this.caps.has('history')) {
+      this.kept.get(room)!.push({ id, at, from: { nick: s.user.nick, icon: s.user.icon }, text, style, ...(re ? { re } : {}) });
+    }
     const data: Events['chat'] = {
       from: { uid: s.uid, nick: s.user.nick },
       text,
@@ -662,11 +709,15 @@ export class FakeServer {
       ...(room ? { room } : {}),
     };
     const hearers = room ? [...this.room(room).members].map((uid) => this.live(uid)) : this.everyone();
-    for (const h of hearers) this.emit(h, 'chat', h === s && guid ? { ...data, guid } : data);
+    for (const h of hearers) {
+      this.emit(h, 'chat', { ...data, ...(h === s && guid ? { guid } : {}), ...(h.replies && re ? { re } : {}) });
+    }
     return id;
   }
 
-  private history(p: HistoryParams): HistoryOk {
+  private history(s: Session, p: HistoryParams, reqId: number): HistoryOk {
+    // From any other session `ids` is a param the server does not know.
+    if (p.ids != null && s.replies) return this.historyIds(p, reqId);
     const room = p.room ?? 0;
     if (room) this.room(room);
     const limit = p.limit ?? 50;
@@ -676,13 +727,45 @@ export class FakeServer {
     const rows = this.kept.get(room)!.filter((l) => l.id > after && (!before || l.id < before));
     // Forward from `after` when there is one, else back from the newest.
     const lines = after ? rows.slice(0, limit) : rows.slice(-limit);
-    return { lines, has_more: rows.length > limit };
+    return { lines: lines.map((l) => this.lineFor(s, l)), has_more: rows.length > limit };
+  }
+
+  /** The lines of `room` among `ids`, ascending, held as hxd-ng holds
+   *  them to the bytes of the whole reply: past it, the highest are left
+   *  out and `has_more` says so, though never the first. */
+  private historyIds(p: HistoryParams, reqId: number): HistoryOk {
+    const ids = p.ids as unknown;
+    if (!Array.isArray(ids) || ids.length < 1 || ids.length > IDS_MAX || !ids.every(isU64) || p.before != null || p.after != null) {
+      throw refuse('bad_request', '`ids` takes 1 to 50 line ids, and no cursors.');
+    }
+    const room = p.room ?? 0;
+    if (room) this.room(room);
+    const wanted = new Set(ids);
+    const lines = this.kept.get(room)!.filter((l) => wanted.has(l.id));
+    const size = (v: unknown): number => new TextEncoder().encode(JSON.stringify(v)).length;
+    let bytes = size({ reply: reqId, ok: { lines: [], has_more: false } });
+    const shown: HistoryLine[] = [];
+    for (const line of lines) {
+      const more = size(line) + (shown.length ? 1 : 0);
+      if (bytes + more > IDS_REPLY_BYTES && shown.length) break;
+      bytes += more;
+      shown.push(line);
+    }
+    return { lines: shown, has_more: shown.length < lines.length };
+  }
+
+  /** A kept line as `s` is sent it: its `re` only if it said `replies`. */
+  private lineFor(s: Session, line: HistoryLine): HistoryLine {
+    if (s.replies || !line.re) return line;
+    const { re: _re, ...rest } = line;
+    return rest;
   }
 
   private sendMsg(s: Session, p: MsgParams): MsgOk {
     if ((p.to === undefined) === (p.to_login === undefined)) throw refuse('bad_request', 'Name exactly one of to and to_login.');
     if (!p.text) throw refuse('bad_request', 'No text.');
     const guid = this.guid(p.guid);
+    const re = this.replyOf(s, p.re, p.signed, ['pm', 'im', 'signed']);
     let targets: Session[];
     let box: string | null;
     if (p.to !== undefined) {
@@ -704,7 +787,7 @@ export class FakeServer {
     // and to nobody when there is no session to hold it.
     if (!box || !sender) {
       if (!targets.length) throw refuse('no_such_user', 'No such user.');
-      for (const x of targets) this.emit(x, 'msg', { from, text: p.text, at, queued: false });
+      for (const x of targets) this.emit(x, 'msg', { from, text: p.text, at, queued: false, ...this.reFor(x, re) });
       return { queued: false };
     }
     const attached = targets.filter((x) => x.socket || x.scripted);
@@ -715,7 +798,7 @@ export class FakeServer {
     if (prior) {
       if (prior.pending && attached.length) {
         prior.pending = false;
-        for (const x of attached) this.emit(x, 'msg', this.waited(prior));
+        for (const x of attached) this.emit(x, 'msg', this.waited(prior, x));
       }
       return this.msgOk(prior);
     }
@@ -731,10 +814,11 @@ export class FakeServer {
       to: box,
       fromUid: s.uid,
       pending: !attached.length,
+      ...(re ? { re } : {}),
     };
     this.stored.push(m);
     if (key) this.mailGuids.set(key, m);
-    for (const x of attached) this.emit(x, 'msg', { from, text: m.text, at, queued: false, id: m.id, ref: m.ref });
+    for (const x of attached) this.emit(x, 'msg', { from, text: m.text, at, queued: false, id: m.id, ref: m.ref, ...this.reFor(x, re) });
     return this.msgOk(m);
   }
 
@@ -743,7 +827,7 @@ export class FakeServer {
     return { queued: m.pending, ref: m.ref };
   }
 
-  private waited(m: Mail): Events['msg'] {
+  private waited(m: Mail, to: Session): Events['msg'] {
     const sender = this.sessions.get(m.fromUid);
     return {
       from: { uid: sender ? sender.uid : 0, nick: m.from.nick, ...(m.from.login ? { login: m.from.login } : {}) },
@@ -752,6 +836,7 @@ export class FakeServer {
       queued: true,
       id: m.id,
       ref: m.ref,
+      ...this.reFor(to, m.re),
     };
   }
 
@@ -759,7 +844,7 @@ export class FakeServer {
     for (const m of this.mailOf(s)) {
       if (!m.pending) continue;
       m.pending = false;
-      this.emit(s, 'msg', this.waited(m));
+      this.emit(s, 'msg', this.waited(m, s));
     }
   }
 
@@ -774,7 +859,7 @@ export class FakeServer {
       .filter((m) => before === undefined || m.id < before)
       .reverse()
       .slice(0, limit)
-      .map(({ id, ref, from, text, at, read }): StoredMessage => ({ id, ref, from, text, at, read }));
+      .map(({ id, ref, from, text, at, read, re }): StoredMessage => ({ id, ref, from, text, at, read, ...this.reFor(s, re) }));
     return { messages, ...this.counts(s) };
   }
 
@@ -825,6 +910,7 @@ export class FakeServer {
       socket: null,
       broken: false,
       aware: false,
+      replies: false,
       ended: false,
     };
   }
@@ -849,6 +935,37 @@ export class FakeServer {
   private durable(s: Session): string | null {
     if (s.mailbox) return `a:${s.mailbox}`;
     return s.identity ? `i:${s.identity.fingerprint}` : null;
+  }
+
+  /** The kinds of target this server keeps (§7.3). It has neither
+   *  instant messaging nor signatures, so neither `im` nor `signed`. */
+  private targets(): ReplyKind[] {
+    if (!this.caps.has('replies')) return [];
+    return [...(this.caps.has('history') ? ['line' as const] : []), ...(this.caps.has('inbox') ? ['pm' as const] : [])];
+  }
+
+  /** A request's `re`, checked as hxd-ng checks it: only what it names,
+   *  never what the server holds, so one retired or never seen is kept
+   *  as sent. A session not granted `replies` has it ignored. */
+  private replyOf(s: Session, re: unknown, signed: unknown, takes: ReplyKind[]): ReplyTarget | undefined {
+    if (re == null || !s.replies) return undefined;
+    // Its `re` belongs inside the signed object, which has no key for one yet.
+    if (signed != null) throw refuse('bad_request', 'A signed line or message cannot carry `re` yet.');
+    const kept = parseReply(re);
+    if (!kept || !this.targets().includes(kindOf(kept))) {
+      throw refuse('bad_request', 'Malformed `re`, or a kind of target this server does not keep.');
+    }
+    if (!takes.includes(kindOf(kept))) throw refuse('bad_request', '`chat` answers a line, and `msg` a message.');
+    return kept;
+  }
+
+  /** A line answers a line of its own room alone. */
+  private sameRoom(re: ReplyTarget | undefined, room: number): void {
+    if (re && 'line' in re && (re.room ?? 0) !== room) throw refuse('bad_request', 'A line answers a line of its own room.');
+  }
+
+  private reFor(s: Session, re: ReplyTarget | undefined): { re?: ReplyTarget } {
+    return s.replies && re ? { re } : {};
   }
 
   /** A guid as the wire allows it, any case and hyphens or none (§7.1). */

@@ -363,12 +363,13 @@ describe('public chat history', () => {
 });
 
 describe('a redacted line', () => {
-  it('keeps its id, time and place and loses its words, name and image', () => {
+  it('keeps its id, time and place and loses its words, name, image and what it answered', () => {
     const s = new Store();
     s.add(LOBBY, chat(1, 'before', { id: 1 }));
     s.add(LOBBY, chat(2, 'slur', {
       id: 2,
       from: { uid: 5, nick: 'Bob' },
+      re: { line: 1 },
       media: { id: 'H', type: 'image/png', width: 1, height: 1, bytes: 9 },
     }));
     s.add(LOBBY, chat(3, 'after', { id: 3 }));
@@ -377,7 +378,7 @@ describe('a redacted line', () => {
     expect(s.redact(2)).toEqual({ handle: 'H' });
     const lines = s.conversation(LOBBY)!.lines;
     expect(lines.map((l) => l.id)).toEqual([1, 2, 3]);
-    expect(lines[1]).toMatchObject({ t: 2, kind: 'deleted', deleted: true, from: undefined });
+    expect(lines[1]).toMatchObject({ t: 2, kind: 'deleted', deleted: true, from: undefined, re: undefined });
     expect(lines[1]!.text).not.toContain('slur');
     expect(lines[1]!.media).toEqual({ type: 'image/png', width: 1, height: 1, bytes: 9, removed: true });
     expect(s.revision).toBe(rev + 1);

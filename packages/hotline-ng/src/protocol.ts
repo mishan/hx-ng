@@ -313,6 +313,8 @@ export interface LoginParams {
    *  session that proved a device of the account's linked identity, and
    *  then listed in `caps`. */
   friendships?: true;
+  /** This client sends and reads `re` (§7.3), so is sent it. */
+  replies?: true;
 }
 
 export interface VideoLimits {
@@ -388,7 +390,39 @@ export interface LoginOk {
   /** Present exactly when `caps` lists `messaging`, whether or not the
    *  login said `messaging`. */
   messaging?: MessagingConfig;
+  /** Present exactly when `caps` lists `replies`, which only a login
+   *  that said `replies` is granted. */
+  replies?: RepliesConfig;
 }
+
+/** The kinds of target a server keeps (§7.3): `line` where it keeps
+ *  history, `pm` where it has an inbox, `im` with `messaging`, `signed`
+ *  with `signed`. */
+export type ReplyKind = 'line' | 'pm' | 'im' | 'signed';
+
+export interface RepliesConfig {
+  targets: ReplyKind[];
+}
+
+/**
+ * What a line or message answers (§7.3), kept and relayed as sent. The
+ * server never resolves one: a target retired, redacted or never seen is
+ * carried all the same, and the reader looks it up under its own access.
+ *
+ * `chat` takes `line`, in the room it is sent in, and `signed`; `msg`
+ * takes `pm`, `im`, naming the sender's or the recipient's login, and
+ * `signed`. Neither may carry one beside its own `signed`.
+ */
+export type ReplyTarget =
+  /** A kept line, by id; `room` absent or 0 is the lobby. */
+  | { line: number; room?: number }
+  /** A stored message, by its `ref`. */
+  | { pm: string }
+  /** An instant message, by its sender's login and its guid. */
+  | { im: { login: string; guid: string } }
+  /** A signed line or message: its signer's fingerprint, its id as a
+   *  UUID, and the base64url SHA-256 of its signed object. */
+  | { signed: { signer: string; id: string; hash: string } };
 
 export interface ResumeParams {
   session: string;
@@ -437,6 +471,8 @@ export type MsgParams = {
   /** The detached form, base64url, with `signed` (`signMsgRequest`),
    *  whose id `guid` must be. */
   signed?: string;
+  /** With `replies`, the message this answers: `pm`, `im` or `signed`. */
+  re?: ReplyTarget;
 } & (
   | { to: number; to_login?: never }
   | { to_login: string; to?: never }
@@ -473,6 +509,8 @@ export interface ChatParams {
   guid?: string;
   /** The detached form, base64url, with `signed` (`signChatRequest`). */
   signed?: string;
+  /** With `replies`, the line this answers: `line` or `signed`. */
+  re?: ReplyTarget;
 }
 
 export interface ChatOk {
@@ -553,6 +591,8 @@ export interface StoredMessage {
   media?: Media;
   /** A signed message's detached form, base64url. */
   signed?: string;
+  /** To a session that said `replies`, what it answers. */
+  re?: ReplyTarget;
 }
 
 export interface InboxParams {
@@ -599,6 +639,9 @@ export interface HistoryLine {
   media?: HistoryMedia;
   /** A signed line's detached form, or its link form, base64url. */
   signed?: string;
+  /** To a session that said `replies`, what it answers. A redacted
+   *  line has lost it with its words. */
+  re?: ReplyTarget;
 }
 
 export interface HistoryParams {
@@ -610,12 +653,19 @@ export interface HistoryParams {
   limit?: number;
   /** The room, with `rooms`; absent or 0 is the lobby. */
   room?: number;
+  /** In place of the cursors, from a session granted `replies`: 1 to 50
+   *  line ids, answered ascending with those of `room` that this reader
+   *  may see, a missing one or another room's left out alike. Where the
+   *  lines do not fit one reply the highest are left out too, and
+   *  `has_more` says to ask for them again. */
+  ids?: number[];
 }
 
 export interface HistoryOk {
   /** Always oldest first, whichever cursor was used. */
   lines: HistoryLine[];
-  /** More rows exist in the direction of this request. */
+  /** More rows exist in the direction of this request, or for `ids`,
+   *  lines past the last one answered were left out. */
   has_more: boolean;
 }
 
@@ -942,6 +992,7 @@ export interface RequestMessage {
   at: number;
   guid: string;
   signed?: string;
+  re?: ReplyTarget;
 }
 
 /** One sender's waiting message requests, oldest first. */
@@ -1940,6 +1991,8 @@ export interface Events {
     guid?: string;
     /** A signed line's detached form, or its link form, base64url. */
     signed?: string;
+    /** To a session that said `replies`, what it answers. */
+    re?: ReplyTarget;
   };
   /** `room`, with `rooms`, is never present for the lobby. */
   notice: { text: string; room?: number };
@@ -1980,6 +2033,8 @@ export interface Events {
     /** In place of `sealed`: one held for this session was lost when it
      *  resumed without saying `sealed`. */
     sealed_lost?: true;
+    /** To a session that said `replies`, what it answers. */
+    re?: ReplyTarget;
   };
   broadcast: { from: Sender; text: string };
   kicked: Record<string, never>;
@@ -2104,6 +2159,8 @@ export interface Events {
     signed?: string;
     /** It came under an approval rather than a friendship. */
     approval?: true;
+    /** To a session that said `replies`, what it answers. */
+    re?: ReplyTarget;
   };
   /** A friend received (`read` false) or read a message this account
    *  sent under `guid`. Under an approval only reads are told. */
@@ -2147,6 +2204,9 @@ export const CAP_ROOMS = 'rooms';
 export const CAP_MESSAGING = 'messaging';
 /** Listed only in reply to a login that asked for it, and granted. */
 export const CAP_FRIENDSHIPS = 'friendships';
+/** Listed only in reply to a login that asked for it, where the server
+ *  keeps some kind of target. */
+export const CAP_REPLIES = 'replies';
 
 /**
  * `resync_required` is not a failure: the session is still alive and the

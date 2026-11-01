@@ -2649,14 +2649,11 @@ export class App {
   private async partRoom(room: number): Promise<void> {
     const conn = this.conn;
     if (!(conn instanceof Connection)) return;
-    // Before the request, so a listing that lands meanwhile does not rejoin it.
+    // Before the request, so a listing that lands meanwhile does not rejoin
+    // it, and kept whatever the reply: a part may have landed though its
+    // answer was lost, and a second click's not_a_member undoes nothing.
     this.leftByChoice.add(room);
-    try {
-      await conn.roomPart(room);
-    } catch (e) {
-      this.leftByChoice.delete(room);
-      throw e;
-    }
+    await conn.roomPart(room);
     const c = this.store.conversation(publicId(room));
     if (conn !== this.conn || !c?.room) return;
     c.joined = false;

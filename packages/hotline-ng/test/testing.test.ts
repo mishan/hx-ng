@@ -445,6 +445,33 @@ describe('the fake server', () => {
     expect(server.requests.map((f) => f.req).slice(-2)).toEqual(['resume', 'login']);
   });
 
+  it('tells a login the rooms the session it replaces was in, in place and after a reload', async () => {
+    const saved = new Map<string, string>();
+    const store = { getItem: (k: string) => saved.get(k) ?? null, setItem: (k: string, v: string) => void saved.set(k, v), removeItem: (k: string) => void saved.delete(k) };
+    const server = new FakeServer({ accounts: ACCOUNTS, rooms: [{ name: 'lounge' }] });
+    const creds = server.credentials({ login: 'alice', password: 'pw', sessionStore: store });
+    const inPlace: number[][] = [];
+    const reloaded: number[][] = [];
+    const alice = new Connection(creds, { onLogin: (_, was) => inPlace.push(was.rooms) });
+    await alice.start();
+    const lounge = alice.login!.rooms!.list[0]!.id;
+    await alice.roomJoin(lounge);
+    const uid = alice.self!.uid;
+    const copy = new Map(saved);
+    const page = { getItem: (k: string) => copy.get(k) ?? null, setItem: (k: string, v: string) => void copy.set(k, v), removeItem: (k: string) => void copy.delete(k) };
+
+    alice.drop();
+    await waitFor('the detach', () => alice.state === 'reconnecting');
+    server.expire(uid);
+    await waitFor('the login', () => alice.state === 'online' && alice.self?.uid !== uid);
+    const reload = new Connection({ ...creds, sessionStore: page }, { onLogin: (_, was) => reloaded.push(was.rooms) });
+    await reload.start();
+
+    expect(inPlace).toEqual([[], [lounge]]);
+    expect(reloaded).toEqual([[lounge]]);
+    expect(server.requests.filter((f) => f.req === 'resume').length).toBeGreaterThanOrEqual(2);
+  });
+
   it('answers a resume after an overflow resync_required, and the catch-up pages each joined room', async () => {
     const server = new FakeServer({
       accounts: ACCOUNTS,

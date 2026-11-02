@@ -425,6 +425,26 @@ button.ghost.danger { color: var(--admin); border-color: var(--admin); }
 }
 .rail-pm:hover .rail-close, .rail-close:focus-visible { opacity: 1; }
 .rail-close:hover { color: var(--admin); }
+.rail-rooms { padding-top: 0.9rem; }
+.rail-group { margin-bottom: 0.6rem; padding-bottom: 0.4rem; border-bottom: 1px solid var(--line); }
+/* A room this session is not in: listed to be found, quieter than one it is. */
+.rail-item.joinable { font-style: italic; }
+
+/* The room on screen: its name, topic and the way in or out. */
+.room-bar {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 0.3rem 0.75rem;
+  padding: 0.45rem 0.9rem;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface);
+}
+.room-bar[hidden] { display: none; }
+.room-name { margin: 0; font-size: 0.95rem; font-weight: 600; }
+.room-topic { flex: 1; min-width: 0; color: var(--text); overflow-wrap: anywhere; }
+.room-members { color: var(--muted); font-size: 0.8rem; }
+.room-bar button { margin-left: auto; }
 
 /* The mailbox, which is the server's count rather than this client's:
    `msg_read` is a cursor over the whole mailbox, so there is one number
@@ -1505,6 +1525,8 @@ button.ghost.danger:hover { color: var(--admin); border-color: var(--admin); }
   main { grid-row: 2; }
   .roster { grid-row: 2; }
   .rail-head { display: none; }
+  /* A strip has no room for a group's box: its rooms sit in the row. */
+  .rail-group { display: contents; }
   .rail-item { width: auto; flex: none; }
   /* A conversation button hovered on a touch screen is a conversation
      button being tapped, so the close cross has to be there already. */
@@ -1612,6 +1634,8 @@ button.ghost.danger:hover { color: var(--admin); border-color: var(--admin); }
   body.show-drawer .rail { transform: none; visibility: visible; transition: transform 0.18s ease; }
   body.show-drawer .scrim { opacity: 1; pointer-events: auto; }
   .rail-head { display: block; }
+  /* A drawer is a column again, where the group's rule shows. */
+  .rail-group { display: block; }
   .rail-item { width: 100%; flex: none; }
 
   /* What the title bar had no room for. The buttons keep the look they

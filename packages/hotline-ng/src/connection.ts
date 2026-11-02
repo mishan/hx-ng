@@ -422,7 +422,12 @@ export interface ConnectionHooks {
     rooms?: SyncRooms;
     stale?: true;
   }) => void;
-  onLogin?: (ok: LoginOk) => void;
+  /** A login. `replaced.rooms` are the rooms the session it replaces
+   *  was in, by this connection's record, which is saved with the
+   *  session, so a reload whose resume failed has them too. The server
+   *  forgets them with the session (hxd-ng's `docs/chat-rooms.md`
+   *  §2.3): a client keeps its place by joining them again. */
+  onLogin?: (ok: LoginOk, replaced: { rooms: number[] }) => void;
   /** Resume succeeded; `replay` events are about to arrive. */
   onResumed?: (replay: number) => void;
   /**
@@ -765,6 +770,7 @@ export class Connection {
     this.moderator = ok.self.moderator === true;
     this.manageRooms = ok.self.manage_rooms === true;
     // A fresh session is in no room.
+    const replaced = [...this.roomHistoryIds.keys()];
     this.roomHistoryIds.clear();
     this.moderation = ok.moderation ?? null;
     this.banner = ok.banner ?? null;
@@ -782,7 +788,7 @@ export class Connection {
     this.gotSnapshot = true;
     this.retry = 0;
     this.setState('online');
-    this.hooks.onLogin?.(ok);
+    this.hooks.onLogin?.(ok, { rooms: replaced });
     this.hooks.onSnapshot?.({ self: ok.self, users: ok.users, server: ok.server });
     // Not awaited: the session is up and the room is drawable, and a
     // catch-up that is paging — or backing off a rate limit — would

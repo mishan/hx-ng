@@ -4,10 +4,12 @@
 
 import type {
   ChatStyle,
+  Events,
   HistoryMedia,
   InboxCounts,
   InboxOk,
   ReplyTarget,
+  Room,
   ServerInfo,
   Status,
   User,
@@ -106,8 +108,8 @@ export interface Peer {
 
 export interface Conversation {
   id: ConvId;
-  kind: 'lobby' | 'pm';
-  /** Empty for the lobby. */
+  kind: 'lobby' | 'room' | 'pm';
+  /** Empty for the lobby and a room. */
   peer: Peer;
   title: string;
   lines: Line[];
@@ -127,9 +129,50 @@ export interface Conversation {
   verified?: string;
   /** The friend at the far end is typing to this account. */
   typing?: boolean;
+  /** A room as the server last showed it (hxd-ng's `docs/chat-rooms.md`
+   *  §7), and whether this session is in it. Its `unread` is this
+   *  client's alone: the server keeps no read cursor per room (§14), so
+   *  reading it on another device clears nothing here. */
+  room?: Room;
+  joined?: boolean;
+  /** Who is in a joined room: what joining it answered, kept by the
+   *  room's comings and goings. */
+  members?: Set<number>;
+  /** The lobby's and each room's window over the server's log. */
+  log?: PublicLog;
 }
 
 export const LOBBY: ConvId = 'lobby';
+
+/** Where a public conversation stands in the server's log. Line ids
+ *  ascend within a room and interleave across rooms (chat-rooms.md §3),
+ *  so each room pages from a cursor of its own. */
+export class PublicLog {
+  /** The paging cursors, and whether a page backwards came back with
+   *  nothing more. */
+  oldest?: number;
+  newest?: number;
+  exhausted = false;
+  seen = new Set<number>();
+  /** Ids of lines a page carried and this client left out (`skipHistory`). */
+  skipped = new Set<number>();
+
+  record(id: number): void {
+    this.seen.add(id);
+    if (this.oldest === undefined || id < this.oldest) this.oldest = id;
+    if (this.newest === undefined || id > this.newest) this.newest = id;
+  }
+}
+
+/** The conversation a `room` names, the lobby for 0. */
+export function publicId(room: number | undefined): ConvId {
+  return room ? `room:${room}` : LOBBY;
+}
+
+/** The room a public conversation is, 0 for the lobby. */
+export function roomOf(c: Conversation): number {
+  return c.room?.id ?? 0;
+}
 
 /** What `msg` should carry to reach this conversation's other half, or
  *  `null` when nothing can: a guest who has left the roster has no login
@@ -288,13 +331,6 @@ export class Store {
    *  them stops paging early over mail the login flush happened to
    *  deliver first. */
   mailExhausted = false;
-  /** Paging cursor and exhaustion state for the public transcript. */
-  oldestHistoryId?: number;
-  newestHistoryId?: number;
-  historyExhausted = false;
-  private seenHistory = new Set<number>();
-  /** Ids of lines a page carried and this client left out (`skipHistory`). */
-  private skippedHistory = new Set<number>();
   /**
    * Stored messages this client has already placed, by `mailKey`. Mail
    * arrives twice by design — the login flush pushes `msg` events for
@@ -335,6 +371,7 @@ export class Store {
       lines: [],
       unread: 0,
       mailIds: new Map(),
+      log: new PublicLog(),
     });
   }
 
@@ -391,6 +428,9 @@ export class Store {
     const u = this.users.get(uid);
     this.users.delete(uid);
     this.forgetPmUid(uid);
+    // Leaving the server is told as that alone, not as a part from
+    // each room (chat-rooms.md §7.3).
+    for (const c of this.conversations.values()) c.members?.delete(uid);
     return u;
   }
 
@@ -497,7 +537,7 @@ export class Store {
   }
 
   closePm(id: ConvId): void {
-    if (id === LOBBY) return;
+    if (this.conversations.get(id)?.kind !== 'pm') return;
     // Every alias, whatever kind it is — reading them back off `peer`
     // would miss the nick one, which is deliberately not stored there.
     for (const [k, v] of [...this.pmIndex]) if (v === id) this.pmIndex.delete(k);
@@ -590,34 +630,41 @@ export class Store {
     this.mail = { unread: this.mail.unread + 1, total: this.mail.total + 1 };
   }
 
-  hasHistory(id: number): boolean {
-    return this.seenHistory.has(id);
+  /** The log of the lobby, or of a room this client holds. */
+  log(id: ConvId = LOBBY): PublicLog | undefined {
+    return this.conversations.get(id)?.log;
+  }
+
+  hasHistory(id: number, conv: ConvId = LOBBY): boolean {
+    return this.log(conv)?.seen.has(id) ?? false;
   }
 
   /** Merge a durable public-chat page with live lines already drawn.
    *  History and live events deliberately overlap; ids, not text or
    *  timestamps, decide whether they are the same line. */
-  mergeHistory(lines: Line[], hasMore: boolean, direction: 'older' | 'newer'): number {
-    const lobby = this.conversations.get(LOBBY)!;
-    const fresh = lines.filter((line) => line.id !== undefined && !this.seenHistory.has(line.id));
-    for (const line of lines) if (line.id !== undefined) this.recordHistoryId(line.id);
+  mergeHistory(lines: Line[], hasMore: boolean, direction: 'older' | 'newer', conv: ConvId = LOBBY): number {
+    const c = this.conversations.get(conv);
+    const log = c?.log;
+    if (!c || !log) return 0;
+    const fresh = lines.filter((line) => line.id !== undefined && !log.seen.has(line.id));
+    for (const line of lines) if (line.id !== undefined) log.record(line.id);
     if (!fresh.length) {
-      if (direction === 'older') this.historyExhausted = !hasMore;
+      if (direction === 'older') log.exhausted = !hasMore;
       return 0;
     }
-    lobby.lines.push(...fresh);
-    lobby.lines.sort((a, b) => a.t - b.t || (a.id ?? Number.MAX_SAFE_INTEGER) - (b.id ?? Number.MAX_SAFE_INTEGER));
+    c.lines.push(...fresh);
+    c.lines.sort((a, b) => a.t - b.t || (a.id ?? Number.MAX_SAFE_INTEGER) - (b.id ?? Number.MAX_SAFE_INTEGER));
     // Trim the end the reader is moving away from. Trimming the front
     // after prepending a page would throw away the page just fetched —
     // and, because its ids are recorded, throw it away for good: every
     // further scroll would fetch a page, discard it, and show nothing.
-    this.trimPublic(lobby, direction === 'older' ? 'newest' : 'oldest');
-    if (direction === 'older') this.historyExhausted = !hasMore;
+    this.trimPublic(c, log, direction === 'older' ? 'newest' : 'oldest');
+    if (direction === 'older') log.exhausted = !hasMore;
     this.revision++;
     return fresh.length;
   }
 
-  /** Bound the public transcript, dropping lines from one end and
+  /** Bound a public transcript, dropping lines from one end and
    *  forgetting their ids with them.
    *
    *  Forgetting is the point: the cap makes a window over the log, not a
@@ -626,38 +673,81 @@ export class Store {
    *  out as already seen and leave a hole nothing could fill. Mail is
    *  the other way round — see `seenMail` — because there the ids are
    *  how a conversation gets its own mail back. */
-  private trimPublic(lobby: Conversation, from: 'oldest' | 'newest'): void {
-    const excess = lobby.lines.length - MAX_LINES;
+  private trimPublic(c: Conversation, log: PublicLog, from: 'oldest' | 'newest'): void {
+    const excess = c.lines.length - MAX_LINES;
     if (excess <= 0) return;
-    const dropped = from === 'oldest' ? lobby.lines.splice(0, excess) : lobby.lines.splice(MAX_LINES, excess);
-    for (const line of dropped) if (line.id !== undefined) this.seenHistory.delete(line.id);
+    const dropped = from === 'oldest' ? c.lines.splice(0, excess) : c.lines.splice(MAX_LINES, excess);
+    for (const line of dropped) if (line.id !== undefined) log.seen.delete(line.id);
     // A line left out goes with the window it fell in, or the cursor
     // would stand on it, past lines no longer held.
-    const kept = lobby.lines.flatMap((line) => (line.id === undefined ? [] : [line.id]));
+    const kept = c.lines.flatMap((line) => (line.id === undefined ? [] : [line.id]));
     const [lo, hi] = [Math.min(...kept), Math.max(...kept)];
-    for (const id of this.skippedHistory) {
+    for (const id of log.skipped) {
       if (id >= lo && id <= hi) continue;
-      this.skippedHistory.delete(id);
-      this.seenHistory.delete(id);
+      log.skipped.delete(id);
+      log.seen.delete(id);
     }
-    this.oldestHistoryId = undefined;
-    this.newestHistoryId = undefined;
-    for (const id of this.seenHistory) this.recordHistoryId(id);
+    log.oldest = undefined;
+    log.newest = undefined;
+    for (const id of [...log.seen]) log.record(id);
   }
 
   /** Ids of a page's lines this client leaves out, which paging still
    *  moves past. */
-  skipHistory(ids: readonly number[]): void {
+  skipHistory(ids: readonly number[], conv: ConvId = LOBBY): void {
+    const log = this.log(conv);
+    if (!log) return;
     for (const id of ids) {
-      this.skippedHistory.add(id);
-      this.recordHistoryId(id);
+      log.skipped.add(id);
+      log.record(id);
     }
   }
 
-  private recordHistoryId(id: number): void {
-    this.seenHistory.add(id);
-    if (this.oldestHistoryId === undefined || id < this.oldestHistoryId) this.oldestHistoryId = id;
-    if (this.newestHistoryId === undefined || id > this.newestHistoryId) this.newestHistoryId = id;
+  /** The rooms this session may see, as a listing has them: each held
+   *  as a conversation, kept with its lines and whether it is joined,
+   *  and one no longer listed let go. */
+  setRooms(list: readonly Room[]): void {
+    const listed = new Set(list.map((r) => publicId(r.id)));
+    for (const c of [...this.conversations.values()]) if (c.kind === 'room' && !listed.has(c.id)) this.removeRoom(c.room!.id);
+    for (const r of list) this.putRoom(r);
+  }
+
+  /** A room shown or shown again: `room_added`, `room_changed`. */
+  putRoom(room: Room): Conversation {
+    const id = publicId(room.id);
+    let c = this.conversations.get(id);
+    if (!c) {
+      c = { id, kind: 'room', peer: {}, title: `#${room.name}`, lines: [], unread: 0, mailIds: new Map(), joined: false, log: new PublicLog() };
+      this.conversations.set(id, c);
+    }
+    c.room = room;
+    c.title = `#${room.name}`;
+    return c;
+  }
+
+  /** The room a member is told of, held from then on if no listing has
+   *  named it yet: after a reload, the replay comes before the `sync`
+   *  that lists the rooms, and its lines are this session's to keep. */
+  memberOf(room: number): Conversation {
+    const c = this.conversations.get(publicId(room)) ?? this.putRoom({ id: room, name: String(room), topic: '', position: 0, members: 0, may_post: false });
+    c.joined = true;
+    return c;
+  }
+
+  /** A room archived or out of sight: its transcript goes with it. */
+  removeRoom(room: number): void {
+    const id = publicId(room);
+    if (!this.conversations.delete(id)) return;
+    if (this.active === id) this.active = LOBBY;
+    this.revision++;
+  }
+
+  /** The rooms held, as the rail lists them: those joined first, then
+   *  the rest, each in the server's order, by position then name. */
+  rooms(): Conversation[] {
+    const byOrder = (a: Conversation, b: Conversation) =>
+      Number(!!b.joined) - Number(!!a.joined) || a.room!.position - b.room!.position || a.room!.name.localeCompare(b.room!.name);
+    return [...this.conversations.values()].filter((c) => c.kind === 'room').sort(byOrder);
   }
 
   /**
@@ -674,9 +764,9 @@ export class Store {
   add(id: ConvId, line: Line, fresh = true): Conversation | undefined {
     const c = this.conversations.get(id);
     if (!c) return undefined;
-    if (line.id !== undefined && c.kind === 'lobby') {
-      if (this.seenHistory.has(line.id)) return undefined;
-      this.recordHistoryId(line.id);
+    if (line.id !== undefined && c.log) {
+      if (c.log.seen.has(line.id)) return undefined;
+      c.log.record(line.id);
     } else if (line.id !== undefined) {
       const key = mailKey(line.id, line.ref);
       this.seenMail.add(key);
@@ -691,7 +781,7 @@ export class Store {
         line.receipt = read ? 'read' : 'delivered';
       }
     }
-    if (c.kind === 'lobby') this.trimPublic(c, 'oldest');
+    if (c.log) this.trimPublic(c, c.log, 'oldest');
     else if (c.lines.length > MAX_LINES) c.lines.splice(0, c.lines.length - MAX_LINES);
     // A line announcing a news article is counted where the news is, on
     // the News badge. It lands in whichever conversation was on screen
@@ -729,9 +819,8 @@ export class Store {
    * Returns the image's handle, if it had one, so its bytes can be let go
    * too; `undefined` when the line was not held or already blank.
    */
-  redact(id: number): { handle?: string } | undefined {
-    const lobby = this.conversations.get(LOBBY)!;
-    const line = lobby.lines.find((l) => l.id === id);
+  redact(id: number, conv: ConvId = LOBBY): { handle?: string } | undefined {
+    const line = this.conversations.get(conv)?.lines.find((l) => l.id === id);
     if (!line || line.deleted) return undefined;
     const handle = blank(line);
     this.revision++;
@@ -740,16 +829,16 @@ export class Store {
 
   /**
    * A moderator's purge blanked many public lines at once: each exactly
-   * as `redact` would, in one pass over the lobby and one revision, since
+   * as `redact` would, in one pass over the conversation and one revision, since
    * a purge can name many lines. Ids not held, or already blank,
    * are skipped. Returns how many were blanked and the handles of the
    * images they carried.
    */
-  redactAll(ids: readonly number[]): { blanked: number; handles: string[] } {
+  redactAll(ids: readonly number[], conv: ConvId = LOBBY): { blanked: number; handles: string[] } {
     const wanted = new Set(ids);
     const handles: string[] = [];
     let blanked = 0;
-    for (const line of this.conversations.get(LOBBY)!.lines) {
+    for (const line of this.conversations.get(conv)?.lines ?? []) {
       if (line.id === undefined || line.deleted || !wanted.has(line.id)) continue;
       const handle = blank(line);
       if (handle) handles.push(handle);
@@ -762,6 +851,21 @@ export class Store {
   system(text: string, id: ConvId = this.active): Conversation | undefined {
     return this.add(id, { t: Date.now(), kind: 'system', text, local: true });
   }
+}
+
+/** A public notice, or a subject, said in the lobby or in a room this
+ *  session is in: the conversation it lands in, the topic or subject
+ *  changed where it is one, and the line to add there. */
+export function routePublic(
+  store: Store,
+  e: { ev: 'notice'; data: Events['notice'] } | { ev: 'subject'; data: Events['subject'] },
+): { conv: Conversation; line: Line } {
+  const room = e.data.room ? store.memberOf(e.data.room) : undefined;
+  const conv = room ?? store.conversation(LOBBY)!;
+  if (e.ev === 'notice') return { conv, line: { t: Date.now(), kind: 'notice', text: e.data.text } };
+  if (room) room.room = { ...room.room!, topic: e.data.subject };
+  else store.server = { ...store.server, subject: e.data.subject };
+  return { conv, line: { t: Date.now(), kind: 'notice', text: `${room ? 'Topic' : 'Subject'}: ${e.data.subject}` } };
 }
 
 /** Blank a line as `history` answers a redacted one, and return the

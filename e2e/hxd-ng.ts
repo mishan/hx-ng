@@ -16,6 +16,7 @@
 
 import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 
@@ -103,12 +104,24 @@ export interface RunningServer {
   stop(): void;
 }
 
+/** Whether `port` on `host` is taken, found by binding it: a server a
+ *  killed run left behind may hold it without answering. Only
+ *  `EADDRINUSE` means taken; any other failure is the caller's. */
+function portTaken(host: string, port: number): Promise<boolean> {
+  return new Promise((resolve, reject) => {
+    const probe = createServer();
+    probe.once('error', (e: NodeJS.ErrnoException) => (e.code === 'EADDRINUSE' ? resolve(true) : reject(e)));
+    probe.listen({ host, port, exclusive: true }, () => probe.close(() => resolve(false)));
+  });
+}
+
 async function waitForPort(url: string, timeoutMs: number): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   let lastError: unknown;
   while (Date.now() < deadline) {
     try {
-      const res = await fetch(url);
+      // A listener that never answers must not hold the wait past its end.
+      const res = await fetch(url, { signal: AbortSignal.timeout(1000) });
       if (res.ok) return;
     } catch (e) {
       lastError = e;
@@ -135,6 +148,13 @@ export interface ServerOptions {
  *  guest-only, unattested identity server — enough to exercise enrollment
  *  and login without also needing a registrar or an existing account. */
 export async function startServer(ngPort: number, opts: ServerOptions = {}): Promise<RunningServer> {
+  const httpBase = `http://127.0.0.1:${ngPort}`;
+  // A server a killed run left behind would answer the wait below in
+  // this one's place, with none of its accounts. Both of the config's
+  // binds, below, are on 127.0.0.1.
+  for (const port of [ngPort - 100, ngPort]) {
+    if (await portTaken('127.0.0.1', port)) throw new Error(`127.0.0.1:${port} is taken: a server from an earlier run may still hold it`);
+  }
   const dir = mkdtempSync(join(tmpdir(), 'hxd-ng-e2e-'));
   for (const [path, body] of Object.entries(opts.files ?? {})) {
     mkdirSync(dirname(join(dir, path)), { recursive: true });
@@ -165,8 +185,8 @@ ${opts.sections ?? IDENTITY_SECTIONS}`,
     if (code !== null && code !== 0) console.error(`hxd exited ${code}:\n${log}`);
   });
 
-  const httpBase = `http://127.0.0.1:${ngPort}`;
   await waitForPort(`${httpBase}/.well-known/hotline`, 10_000);
+  if (proc.exitCode !== null) throw new Error(`hxd exited ${proc.exitCode}:\n${log}`);
   for (const [login, toml] of Object.entries(opts.accounts ?? {})) {
     writeFileSync(join(dir, 'accounts', `${login}.toml`), toml);
   }

@@ -171,6 +171,16 @@ describe('LineReader', () => {
     }
   });
 
+  it("reads a room's line against that room, live and paged", async () => {
+    const dev = await device();
+    const signer = row({ identity: { fingerprint: SIGNER, handle: null } });
+    const req = await signChatRequest(dev.key, { cert: dev.cert, server: HERE, room: 3, text: 'hi' }, SENT);
+    const kept = { id: 1, at: SENT, from: { nick: 'Bob', icon: 128 }, text: req.text, style: 'normal' as const, signed: req.signed };
+    expect((await new LineReader(PINNED).live(event(signer, req.text, req.signed, { room: 3 }), signer)).signature?.state).toBe('verified');
+    expect((await new LineReader(PINNED).history(kept, 3)).signature?.state).toBe('verified');
+    expect((await new LineReader(PINNED).history(kept)).signature).toMatchObject({ state: 'elsewhere', signedFor: 'room 3' });
+  });
+
   it('refuses a line shown in another style than it was signed in', async () => {
     const dev = await device();
     const signer = row({ identity: { fingerprint: SIGNER, handle: null } });

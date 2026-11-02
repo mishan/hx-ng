@@ -13,6 +13,9 @@ says how.
 - `outranked` reads "That account or role may do…".
 - A connection started `resumeOnly` whose resume is refused on a
   reconnect ends, with `onEnded`, rather than staying `reconnecting`.
+- `onLogin` is handed, beside the reply, the rooms the session that
+  login replaces was in, from the record saved with the session, so a
+  client can join them again after a reload whose resume failed.
 - Breaking: `MsgOk` has no `id`. A stored message's `id` is its place
   in the recipient's mailbox, shown to the recipient alone, and `ref`
   names it to both parties (hxd-ng's `docs/hotline-ng.md` §7.1):

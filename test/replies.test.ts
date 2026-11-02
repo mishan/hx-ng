@@ -21,15 +21,17 @@ function rooms() {
   const store = new Store();
   const lobby = store.conversation(LOBBY)!;
   const pm = store.openPm({ login: 'bob', nick: 'Bob' });
-  return { store, lobby, pm };
+  const room = store.putRoom({ id: 8, name: 'lounge', topic: '', position: 0, members: 1, may_post: true });
+  return { store, lobby, pm, room };
 }
 
 describe('starting a reply', () => {
   it('names a line, a message and an instant message as the server keeps them, and nothing it does not', () => {
-    const { lobby, pm } = rooms();
+    const { lobby, pm, room } = rooms();
     const bob = { nick: 'Bob', login: 'bob' };
     for (const [what, conv, l, targets, re] of [
       ['a lobby line', lobby, line({ id: 7, from: bob }), ALL, { line: 7 }],
+      ['a room line, with its room', room, line({ id: 7, from: bob }), ALL, { line: 7, room: 8 }],
       ['a lobby line without history', lobby, line({ id: 7, from: bob }), ['pm'], null],
       ['a line never kept', lobby, line({ from: bob }), ALL, null],
       ['a redacted line', lobby, line({ id: 7, kind: 'deleted', deleted: true }), ALL, null],
@@ -71,24 +73,42 @@ describe('resolving a quote', () => {
       [2, null],
       [5, kept(5, { deleted: true })],
     ]);
-    const o = { lobby, fetched, me: 'me' };
+    const o = { fetched, me: 'me' };
     expect(resolveQuote({ line: 3 }, lobby, o)).toMatchObject({ state: 'found', nick: 'Ann', excerpt: 'held', line: { id: 3 } });
     expect(resolveQuote({ line: 1 }, lobby, o)).toEqual({ state: 'found', nick: 'Bob', excerpt: 'line 1' });
-    expect(resolveQuote({ line: 9 }, lobby, o)).toEqual({ state: 'pending', id: 9 });
+    expect(resolveQuote({ line: 9 }, lobby, o)).toEqual({ state: 'pending', id: 9, room: 0 });
     for (const re of [{ line: 2 }, { line: 4 }, { line: 5 }, { line: 3, room: 8 }, { pm: 'R' }]) {
       expect(resolveQuote(re, lobby, o), JSON.stringify(re)).toEqual({ state: 'missing' });
     }
   });
 
+  it("finds a room's line in that room alone", () => {
+    const { store, lobby, room } = rooms();
+    store.add(room.id, line({ id: 3, text: 'in the room', from: { nick: 'Ann' } }));
+    store.add(LOBBY, line({ id: 4, text: 'in the lobby', from: { nick: 'Ann' } }));
+    const o = { fetched: new Map([[1, kept(1)]]), me: 'me' };
+    expect(resolveQuote({ line: 3, room: 8 }, room, o)).toMatchObject({ state: 'found', excerpt: 'in the room' });
+    expect(resolveQuote({ line: 1, room: 8 }, room, o)).toMatchObject({ state: 'found', excerpt: 'line 1' });
+    expect(resolveQuote({ line: 9, room: 8 }, room, o)).toEqual({ state: 'pending', id: 9, room: 8 });
+    for (const [re, conv] of [
+      [{ line: 4 }, room],
+      [{ line: 3 }, room],
+      [{ line: 3, room: 8 }, lobby],
+      [{ line: 3, room: 9 }, room],
+    ] as const) {
+      expect(resolveQuote(re, conv, o), JSON.stringify(re)).toEqual({ state: 'missing' });
+    }
+  });
+
   it("finds a message in its own conversation alone, an instant message by its sender's login and guid, and none whose text is hidden", () => {
-    const { store, lobby, pm } = rooms();
+    const { store, pm } = rooms();
     const other = store.openPm({ login: 'carol', nick: 'Carol' });
     store.add(pm.id, line({ ref: 'R1', text: 'from bob', from: { nick: 'Bob', login: 'bob' } }));
     store.add(pm.id, line({ guid: 'G1', text: 'im from bob', from: { nick: 'Bob', login: 'Bob' } }));
     store.add(pm.id, line({ guid: 'G2', ref: 'R2', text: 'mine', local: true, from: { nick: 'Me' } }));
     store.add(pm.id, line({ ref: 'R4', text: 'unchecked', hidden: true, from: { nick: 'Bob', login: 'bob' } }));
     store.add(other.id, line({ ref: 'R3', text: 'carol', from: { nick: 'Carol', login: 'carol' } }));
-    const o = { lobby, fetched: new Map(), me: 'ME' };
+    const o = { fetched: new Map(), me: 'ME' };
     expect(resolveQuote({ pm: 'R1' }, pm, o)).toMatchObject({ state: 'found', nick: 'Bob', excerpt: 'from bob' });
     expect(resolveQuote({ pm: 'R2' }, pm, o)).toMatchObject({ state: 'found', nick: 'you', excerpt: 'mine' });
     expect(resolveQuote({ im: { login: 'bob', guid: 'G1' } }, pm, o)).toMatchObject({ excerpt: 'im from bob' });

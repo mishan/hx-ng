@@ -83,11 +83,13 @@ describe('what reporting a line names', () => {
   const s = new Store();
   const lobby = s.conversation(LOBBY)!;
   const pm = s.openPm({ uid: 5, login: 'bob', nick: 'Bob' });
+  const room = s.putRoom({ id: 3, name: 'lounge', topic: '', position: 0, members: 1, may_post: true });
   const line = (over: Partial<Line>): Line => ({ t: 1, kind: 'chat', text: 'words', from: { uid: 5, nick: 'Bob' }, ...over });
   const me = { uid: 1, nick: 'Me' };
 
-  it('names a public line by its id, and a stored message by its inbox id', () => {
+  it('names a public line by its id, a room\'s too, and a stored message by its inbox id', () => {
     expect(lineReport(line({ id: 42 }), lobby, me)).toEqual({ line: 42 });
+    expect(lineReport(line({ id: 43 }), room, me)).toEqual({ line: 43 });
     expect(lineReport(line({ id: 9 }), pm, me)).toEqual({ msg: 9 });
   });
 

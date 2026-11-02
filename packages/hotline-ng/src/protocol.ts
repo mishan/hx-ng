@@ -315,6 +315,8 @@ export interface LoginParams {
   friendships?: true;
   /** This client sends and reads `re` (§7.3), so is sent it. */
   replies?: true;
+  /** This client reacts and reads reactions (§7.3), so is sent them. */
+  reactions?: true;
 }
 
 export interface VideoLimits {
@@ -393,6 +395,9 @@ export interface LoginOk {
   /** Present exactly when `caps` lists `replies`, which only a login
    *  that said `replies` is granted. */
   replies?: RepliesConfig;
+  /** Present exactly when `caps` lists `reactions`, which only a login
+   *  that said `reactions` is granted. */
+  reactions?: ReactionsConfig;
 }
 
 /** The kinds of target a server keeps (§7.3): `line` where it keeps
@@ -423,6 +428,48 @@ export type ReplyTarget =
   /** A signed line or message: its signer's fingerprint, its id as a
    *  UUID, and the base64url SHA-256 of its signed object. */
   | { signed: { signer: string; id: string; hash: string } };
+
+/** The kinds of target a server takes reactions on (§7.3). hxd-ng
+ *  takes `line` alone, where it keeps history; the draft names `im` and
+ *  `pm` for the private kinds. */
+export type ReactionKind = 'line' | 'im' | 'pm';
+
+export interface ReactionsConfig {
+  targets: ReactionKind[];
+  /** Distinct keys one target may carry. */
+  max_keys: number;
+  /** Keys one account may hold on one target. */
+  max_per_user: number;
+}
+
+/** What a reaction is on: a kept line, as `re` names one. */
+export type ReactionTarget = { line: number; room?: number };
+
+/** One emoji, fully qualified as the server spells every key: a key is
+ *  compared as the server returns it, never as it was sent. */
+export interface ReactionKey {
+  emoji: string;
+}
+
+/** A key on a target and how many accounts hold it. */
+export interface ReactionCount {
+  key: ReactionKey;
+  count: number;
+}
+
+/** One target's change in a `reactions_changed` (§7.3): `summary` is
+ *  the target as it stands, to replace whatever is held for it, `keys`
+ *  empty once the last reaction is gone and `mine` this reader's indexes
+ *  into them; `clear` takes them all, for a moderator's clear or a
+ *  redaction. */
+export type ReactionChange =
+  | { target: ReactionTarget; action: 'summary'; keys: ReactionCount[]; mine?: number[] }
+  | { target: ReactionTarget; action: 'clear' };
+
+export interface ReactOk {
+  /** How many accounts hold the key after the change. */
+  count: number;
+}
 
 export interface ResumeParams {
   session: string;
@@ -642,6 +689,12 @@ export interface HistoryLine {
   /** To a session that said `replies`, what it answers. A redacted
    *  line has lost it with its words. */
   re?: ReplyTarget;
+  /** To a session that said `reactions`, its keys in the order they
+   *  were first added; absent when it has none. */
+  reactions?: ReactionCount[];
+  /** Indexes into `reactions` of the keys this reader's account holds;
+   *  absent when none. */
+  reactions_mine?: number[];
 }
 
 export interface HistoryParams {
@@ -2069,6 +2122,10 @@ export interface Events {
    *  carries is the server's choice. One that touched rooms is told
    *  once per room, each with that room's ids. */
   chat_purged: { ids: number[]; room?: number };
+  /** To a session that said `reactions`: one room's changes, gathered
+   *  over a batch, a group for each target. Only a room's most recent
+   *  lines are told; an older one's are read again with `history`. */
+  reactions_changed: { changes: ReactionChange[] };
   /** A report was filed. Moderators only. */
   report: Report;
   /** A report was closed. It reaches the reporter, with `yours` true,
@@ -2207,6 +2264,9 @@ export const CAP_FRIENDSHIPS = 'friendships';
 /** Listed only in reply to a login that asked for it, where the server
  *  keeps some kind of target. */
 export const CAP_REPLIES = 'replies';
+/** Listed only in reply to a login that asked for it, where the server
+ *  takes reactions on some kind of target. */
+export const CAP_REACTIONS = 'reactions';
 
 /**
  * `resync_required` is not a failure: the session is still alive and the
@@ -2368,6 +2428,8 @@ const RETRY = {
   no_such_report: 'never',
   no_such_target: 'never',
   own_report: 'never',
+  // Reactions (§7.3): one already there may still be toggled.
+  too_many_reactions: 'never',
   no_such_ban: 'never',
   config_ban: 'never',
   // Accounts (account-admin.md).
@@ -2474,6 +2536,7 @@ export const ERROR_TEXT: Record<string, string> = {
   no_such_report: 'There is no such report.',
   own_report: 'That report is about you. Another moderator closes it.',
   protected: 'That user cannot be moderated by you.',
+  too_many_reactions: 'That line has as many reactions as it may, or you have as many on it as you may.',
   // Accounts.
   outranked: 'That account or role may do, or would be allowed to do, something you may not.',
   no_such_account: 'There is no such account.',
@@ -2503,6 +2566,14 @@ export function errorText(e: WireError): string {
   // The server's `banned` text names the reason but not when it lapses.
   if (e.code === 'banned' && e.expires_at) return `${text} (until ${new Date(e.expires_at * 1000).toLocaleString()})`;
   return text;
+}
+
+/** `errorText` for `react`, where `no_such_target` is a line gone or
+ *  out of this reader's reach, not something to report. */
+export function reactionErrorText(e: WireError): string {
+  if (e.code === 'no_such_target') return 'That line cannot be reacted to: it may be gone, or out of reach.';
+  if (e.code === 'access_denied') return 'You may not react here.';
+  return errorText(e);
 }
 
 /** `errorText` for the moderation requests, where `no_such_user` means

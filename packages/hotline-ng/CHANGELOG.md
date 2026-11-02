@@ -27,6 +27,23 @@ says how.
 
 ### Added
 
+- Reactions (hxd-ng's `docs/hotline-ng.md` §7.3): `Credentials.reactions`
+  says `reactions` at login, and `Connection.reactions` is the login
+  reply's `ReactionsConfig`, the kinds of target the server takes and
+  its `max_keys` and `max_per_user`, saved with the session;
+  `CAP_REACTIONS`. `react(target, key, { remove })` answers the key's
+  `count`, sending the key without U+FE0E, and its refusals are
+  `WireFailure`s, `too_many_reactions` among the codes and
+  `reactionErrorText` their wording. `HistoryLine` carries `reactions`
+  and `reactions_mine`, and the `reactions_changed` event a
+  `ReactionChange` for each target. `FakeServer` serves it: granted to a
+  login that asks where lines are kept, with `reactionCaps`, a reaction
+  its account's, refused as hxd-ng refuses it but for its rate limit,
+  on `history` to such sessions, and its changes sent a room at a time
+  by `flushReactions()`.
+- `onCaughtUp` is called once the catch-up after a login or a resync
+  has handed over its pages: where a client reads again what a gap may
+  have changed on lines it holds.
 - Replies (hxd-ng's `docs/hotline-ng.md` §7.3): `Credentials.replies`
   says `replies` at login, and `Connection.replies` is the login
   reply's `RepliesConfig`, the kinds of target the server keeps, saved

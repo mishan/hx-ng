@@ -34,6 +34,8 @@ import type {
   LoginParams,
   MsgOk,
   MsgParams,
+  ReactionChange,
+  ReactionCount,
   ReplyKind,
   ReplyTarget,
   ReqFrame,
@@ -95,16 +97,19 @@ export interface FakeServerOptions {
   /** What the login reply's `detach` says; nothing here times it. */
   grace?: number;
   /** The families served, as the login reply's `caps` lists them: of
-   *  these, `history`, `inbox`, `rooms`, `chat_guid` and `replies`
-   *  change what the server does, and `replies` is listed only to a
-   *  login that asks for it. `identity` says the server has the identity
+   *  these, `history`, `inbox`, `rooms`, `chat_guid`, `replies` and
+   *  `reactions` change what the server does, and `replies` and
+   *  `reactions` are listed only to a login that asks for them, and only
+   *  beside `history` for `reactions`. `identity` says the server has the identity
    *  endpoints, and is listed to every session however it logged in, as
    *  the spec has it; this server does not serve them, and
    *  `identityToken` stands in for them. */
   caps?: string[];
+  /** The `reactions` block's caps; hxd-ng's defaults by default. */
+  reactionCaps?: { max_keys: number; max_per_user: number };
 }
 
-const CAPS = ['history', 'inbox', 'rooms', 'chat_guid', 'replies', 'identity'];
+const CAPS = ['history', 'inbox', 'rooms', 'chat_guid', 'replies', 'reactions', 'identity'];
 const GUID = /^(?:[0-9a-f]{32}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i;
 const MAX_JOINED = 32;
 /** hxd-ng's bounds on `history`'s `ids` (§7.3): how many one names, and
@@ -135,6 +140,8 @@ interface Session {
   aware: boolean;
   /** Was it granted `replies` (§7.3), so sends and is sent `re`? */
   replies: boolean;
+  /** Was it granted `reactions` (§7.3), so reacts and is sent them? */
+  reactions: boolean;
   ended: boolean;
 }
 
@@ -278,6 +285,13 @@ export class FakeServer {
   private readonly guests: boolean;
   private readonly grace: number;
   private readonly caps: Set<string>;
+  private readonly reactionCaps: { max_keys: number; max_per_user: number };
+  /** Each line's keys, in the order first added, and the accounts
+   *  holding each. */
+  private readonly reacted = new Map<number, Map<string, Set<string>>>();
+  /** The lines whose reactions changed since the last batch, a room's
+   *  at a time. */
+  private readonly unsent = new Map<number, Set<number>>();
   private readonly sessions = new Map<number, Session>();
   private readonly rooms = new Map<number, FakeRoom>();
   private readonly kept = new Map<number, HistoryLine[]>([[0, []]]);
@@ -301,6 +315,7 @@ export class FakeServer {
     this.guests = opts.guests ?? true;
     this.grace = opts.grace ?? 300;
     this.caps = new Set(opts.caps ?? CAPS);
+    this.reactionCaps = opts.reactionCaps ?? { max_keys: 20, max_per_user: 5 };
     for (const r of opts.rooms ?? []) this.addRoom(r);
   }
 
@@ -379,6 +394,7 @@ export class FakeServer {
       scripted: true,
       // The test plays a client that asked for every family served.
       replies: this.targets().length > 0,
+      reactions: this.reacting(),
     };
     if (account && this.caps.has('inbox')) s.mailbox = account.login;
     if (user.fingerprint) this.prove(s, user.fingerprint);
@@ -418,6 +434,23 @@ export class FakeServer {
   /** The messages stored for `login`, oldest first. */
   mail(login: string): StoredMessage[] {
     return this.stored.filter((m) => m.to === login).map(({ id, ref, from, text, at, read }) => structuredClone({ id, ref, from, text, at, read }));
+  }
+
+  /** Send each room's reaction changes since the last batch: one
+   *  `reactions_changed` a room to each session that said `reactions`
+   *  and reads it, as hxd-ng does a batch window after them. */
+  flushReactions(): void {
+    for (const [room, ids] of this.unsent) {
+      const readers = room ? [...this.room(room).members].map((uid) => this.live(uid)) : this.everyone();
+      for (const s of readers.filter((r) => r.reactions)) {
+        const changes = [...ids].map((line): ReactionChange => {
+          const { keys, mine } = this.summary(s, line);
+          return { target: { line, ...(room ? { room } : {}) }, action: 'summary', keys, ...(mine.length ? { mine } : {}) };
+        });
+        this.emit(s, 'reactions_changed', { changes });
+      }
+    }
+    this.unsent.clear();
   }
 
   /** A line of public chat from `uid`, which must be in `room` if one
@@ -559,6 +592,8 @@ export class FakeServer {
         return this.chat(s, p as ChatParams);
       case 'history':
         return this.history(s, p as HistoryParams, id);
+      case 'react':
+        return this.react(s, p);
       case 'msg':
         return this.sendMsg(s, p as MsgParams);
       case 'inbox':
@@ -604,6 +639,7 @@ export class FakeServer {
     if (proved) this.prove(s, String(uid).padStart(52, '0'));
     s.detachable = !!proved || !!account?.password;
     s.replies = p.replies === true && this.targets().length > 0;
+    s.reactions = p.reactions === true && this.reacting();
     s.socket = sock;
     sock.session = s;
     this.join(s);
@@ -615,9 +651,10 @@ export class FakeServer {
         server: { name: this.name, subject: this.subject },
         users: this.roster(),
         detach: s.detachable ? { grace: this.grace } : null,
-        caps: [...this.caps].filter((c) => c !== 'replies' || s.replies),
+        caps: [...this.caps].filter((c) => (c !== 'replies' || s.replies) && (c !== 'reactions' || s.reactions)),
         seq: 0,
         ...(s.replies ? { replies: { targets: this.targets() } } : {}),
+        ...(s.reactions ? { reactions: { targets: ['line' as const], ...this.reactionCaps } } : {}),
         ...(this.caps.has('history') ? { history: { max_lines: 10_000, max_days: 30 } } : {}),
         ...(this.caps.has('inbox') ? { inbox: this.counts(s) } : {}),
         ...(this.caps.has('rooms')
@@ -717,7 +754,7 @@ export class FakeServer {
 
   private history(s: Session, p: HistoryParams, reqId: number): HistoryOk {
     // From any other session `ids` is a param the server does not know.
-    if (p.ids != null && s.replies) return this.historyIds(p, reqId);
+    if (p.ids != null && s.replies) return this.historyIds(s, p, reqId);
     const room = p.room ?? 0;
     if (room) this.room(room);
     const limit = p.limit ?? 50;
@@ -733,7 +770,7 @@ export class FakeServer {
   /** The lines of `room` among `ids`, ascending, held as hxd-ng holds
    *  them to the bytes of the whole reply: past it, the highest are left
    *  out and `has_more` says so, though never the first. */
-  private historyIds(p: HistoryParams, reqId: number): HistoryOk {
+  private historyIds(s: Session, p: HistoryParams, reqId: number): HistoryOk {
     const ids = p.ids as unknown;
     if (!Array.isArray(ids) || ids.length < 1 || ids.length > IDS_MAX || !ids.every(isU64) || p.before != null || p.after != null) {
       throw refuse('bad_request', '`ids` takes 1 to 50 line ids, and no cursors.');
@@ -741,7 +778,7 @@ export class FakeServer {
     const room = p.room ?? 0;
     if (room) this.room(room);
     const wanted = new Set(ids);
-    const lines = this.kept.get(room)!.filter((l) => wanted.has(l.id));
+    const lines = this.kept.get(room)!.filter((l) => wanted.has(l.id)).map((l) => this.lineFor(s, l));
     const size = (v: unknown): number => new TextEncoder().encode(JSON.stringify(v)).length;
     let bytes = size({ reply: reqId, ok: { lines: [], has_more: false } });
     const shown: HistoryLine[] = [];
@@ -754,11 +791,67 @@ export class FakeServer {
     return { lines: shown, has_more: shown.length < lines.length };
   }
 
-  /** A kept line as `s` is sent it: its `re` only if it said `replies`. */
+  /** A kept line as `s` is sent it: its `re` only if it said
+   *  `replies`, and its reactions only if it said `reactions`. */
   private lineFor(s: Session, line: HistoryLine): HistoryLine {
-    if (s.replies || !line.re) return line;
-    const { re: _re, ...rest } = line;
-    return rest;
+    const { re, ...rest } = line;
+    const shown = s.replies && re ? { ...rest, re } : rest;
+    if (!s.reactions) return shown;
+    const { keys, mine } = this.summary(s, line.id);
+    return { ...shown, ...(keys.length ? { reactions: keys } : {}), ...(mine.length ? { reactions_mine: mine } : {}) };
+  }
+
+  /** `react` as hxd-ng answers it, but for its rate limit, which
+   *  `refuseNext` stands in for, and its spelling of keys: a key is kept
+   *  as sent. A reaction is its account's, so a guest's is refused; a
+   *  clear needs a moderator, and there are none here. */
+  private react(s: Session, p: Record<string, unknown>): { count: number } {
+    if (!s.reactions) throw refuse('not_available', 'Reactions are not available.');
+    const t = p.target as Record<string, unknown> | undefined;
+    const room = t?.room ?? 0;
+    const target =
+      t && typeof t === 'object' && isU64(t.line) && isU64(room) && Object.keys(t).length === ('room' in t ? 2 : 1) ? { line: t.line, room } : null;
+    if (p.clear === true) throw refuse('access_denied', 'You may not clear reactions.');
+    const k = p.key as Record<string, unknown> | undefined;
+    const emoji = k && typeof k === 'object' && Object.keys(k).length === 1 && typeof k.emoji === 'string' ? k.emoji : '';
+    const sized = emoji !== '' && new TextEncoder().encode(emoji).length <= 64 && !/[\s\uFE0E]/u.test(emoji);
+    if (!target || !sized || p.reason !== undefined) throw refuse('bad_request', 'Malformed react.');
+    if (!s.account) throw refuse('access_denied', 'You may not react to that.');
+    const line = this.kept.get(target.room)?.find((l) => l.id === target.line);
+    if (!line || line.deleted || (target.room && !this.rooms.get(target.room)?.members.has(s.uid))) {
+      throw refuse('no_such_target', 'No such line.');
+    }
+    const keys = this.reacted.get(line.id) ?? new Map<string, Set<string>>();
+    const who = s.account.login;
+    const holders = keys.get(emoji);
+    if (p.remove === true) {
+      holders?.delete(who);
+      if (holders?.size === 0) keys.delete(emoji);
+    } else if (!holders?.has(who)) {
+      const held = [...keys.values()].filter((h) => h.has(who)).length;
+      if ((!holders && keys.size >= this.reactionCaps.max_keys) || held >= this.reactionCaps.max_per_user) {
+        throw refuse('too_many_reactions', 'That line has as many reactions as it may.');
+      }
+      keys.set(emoji, (holders ?? new Set()).add(who));
+    }
+    this.reacted.set(line.id, keys);
+    this.unsent.set(target.room, (this.unsent.get(target.room) ?? new Set()).add(line.id));
+    return { count: keys.get(emoji)?.size ?? 0 };
+  }
+
+  /** A line's reactions as `s` is shown them. */
+  private summary(s: Session, id: number): { keys: ReactionCount[]; mine: number[] } {
+    const keys = [...(this.reacted.get(id) ?? [])];
+    return {
+      keys: keys.map(([emoji, holders]) => ({ key: { emoji }, count: holders.size })),
+      mine: keys.flatMap(([, holders], i) => (s.account && holders.has(s.account.login) ? [i] : [])),
+    };
+  }
+
+  /** Whether `reactions` is granted to a login that asks: it needs kept
+   *  lines to react to. */
+  private reacting(): boolean {
+    return this.caps.has('reactions') && this.caps.has('history');
   }
 
   private sendMsg(s: Session, p: MsgParams): MsgOk {
@@ -911,6 +1004,7 @@ export class FakeServer {
       broken: false,
       aware: false,
       replies: false,
+      reactions: false,
       ended: false,
     };
   }

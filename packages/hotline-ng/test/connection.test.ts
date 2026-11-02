@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import { Connection, hasSavedSession, type ConnectionHooks, type Credentials } from '../src/connection';
+import { Connection, hasSavedSession, WireFailure, type ConnectionHooks, type Credentials } from '../src/connection';
 import { AuthError, SERVER_CHALLENGE_REFUSED } from '../src/identity';
-import type { HistoryLine, InboxOk, LoginOk, Room, SelfUser, User } from '../src/protocol';
+import { reactionErrorText, type HistoryLine, type InboxOk, type LoginOk, type Room, type SelfUser, type User } from '../src/protocol';
 import { FakeServer as FakeHotline } from '../src/testing';
 
 import { installFakeWire, settle, uninstallFakeWire, type FakeServer } from './fake-wire';
@@ -476,9 +476,10 @@ describe('resync recovery', () => {
         : { ok: { lines: [historyLine(13)], has_more: false } },
     );
 
-    const recovered: number[] = [];
+    const recovered: (number | 'caught up')[] = [];
     const second = new Connection(CREDS, {
       onMissedHistory: (page) => recovered.push(...page.lines.map((line) => line.id)),
+      onCaughtUp: () => recovered.push('caught up'),
     });
     await second.start();
     await settle();
@@ -487,7 +488,7 @@ describe('resync recovery', () => {
       { after: 10, limit: 200 },
       { after: 12, limit: 200 },
     ]);
-    expect(recovered).toEqual([11, 12, 13]);
+    expect(recovered).toEqual([11, 12, 13, 'caught up']);
     expect(second.lastHistoryId).toBe(20);
   });
   it('pages each joined room from its own cursor, apart from the lobby', async () => {
@@ -627,6 +628,64 @@ describe('push devices', () => {
     expect(ok.devid).toBe('hx-0123456789');
     expect(server.sent('push_register')[0]?.params).toMatchObject({ endpoint: 'https://push.example/abc' });
     expect(server.sent('push_unregister').map((f) => f.params)).toEqual([{ devid: 'hx-0123456789' }, {}]);
+  });
+});
+
+describe('reactions', () => {
+  const REACTIONS = { targets: ['line' as const], max_keys: 20, max_per_user: 5 };
+
+  it('says nothing of reactions unless asked', async () => {
+    const conn = await connect();
+    expect(server.sent('login')[0]?.params).not.toHaveProperty('reactions');
+    expect(conn.reactions).toBeNull();
+  });
+
+  it('says reactions when asked, and keeps the block granted for a resume', async () => {
+    server.on('login', () => ({ ok: loginOk({ caps: ['inbox', 'reactions'], reactions: REACTIONS }) }));
+    const first = new Connection({ ...CREDS, reactions: true });
+    await first.start();
+    expect(server.sent('login')[0]?.params).toMatchObject({ reactions: true });
+    expect(first.reactions).toEqual(REACTIONS);
+
+    // Nothing on the resume reply restates it.
+    server.on('resume', () => ({ ok: { replay: 0, self: user(1, 'Alice') } }));
+    server.on('sync', () => ({ ok: { server: { name: 'Test', subject: 'hi' }, users: [], seq: 0 } }));
+    const second = new Connection({ ...CREDS, reactions: true });
+    await second.start();
+    expect(server.sent('resume')).toHaveLength(1);
+    expect(second.reactions).toEqual(REACTIONS);
+  });
+
+  it('sends react as the wire specifies, with no text-style selector', async () => {
+    const conn = await connect();
+    server.on('react', () => ({ ok: { count: 2 } }));
+    expect(await conn.react({ line: 7 }, { emoji: '\u{1F44D}' })).toEqual({ count: 2 });
+    await conn.react({ line: 8, room: 3 }, { emoji: '\u2764\uFE0E' }, { remove: true });
+    expect(server.sent('react').map((f) => f.params)).toEqual([
+      { target: { line: 7 }, key: { emoji: '\u{1F44D}' } },
+      { target: { line: 8, room: 3 }, key: { emoji: '\u2764' }, remove: true },
+    ]);
+  });
+
+  it.each([
+    ['no_such_target', 'That line cannot be reacted to: it may be gone, or out of reach.'],
+    ['too_many_reactions', 'That line has as many reactions as it may, or you have as many on it as you may.'],
+    ['access_denied', 'You may not react here.'],
+    ['bad_request', 'not one emoji'],
+  ])('rejects %s as a WireFailure with its own wording', async (code, text) => {
+    const conn = await connect();
+    server.on('react', () => ({ error: { code, text: 'not one emoji' } }));
+    const failure = await conn.react({ line: 7 }, { emoji: '\u{1F44D}' }).catch((e: unknown) => e);
+    expect(failure).toBeInstanceOf(WireFailure);
+    expect(reactionErrorText((failure as WireFailure).wire)).toBe(text);
+  });
+
+  it('rejects rate_limited with how long to wait', async () => {
+    const conn = await connect();
+    server.on('react', () => ({ error: { code: 'rate_limited', text: 'Slow down.', retry_after: 3 } }));
+    await expect(conn.react({ line: 7 }, { emoji: '\u{1F44D}' })).rejects.toMatchObject({
+      wire: { code: 'rate_limited', retry_after: 3 },
+    });
   });
 });
 

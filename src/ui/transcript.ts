@@ -25,6 +25,7 @@ import { face } from './avatar';
 import { icon } from './icons';
 import { chatNodes } from './markdown';
 import { mediaEl, type MediaCache } from './media';
+import { reactionsEl } from './reactions';
 
 /** Chat-gutter icons stay at 1× — at 2× they compete with the text for
  *  attention, and the roster is where you go to look at people. */
@@ -44,6 +45,11 @@ export interface TranscriptOptions {
   replyable?: (line: Line) => boolean;
   /** What a line's `re` is drawn as. */
   quote?: (line: Line) => Quote;
+  /** Whether a line offers to be reacted to: its chips toggle, and its
+   *  actions offer more. */
+  reactable?: (line: Line) => boolean;
+  /** A refusal of this reader's last reaction to a line. */
+  reactionNote?: (line: Line) => string | undefined;
 }
 
 /** The line each drawn row is, for a click on one of its buttons to
@@ -136,28 +142,34 @@ function lineEl(
   opts: TranscriptOptions,
 ): HTMLElement {
   const el = line.kind === 'chat' ? chatLine(line, prev, store, media, opts) : eventLine(line, prev, media, opts);
+  const bar = reactionsEl(line, opts.reactable?.(line) === true, opts.reactionNote?.(line));
+  if (bar) el.querySelector('.text')?.append(bar);
   const acts = actions(line, conv, store, opts);
   if (acts) el.append(acts);
   rows.set(el, line);
   return el;
 }
 
-/** What can be done to a line from where it is drawn: report it, and
- *  for a moderator, redact it. Buttons carry only a verb; the shell
- *  finds the line with `lineOf` and does the rest. */
+/** What can be done to a line from where it is drawn: react to it,
+ *  reply to it, report it, and for a moderator, redact it. Buttons carry
+ *  only a verb; the shell finds the line with `lineOf` and does the rest. */
 function actions(line: Line, conv: Conversation, store: Store, opts: TranscriptOptions): HTMLElement | null {
   const report = lineReport(line, conv, store.self, (uid) => store.user(uid) !== undefined) !== null;
   const reply = opts.replyable?.(line) === true;
+  const react = opts.reactable?.(line) === true;
   const redact =
     !!opts.moderator &&
     conv.kind !== 'pm' &&
     line.id !== undefined &&
     !line.deleted &&
     (line.kind === 'chat' || line.kind === 'action');
-  if (!report && !redact && !reply) return null;
+  if (!report && !redact && !reply && !react) return null;
   return h(
     'span',
     { class: 'line-actions' },
+    react
+      ? h('button', { type: 'button', class: 'ghost small', dataset: { act: 'react' }, title: 'Add a reaction', ariaHasPopup: 'dialog' }, 'React')
+      : null,
     reply ? h('button', { type: 'button', class: 'ghost small', dataset: { act: 'reply' }, title: 'Reply to this' }, 'Reply') : null,
     report ? h('button', { type: 'button', class: 'ghost small', dataset: { act: 'report' }, title: 'Tell the moderators about this' }, 'Report') : null,
     redact ? h('button', { type: 'button', class: 'ghost small danger', dataset: { act: 'redact' }, title: 'Remove this line for everyone' }, 'Redact') : null,

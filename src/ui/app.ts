@@ -76,6 +76,8 @@ import {
   messageAddress,
   Claims,
   LOBBY,
+  mergePage,
+  Sequencer,
   publicId,
   roomOf,
   routePublic,
@@ -151,6 +153,8 @@ import { KeeperSlot, PortableFriends } from '../friendships';
 import { mayAdminister } from '../accounts';
 import { NewsView } from './news';
 import { QuoteFetcher, resolveQuote, startReply, type Replying } from '../replies';
+import { historyReactions, LIVE_LINES, ReactionDesk, whyNotAdd } from '../reactions';
+import { pickReaction, redrawReactions } from './reactions';
 import { appendLine, isAtBottom, keepingPlace, lineOf, renderTranscript, rowOf, scrollToEnd, signedName, spoken, type TranscriptOptions } from './transcript';
 import { wrapSelection } from './markdown';
 import { contentWords, disablePush, enablePush, pushEnabled, pushSupported, refreshPush } from '../push/client';
@@ -347,6 +351,22 @@ export class App {
    *  this connection, a fetcher for each room, since `history` takes one
    *  room's ids at a time. */
   private quotes = new Map<number, QuoteFetcher>();
+  /** A refusal of this reader's last reaction to a line, said under it
+   *  until it is replaced or fades. */
+  private reactNotes = new WeakMap<Line, string>();
+  /** Conversations where this session was refused `access_denied` on a
+   *  reaction, which offer none from then on. */
+  private reactDenied = new Set<ConvId>();
+  /** This connection's reactions, where it has them. */
+  private desk: ReactionDesk | null = null;
+  /** Lines older than the window told live, read again once in view. */
+  private reactionsSeen = new IntersectionObserver((seen) => {
+    const conv = this.store.conversation(this.store.active);
+    for (const e of seen) {
+      const id = e.isIntersecting ? lineOf(e.target)?.id : undefined;
+      if (conv && id !== undefined) this.desk?.seen(conv, id);
+    }
+  });
   /** Quotes waiting on a line, fetched once they come on screen. */
   private quotesSeen = new IntersectionObserver((seen) => {
     for (const e of seen) {
@@ -429,7 +449,7 @@ export class App {
   private repinning: Promise<void> | null = null;
   /** What arrives on the wire, shown in its order: a chat line once it
    *  is read, and whatever came after it behind it. */
-  private shown: Promise<void> = Promise.resolve();
+  private seq = new Sequencer();
   /** Lines a moderator blanked this session, for a copy that is shown
    *  only after: one still being read, or on a page fetched before. */
   private redacted = new Set<number>();
@@ -820,6 +840,7 @@ export class App {
         this.store.restartMail();
         // A new session: receipts owed under the last are not its to send.
         this.pendingReads.clear();
+        this.reactDenied.clear();
         this.dropOwed();
         // Nor is the keeper its: a login after a failed resume may be granted
         // no friendships, or prove another device, and `beforeFriends`
@@ -937,13 +958,18 @@ export class App {
       },
       onMissedHistory: (ok, room) => {
         const id = publicId(room);
-        void this.historyLines(ok, room).then((lines) => {
-          if (!lines) return;
-          if (this.store.mergeHistory(lines, ok.has_more, 'newer', id) && this.store.active === id) {
-            this.renderTranscript();
-          }
+        void this.mergePage(ok, room, 'newer', (added, restated) => {
+          if (added && this.store.active === id) this.renderTranscript();
+          else this.drawReactions(id, restated);
           this.blank([...this.redacted], id);
         });
+      },
+      // What the gap may have changed on lines held, which no page says:
+      // the conversation on screen first.
+      onCaughtUp: () => {
+        if (conn !== this.conn) return;
+        const convs = [this.store.conversation(LOBBY)!, ...this.store.rooms().filter((r) => r.joined)];
+        void this.desk?.refetchHeld([...convs.filter((c) => c.id === this.store.active), ...convs.filter((c) => c.id !== this.store.active)]);
       },
       onEnded: (reason) => {
         this.say(reason);
@@ -1029,6 +1055,7 @@ export class App {
               url: way.url,
               messaging: true,
               replies: true,
+              reactions: true,
               sessionStore: this.sessionStore,
               ...(signs ? { signs, sealed: true } : {}),
               ...(d.identity ? { friendships: true } : {}),
@@ -1048,6 +1075,16 @@ export class App {
     this.conn = conn;
     for (const q of this.quotes.values()) q.close();
     this.quotes.clear();
+    this.desk?.close();
+    this.desk =
+      conn instanceof Connection
+        ? new ReactionDesk(conn, {
+            store: this.store,
+            seq: this.seq,
+            changed: (id, lines) => this.drawReactions(id, lines),
+            refused: (line, id, text, denied) => this.noteReaction(line, id, text, denied),
+          })
+        : null;
     this.cancelReply();
     this.images.attach(conn);
     avatars.attach(conn);
@@ -1303,6 +1340,10 @@ export class App {
         this.quotesFor(d.room ?? 0).redacted(id);
       }
       this.inOrder(() => this.blank(d.ids, publicId(d.room)));
+    });
+
+    conn.on('reactions_changed', (d) => {
+      if (conn === this.conn) void this.desk?.changed(d.changes);
     });
 
     conn.on('report', (d) => this.moderation.onReport(d));
@@ -1724,6 +1765,81 @@ export class App {
     );
     this.quotes.set(room, q);
     return q;
+  }
+
+  /** Whether this session may react to `line` here. A guest, an account
+   *  that may not send chat, a room not joined, and a conversation where
+   *  the server refused it `access_denied` are offered none. A room it
+   *  may not post in is the server's to say: hxd-ng allows it there by
+   *  default. */
+  private mayReact(line: Line, conv: Conversation): boolean {
+    const conn = this.conn;
+    if (!(conn instanceof Connection) || !conn.reactions?.targets.includes('line') || conv.kind === 'pm') return false;
+    if (line.id === undefined || line.deleted || line.hidden || (line.kind !== 'chat' && line.kind !== 'action')) return false;
+    if (this.reactDenied.has(conv.id) || this.store.me() === null) return false;
+    if (conn.accounts && !conn.accounts.access.includes('send_chat')) return false;
+    return conv.kind !== 'room' || !!conv.joined;
+  }
+
+  /** The picker, for `line`: an emoji this reader holds there is taken
+   *  away, any other added. */
+  private async pickReaction(line: Line, conv: Conversation): Promise<void> {
+    const caps = this.conn instanceof Connection ? this.conn.reactions : null;
+    if (!caps) return;
+    const held = new Set(line.reactions?.filter((r) => r.mine).map((r) => r.emoji));
+    this.reactNotes.delete(line);
+    // What the caps leave for a key not on the line yet.
+    const emoji = await pickReaction({ held, note: whyNotAdd(line.reactions, '', caps) });
+    if (emoji) await this.desk?.toggle(line, conv, emoji, !held.has(emoji));
+  }
+
+  /** Say something under `line`, and to a screen reader, until a later
+   *  note or a few seconds. A denial takes the affordances off every line
+   *  of `conv`, and the focus goes to the line it was on. */
+  private noteReaction(line: Line, conv: ConvId, note: string, denied: boolean): void {
+    this.reactNotes.set(line, note);
+    this.heard.append(h('p', {}, note));
+    while (this.heard.childElementCount > 20) this.heard.firstElementChild?.remove();
+    if (denied) {
+      this.reactDenied.add(conv);
+      if (this.store.active === conv) {
+        const focused = this.transcript.contains(document.activeElement);
+        keepingPlace(this.transcript, () => this.renderTranscript());
+        const row = focused ? rowOf(this.transcript, line) : undefined;
+        if (row) {
+          row.tabIndex = -1;
+          row.focus({ preventScroll: true });
+        }
+      }
+    } else this.drawReactions(conv, [line]);
+    setTimeout(() => {
+      if (this.reactNotes.get(line) !== note) return;
+      this.reactNotes.delete(line);
+      this.drawReactions(conv, [line]);
+    }, 8000);
+  }
+
+  /** Redraw the chips of `lines` where `conv` is on screen. */
+  private drawReactions(conv: ConvId, lines: Line[]): void {
+    if (this.store.active !== conv || !lines.length) return;
+    const opts = this.transcriptOptions();
+    keepingPlace(this.transcript, () => {
+      for (const line of lines) {
+        const row = rowOf(this.transcript, line);
+        if (row) redrawReactions(row, line, opts.reactable!(line), opts.reactionNote!(line));
+      }
+    });
+  }
+
+  /** A page of public history, read and merged in its turn
+   *  (`mergePage`). */
+  private mergePage(
+    page: HistoryOk,
+    room: number,
+    direction: 'older' | 'newer',
+    merged: (added: number, restated: Line[]) => void,
+  ): Promise<void> {
+    return mergePage(this.store, this.seq, { conv: publicId(room), hasMore: page.has_more, direction }, () => this.historyLines(page, room), merged);
   }
 
   /** A line in the lobby or a room, with a `guid` where the server
@@ -2259,7 +2375,7 @@ export class App {
 
   /** After every chat line already read is shown. */
   private inOrder(fn: () => void | Promise<void>): void {
-    this.shown = this.shown.then(fn).catch((e: unknown) => this.say(`A line could not be shown: ${this.problem(e)}`));
+    this.seq.run(fn).catch((e: unknown) => this.say(`A line could not be shown: ${this.problem(e)}`));
   }
 
   /** Blank lines a moderator redacted, those `conv` holds among them. */
@@ -2786,6 +2902,9 @@ export class App {
   /** What this session's account may do changed: `conn.accounts` is
    *  already what it may do now. */
   private onAccountChanged(): void {
+    // What it may do now may take reactions, refused before.
+    this.reactDenied.clear();
+    keepingPlace(this.transcript, () => this.renderTranscript());
     const may = mayAdminister(this.conn?.accounts ?? null);
     this.panes?.available('accounts', may);
     if (!may && this.accountsOpen) this.showAccounts(false);
@@ -3186,6 +3305,7 @@ export class App {
           ...(read?.signature ? { signature: read.signature } : {}),
           ...(line.signed !== undefined ? { signed: line.signed } : {}),
           ...(line.re ? { re: line.re } : {}),
+          ...(line.reactions ? { reactions: historyReactions(line) } : {}),
         },
       ];
     });
@@ -3262,22 +3382,21 @@ export class App {
       if (opts.initial && log.newest !== undefined) return await this.catchUp(conn, c, room);
       const before = opts.initial ? undefined : log.oldest;
       const page = await conn.history({ ...(before === undefined ? {} : { before }), ...(room ? { room } : {}) });
-      const lines = await this.historyLines(page, room);
-      if (!lines) return;
-      // Measured here rather than before the request: a live line
-      // arriving while it was in flight has already changed the height,
-      // and counting that as part of the prepend is the jump this
-      // arithmetic exists to prevent.
-      const oldHeight = this.transcript.scrollHeight;
-      const oldTop = this.transcript.scrollTop;
-      const added = this.store.mergeHistory(lines, page.has_more, 'older', id);
-      if (added && this.store.active === id) {
-        this.renderTranscript();
-        if (!opts.initial) {
-          this.transcript.scrollTop = oldTop + this.transcript.scrollHeight - oldHeight;
-        }
-      }
-      this.blank([...this.redacted], id);
+      await this.mergePage(page, room, 'older', (added, restated) => {
+        // Measured here, in the page's turn, rather than before the
+        // request: a live line arriving while it was in flight has
+        // already changed the height, and counting that as part of the
+        // prepend is the jump this arithmetic exists to prevent.
+        const oldHeight = this.transcript.scrollHeight;
+        const oldTop = this.transcript.scrollTop;
+        if (added && this.store.active === id) {
+          this.renderTranscript();
+          if (!opts.initial) {
+            this.transcript.scrollTop = oldTop + this.transcript.scrollHeight - oldHeight;
+          }
+        } else this.drawReactions(id, restated);
+        this.blank([...this.redacted], id);
+      });
     } catch (e) {
       // A refusal is about this account and this server, not about this
       // request: remember it rather than rediscovering it every time
@@ -3308,9 +3427,13 @@ export class App {
     for (;;) {
       const after = c.log!.newest ?? 0;
       const page = await conn.history({ after, limit: 200, ...(room ? { room } : {}) });
-      const lines = await this.historyLines(page, room);
-      if (!lines) return;
-      if (this.store.mergeHistory(lines, page.has_more, 'newer', c.id) && this.store.active === c.id) this.renderTranscript();
+      let read = false;
+      await this.mergePage(page, room, 'newer', (added, restated) => {
+        read = true;
+        if (added && this.store.active === c.id) this.renderTranscript();
+        else this.drawReactions(c.id, restated);
+      });
+      if (!read) return;
       if (!page.has_more || c.log!.newest === after) break;
     }
     this.blank([...this.redacted], c.id);
@@ -3817,6 +3940,7 @@ export class App {
     if (conv) renderTranscript(this.transcript, conv, this.store, this.images, this.transcriptOptions());
     this.drawnRevision = this.store.revision;
     this.watchQuotes();
+    this.watchReactions();
   }
 
   private transcriptOptions(): TranscriptOptions {
@@ -3829,6 +3953,8 @@ export class App {
       contact: this.contactOf(),
       replyable: (line) => may && startReply(line, conv!, targets!) !== null,
       quote: (line) => resolveQuote(line.re!, conv!, this.quoteSources(conv!)),
+      reactable: (line) => !!conv && this.mayReact(line, conv),
+      reactionNote: (line) => this.reactNotes.get(line),
     };
   }
 
@@ -3836,6 +3962,21 @@ export class App {
    *  they are on screen. */
   private watchQuotes(): void {
     for (const el of this.transcript.querySelectorAll<HTMLElement>('.quote[data-pending]')) this.quotesSeen.observe(el);
+  }
+
+  /** Watch the rows of lines older than the window told live, to read
+   *  their reactions again once they are on screen. */
+  private watchReactions(): void {
+    this.reactionsSeen.disconnect();
+    const conv = this.store.conversation(this.store.active);
+    if (!conv?.log || !this.desk) return;
+    const ids = conv.lines.flatMap((l) => (l.id === undefined || l.deleted ? [] : [l.id]));
+    const older = new Set(ids.slice(0, Math.max(0, ids.length - LIVE_LINES)));
+    if (!older.size) return;
+    for (const row of this.transcript.children) {
+      const id = lineOf(row)?.id;
+      if (id !== undefined && older.has(id)) this.reactionsSeen.observe(row);
+    }
   }
 
   private contactOf(): ContactOf {
@@ -4185,6 +4326,13 @@ export class App {
           return keepingPlace(this.transcript, () => this.renderTranscript());
         }
         if (act.dataset.act === 'reply') return this.reply(line, conv);
+        const failed = (err: unknown) => this.say(this.problem(err));
+        if (act.dataset.act === 'react') return void this.pickReaction(line, conv).catch(failed);
+        if (act.dataset.act === 'reaction') {
+          const emoji = act.dataset.emoji!;
+          this.reactNotes.delete(line);
+          return void this.desk?.toggle(line, conv, emoji, !line.reactions?.some((r) => r.emoji === emoji && r.mine)).catch(failed);
+        }
         if (act.dataset.act === 'quote') {
           const q = line.re && resolveQuote(line.re, conv, this.quoteSources(conv));
           const row = q && q.state === 'found' && q.line ? rowOf(this.transcript, q.line) : undefined;

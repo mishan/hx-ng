@@ -81,6 +81,17 @@ export interface Line {
   receipt?: 'delivered' | 'read';
   /** What it answers, as the server carried it (`replies`). */
   re?: ReplyTarget;
+  /** Its reactions as last told, keys in the order first added. */
+  reactions?: Reaction[];
+}
+
+/** A key on a line as this reader is shown it (`reactions`). */
+export interface Reaction {
+  /** As the server spells it, which is what keys are compared as. */
+  emoji: string;
+  count: number;
+  /** This reader's account holds it. */
+  mine: boolean;
 }
 
 export type ConvId = string;
@@ -641,7 +652,8 @@ export class Store {
 
   /** Merge a durable public-chat page with live lines already drawn.
    *  History and live events deliberately overlap; ids, not text or
-   *  timestamps, decide whether they are the same line. */
+   *  timestamps, decide whether they are the same line. Returns how many
+   *  lines it added. */
   mergeHistory(lines: Line[], hasMore: boolean, direction: 'older' | 'newer', conv: ConvId = LOBBY): number {
     const c = this.conversations.get(conv);
     const log = c?.log;
@@ -690,6 +702,30 @@ export class Store {
     log.oldest = undefined;
     log.newest = undefined;
     for (const id of [...log.seen]) log.record(id);
+  }
+
+  /** Give the lines of `conv` held by these ids the reactions they now
+   *  have, each replacing what was held, and return the lines changed. A
+   *  line not held is left to the history that shows it. */
+  setReactions(conv: ConvId, updates: Iterable<readonly [number, Reaction[] | undefined]>): Line[] {
+    const c = this.conversations.get(conv);
+    if (!c?.log) return [];
+    const held = new Map(c.lines.flatMap((line) => (line.id === undefined ? [] : [[line.id, line] as const])));
+    const changed: Line[] = [];
+    for (const [id, reactions] of updates) {
+      const line = held.get(id);
+      if (!line || line.deleted || JSON.stringify(line.reactions) === JSON.stringify(reactions)) continue;
+      line.reactions = reactions;
+      changed.push(line);
+    }
+    return changed;
+  }
+
+  /** The reactions a page's lines have, given to the lines of `conv` it
+   *  shares with what is held, which may have changed out of the window
+   *  told live. Returns the lines changed. */
+  restate(lines: readonly Line[], conv: ConvId = LOBBY): Line[] {
+    return this.setReactions(conv, lines.flatMap((line) => (line.id === undefined ? [] : [[line.id, line.reactions] as const])));
   }
 
   /** Ids of a page's lines this client leaves out, which paging still
@@ -853,6 +889,43 @@ export class Store {
   }
 }
 
+/** Runs work in the order it is handed over, each step once the one
+ *  before has settled, its failure the caller's. What the transcript is
+ *  told, live or paged, lands in the order the wire said it. */
+export class Sequencer {
+  private tail: Promise<unknown> = Promise.resolve();
+
+  run<T>(fn: () => T | Promise<T>): Promise<T> {
+    const done = this.tail.then(fn);
+    this.tail = done.catch(() => {});
+    return done;
+  }
+}
+
+/**
+ * A page of public history merged into `conv` in its turn: `read`, which
+ * awaits the page's signatures, runs inside it, so an event that came
+ * after the page, such as a reactions batch, waits for it rather than
+ * being undone by it. Lines the page shares with what is held have
+ * their reactions restated before the new ones are added. `merged` is
+ * told what changed, still in the page's turn; `null` from `read` is a
+ * page no longer wanted.
+ */
+export function mergePage(
+  store: Store,
+  seq: Sequencer,
+  page: { conv: ConvId; hasMore: boolean; direction: 'older' | 'newer' },
+  read: () => Promise<Line[] | null>,
+  merged: (added: number, restated: Line[]) => void,
+): Promise<void> {
+  return seq.run(async () => {
+    const lines = await read();
+    if (!lines) return;
+    const restated = store.restate(lines, page.conv);
+    merged(store.mergeHistory(lines, page.hasMore, page.direction, page.conv), restated);
+  });
+}
+
 /** A public notice, or a subject, said in the lobby or in a room this
  *  session is in: the conversation it lands in, the topic or subject
  *  changed where it is one, and the line to add there. */
@@ -879,6 +952,7 @@ function blank(line: Line): string | undefined {
   line.signature = undefined;
   line.signed = undefined;
   line.re = undefined;
+  line.reactions = undefined;
   if (line.media) {
     const { id: _gone, ...rest } = line.media;
     line.media = { ...rest, removed: true };

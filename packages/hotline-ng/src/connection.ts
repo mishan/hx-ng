@@ -58,6 +58,10 @@ import {
   type RequestsClearOk,
   type RequestsClearParams,
   type RepliesConfig,
+  type ReactionKey,
+  type ReactionsConfig,
+  type ReactionTarget,
+  type ReactOk,
   type RequestsOk,
   mergeRequests,
   type HistoryOk,
@@ -245,6 +249,10 @@ export interface Credentials {
    *  what it is sent (§7.3). A resume keeps what the login was granted,
    *  which `Connection.replies` says. */
   replies?: boolean;
+  /** Say `reactions` at login: this client reacts and reads reactions
+   *  (§7.3). A resume keeps what the login was granted, which
+   *  `Connection.reactions` says. */
+  reactions?: boolean;
   /** Opens each socket in place of the global `WebSocket`: for a
    *  runtime without one, or a test's fake server
    *  (`@hotline-ng/client/testing`). */
@@ -315,6 +323,7 @@ interface Saved {
   files?: FilesConfig | null;
   messaging?: MessagingConfig | null;
   replies?: RepliesConfig | null;
+  reactions?: ReactionsConfig | null;
   /** The session speaks the friend family: its login said so, or it
    *  has sent one of the family's requests. */
   speaks?: boolean;
@@ -449,6 +458,11 @@ export interface ConnectionHooks {
    *  with the room they are from, 0 for the lobby. They may overlap
    *  live events already handled; deduplicate by id within a room. */
   onMissedHistory?: (ok: HistoryOk, room: number) => void;
+  /** The catch-up after a login or a resync has handed over every page
+   *  it will, whether or not it found any: the moment to read again what
+   *  a gap may have changed on lines already held, which no page
+   *  carries, such as their reactions. */
+  onCaughtUp?: () => void;
   /** This account's friends, asked after each login, resume and resync
    *  of a session that said `messaging` and takes part. Asking is what
    *  hands over the instant messages that waited, and those not yet
@@ -558,6 +572,10 @@ export class Connection {
    *  from the login reply or the saved session. `null` means it was not
    *  granted `replies`: send no `re`. */
   replies: RepliesConfig | null = null;
+  /** The kinds of target this session may react to, and the server's
+   *  caps, from the login reply or the saved session. `null` means it
+   *  was not granted `reactions`: offer none. */
+  reactions: ReactionsConfig | null = null;
   /** This session speaks the friend family, so is sent its events. */
   private speaks = false;
   /** Round-trip time of the last explicit `ping`, in milliseconds. */
@@ -625,6 +643,7 @@ export class Connection {
       this.files = saved.files ?? null;
       this.messaging = saved.messaging ?? null;
       this.replies = saved.replies ?? null;
+      this.reactions = saved.reactions ?? null;
       this.speaks = saved.speaks ?? false;
     } else if (opts.resumeOnly) {
       throw new Error('no session to resume');
@@ -752,6 +771,7 @@ export class Connection {
     if (this.speaks) params.messaging = true;
     if (this.speaks && this.creds.friendships) params.friendships = true;
     if (this.creds.replies) params.replies = true;
+    if (this.creds.reactions) params.reactions = true;
 
     const ok = await this.request<LoginOk>('login', params);
     this.signing = ok.signs ?? null;
@@ -780,6 +800,7 @@ export class Connection {
     this.files = ok.files ?? null;
     this.messaging = ok.messaging ?? null;
     this.replies = ok.replies ?? null;
+    this.reactions = ok.reactions ?? null;
     // Only a session that may detach is worth remembering: without the
     // permission a resume can only ever answer session_expired, and
     // storing a token we know is useless just invites a confusing
@@ -794,7 +815,7 @@ export class Connection {
     // catch-up that is paging — or backing off a rate limit — would
     // otherwise hold the connect screen open behind it. Failures are
     // traced and swallowed inside.
-    void this.pullMissedHistory(historyAfter);
+    void this.pullMissedHistory(historyAfter).then(() => this.hooks.onCaughtUp?.());
     void this.pullFriends();
   }
 
@@ -863,7 +884,7 @@ export class Connection {
       this.setState('online');
       await this.pullMissedMail();
       void this.pullFriends();
-      void this.pullMissedRooms(historyAfter, roomsAfter, ok.rooms?.joined ?? []);
+      void this.pullMissedRooms(historyAfter, roomsAfter, ok.rooms?.joined ?? []).then(() => this.hooks.onCaughtUp?.());
       return true;
     }
   }
@@ -1823,6 +1844,19 @@ export class Connection {
     return this.request('report_close', params);
   }
 
+  /** Add `key` to `target`, or with `opts.remove` take it away, and
+   *  answer how many hold it after. Adding a key this account holds, or
+   *  removing one it does not, changes nothing and succeeds. A refusal
+   *  is a `WireFailure`: `no_such_target`, `too_many_reactions`,
+   *  `access_denied`, `bad_request`, or `rate_limited` with
+   *  `retry_after`; `reactionErrorText` words them. */
+  react(target: ReactionTarget, key: ReactionKey, opts: { remove?: boolean } = {}): Promise<ReactOk> {
+    // U+FE0E asks for the text form and is refused; without it the
+    // server spells the key as the emoji it is.
+    const emoji = key.emoji.replaceAll('\uFE0E', '');
+    return this.request<ReactOk>('react', { target, key: { emoji }, ...(opts.remove ? { remove: true } : {}) });
+  }
+
   /** Take a public line's words back. It keeps its id and place, every
    *  reader is told with `chat_redacted`, and an image it carried is
    *  revoked with it. */
@@ -2115,6 +2149,7 @@ export class Connection {
       files: this.files,
       messaging: this.messaging,
       replies: this.replies,
+      reactions: this.reactions,
       speaks: this.speaks,
       writer: this.writer,
       login: this.self?.identity?.account ?? this.creds.login,

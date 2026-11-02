@@ -653,3 +653,85 @@ describe('replies on the fake server', () => {
     expect(alice.lastHistoryId).toBe(seen);
   });
 });
+
+describe('reactions on the fake server', () => {
+  const UP = { emoji: '\u{1F44D}' };
+  const HEART = { emoji: '\u2764\u{FE0F}' };
+  async function asking(server: FakeServer, login: string): Promise<Connection> {
+    const conn = new Connection(server.credentials({ login, password: 'pw', reactions: true, replies: true }));
+    await conn.start();
+    return conn;
+  }
+
+  it('grants reactions to a login that asks, with its caps, and only where lines are kept', async () => {
+    const server = new FakeServer({ accounts: ACCOUNTS, reactionCaps: { max_keys: 3, max_per_user: 2 } });
+    const alice = await asking(server, 'alice');
+    expect([alice.hasCap('reactions'), alice.reactions]).toEqual([true, { targets: ['line'], max_keys: 3, max_per_user: 2 }]);
+    const bob = await connect(server, 'bob');
+    expect([bob.hasCap('reactions'), bob.reactions]).toEqual([false, null]);
+    await expect(bob.react({ line: 1 }, UP)).rejects.toMatchObject({ wire: { code: 'not_available' } });
+    const unkept = await asking(new FakeServer({ accounts: ACCOUNTS, caps: ['reactions'] }), 'alice');
+    expect([unkept.hasCap('reactions'), unkept.reactions]).toEqual([false, null]);
+  });
+
+  it('counts each account once, and shows each reader its own on history and in a batch to its room alone', async () => {
+    const server = new FakeServer({ accounts: ACCOUNTS, rooms: [{ name: 'lounge' }] });
+    const alice = await asking(server, 'alice');
+    const bob = await asking(server, 'bob');
+    const room = alice.login!.rooms!.list[0]!.id;
+    await alice.roomJoin(room);
+    const { id } = await bob.chat({ text: 'lunch?' });
+    const { id: inRoom } = await alice.chat({ text: 'here', room });
+    expect(await alice.react({ line: id! }, UP)).toEqual({ count: 1 });
+    expect(await alice.react({ line: id! }, UP)).toEqual({ count: 1 });
+    expect(await bob.react({ line: id! }, UP)).toEqual({ count: 2 });
+    expect(await bob.react({ line: id! }, HEART)).toEqual({ count: 1 });
+    await alice.react({ line: inRoom!, room }, HEART);
+    const aliceHeard = heard(alice, 'reactions_changed');
+    const bobHeard = heard(bob, 'reactions_changed');
+    server.flushReactions();
+    await waitFor('the batches', () => aliceHeard.length === 2 && bobHeard.length === 1);
+    const keys = [
+      { key: UP, count: 2 },
+      { key: HEART, count: 1 },
+    ];
+    expect(aliceHeard.flatMap((d) => d.changes)).toEqual(
+      expect.arrayContaining([
+        { target: { line: id }, action: 'summary', keys, mine: [0] },
+        { target: { line: inRoom, room }, action: 'summary', keys: [{ key: HEART, count: 1 }], mine: [0] },
+      ]),
+    );
+    expect(bobHeard[0]!.changes).toEqual([{ target: { line: id }, action: 'summary', keys, mine: [0, 1] }]);
+
+    expect(await alice.react({ line: id! }, UP, { remove: true })).toEqual({ count: 1 });
+    const line = (await alice.history({ ids: [id!] })).lines[0];
+    expect([line?.reactions, line?.reactions_mine]).toEqual([[{ key: UP, count: 1 }, { key: HEART, count: 1 }], undefined]);
+    expect((await bob.history()).lines.find((l) => l.id === id)?.reactions_mine).toEqual([0, 1]);
+  });
+
+  it('refuses a guest, a line out of reach, a malformed act and one past the caps', async () => {
+    const server = new FakeServer({ accounts: ACCOUNTS, rooms: [{ name: 'lounge' }], reactionCaps: { max_keys: 2, max_per_user: 1 } });
+    const alice = await asking(server, 'alice');
+    const bob = await asking(server, 'bob');
+    const guest = new Connection(server.credentials({ reactions: true }));
+    await guest.start();
+    const room = alice.login!.rooms!.list[0]!.id;
+    await alice.roomJoin(room);
+    const { id } = await alice.chat({ text: 'one' });
+    const { id: inRoom } = await alice.chat({ text: 'two', room });
+    await alice.react({ line: id! }, UP);
+    for (const [code, send] of [
+      ['access_denied', () => guest.react({ line: id! }, UP)],
+      ['no_such_target', () => bob.react({ line: inRoom!, room }, UP)],
+      ['no_such_target', () => bob.react({ line: inRoom! }, UP)],
+      ['no_such_target', () => bob.react({ line: 999 }, UP)],
+      ['bad_request', () => bob.react({ line: id! }, { emoji: 'a b' })],
+      ['too_many_reactions', () => alice.react({ line: id! }, HEART)],
+    ] as const) {
+      await expect(send(), `${code}`).rejects.toMatchObject({ wire: { code } });
+    }
+    await bob.react({ line: id! }, HEART);
+    await expect(bob.react({ line: id! }, UP)).rejects.toMatchObject({ wire: { code: 'too_many_reactions' } });
+    await expect(alice.react({ line: id! }, UP)).resolves.toEqual({ count: 1 });
+  });
+});

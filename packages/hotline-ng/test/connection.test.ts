@@ -667,6 +667,18 @@ describe('reactions', () => {
     ]);
   });
 
+  it('sends reactions as the wire specifies, a key with no text-style selector', async () => {
+    const conn = await connect();
+    const read = { target: { line: 7 }, keys: [{ key: { emoji: '\u2764\uFE0F' }, count: 1 }], from: [{ nick: 'Bob' }] };
+    server.on('reactions', () => ({ ok: { reactions: [read] } }));
+    await conn.reactionsGet([{ line: 7 }, { line: 9, room: 3 }]);
+    expect(await conn.reactionsGet([{ line: 7 }], { emoji: '\u2764\uFE0E' })).toEqual({ reactions: [read] });
+    expect(server.sent('reactions').map((f) => f.params)).toEqual([
+      { targets: [{ line: 7 }, { line: 9, room: 3 }] },
+      { targets: [{ line: 7 }], key: { emoji: '\u2764' } },
+    ]);
+  });
+
   it.each([
     ['no_such_target', 'That line cannot be reacted to: it may be gone, or out of reach.'],
     ['too_many_reactions', 'That line has as many reactions as it may, or you have as many on it as you may.'],

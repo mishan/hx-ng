@@ -471,6 +471,25 @@ export interface ReactOk {
   count: number;
 }
 
+/** One line's reactions as `reactions` reads them again (§7.3): `keys`
+ *  and `mine` as a `summary` carries them, `keys` empty for none. With
+ *  `key`, `from` is who holds it, newest first and at most 100, by the
+ *  nick each had when it reacted; the key's `count` less those listed
+ *  is how many were not. */
+export interface LineReactions {
+  target: ReactionTarget;
+  keys: ReactionCount[];
+  mine?: number[];
+  from?: { nick: string }[];
+}
+
+export interface ReactionsOk {
+  /** Each line asked for that this session could have read, in the
+   *  order asked; one it could not, a tombstone and one that does not
+   *  exist are left out. */
+  reactions: LineReactions[];
+}
+
 export interface ResumeParams {
   session: string;
   token: string;

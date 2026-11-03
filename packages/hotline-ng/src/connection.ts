@@ -60,6 +60,7 @@ import {
   type RepliesConfig,
   type ReactionKey,
   type ReactionsConfig,
+  type ReactionsOk,
   type ReactionTarget,
   type ReactOk,
   type RequestsOk,
@@ -1855,6 +1856,17 @@ export class Connection {
     // server spells the key as the emoji it is.
     const emoji = key.emoji.replaceAll('\uFE0E', '');
     return this.request<ReactOk>('react', { target, key: { emoji }, ...(opts.remove ? { remove: true } : {}) });
+  }
+
+  /** Read again the reactions on 1 to 50 lines: one older than the live
+   *  window, or every line shown after a resync. With `key` and exactly
+   *  one target, also who holds that key, sent without U+FE0E as `react`
+   *  sends it. No targets, more than 50, or `key` beside more than one
+   *  is `bad_request`; from a session not granted `reactions`,
+   *  `not_available`. */
+  reactionsGet(targets: ReactionTarget[], key?: ReactionKey): Promise<ReactionsOk> {
+    const params = key ? { targets, key: { emoji: key.emoji.replaceAll('\uFE0E', '') } } : { targets };
+    return this.request<ReactionsOk>('reactions', params);
   }
 
   /** Take a public line's words back. It keeps its id and place, every

@@ -40,7 +40,10 @@ says how.
   login that asks where lines are kept, with `reactionCaps`, a reaction
   its account's, refused as hxd-ng refuses it but for its rate limit,
   on `history` to such sessions, and its changes sent a room at a time
-  by `flushReactions()`.
+  by `flushReactions()`. `reactionsGet(targets, key?)` reads again the
+  reactions on up to 50 lines, a `LineReactions` for each this session
+  could have read, tombstones left out, and with `key` and one target
+  `from`, who holds it; `FakeServer` does not serve it yet.
 - `onCaughtUp` is called once the catch-up after a login or a resync
   has handed over its pages: where a client reads again what a gap may
   have changed on lines it holds.

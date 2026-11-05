@@ -667,6 +667,20 @@ describe('reactions', () => {
     ]);
   });
 
+  it('sends react on an instant message with its other party, and on a stored message', async () => {
+    const conn = await connect();
+    server.on('react', () => ({ ok: {} }));
+    const im = { im: { login: 'bob', guid: '5f5e1000-1234-4abc-89ab-000000000001' } };
+    expect(await conn.react(im, { emoji: '\u{1F44D}' }, { with: 'bob', remove: true })).toEqual({});
+    await conn.react({ pm: 'AAEC' }, { emoji: '\u{1F44D}' });
+    // @ts-expect-error an `im` target names its other party
+    void (() => conn.react(im, { emoji: '\u{1F44D}' }));
+    expect(server.sent('react').map((f) => f.params)).toEqual([
+      { target: im, key: { emoji: '\u{1F44D}' }, remove: true, with: 'bob' },
+      { target: { pm: 'AAEC' }, key: { emoji: '\u{1F44D}' } },
+    ]);
+  });
+
   it('sends reactions as the wire specifies, a key with no text-style selector', async () => {
     const conn = await connect();
     const read = { target: { line: 7 }, keys: [{ key: { emoji: '\u2764\uFE0F' }, count: 1 }], from: [{ nick: 'Bob' }] };

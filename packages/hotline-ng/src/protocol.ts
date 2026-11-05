@@ -429,9 +429,9 @@ export type ReplyTarget =
    *  UUID, and the base64url SHA-256 of its signed object. */
   | { signed: { signer: string; id: string; hash: string } };
 
-/** The kinds of target a server takes reactions on (§7.3). hxd-ng
- *  takes `line` alone, where it keeps history; the draft names `im` and
- *  `pm` for the private kinds. */
+/** The kinds of target a server takes reactions on (§7.3): `line`
+ *  where it keeps history, `im` with `messaging` as well, and `pm` where
+ *  it also has an inbox. */
 export type ReactionKind = 'line' | 'im' | 'pm';
 
 export interface ReactionsConfig {
@@ -442,8 +442,12 @@ export interface ReactionsConfig {
   max_per_user: number;
 }
 
-/** What a reaction is on: a kept line, as `re` names one. */
-export type ReactionTarget = { line: number; room?: number };
+/** What a reaction is on, as `re` names it: a kept line, an instant
+ *  message or a stored private message. */
+export type ReactionTarget = { line: number; room?: number } | { im: { login: string; guid: string } } | { pm: string };
+
+/** A target whose reactions are kept to be read again: not an `im`. */
+export type StoredReactionTarget = Exclude<ReactionTarget, { im: unknown }>;
 
 /** One emoji, fully qualified as the server spells every key: a key is
  *  compared as the server returns it, never as it was sent. */
@@ -460,24 +464,26 @@ export interface ReactionCount {
 /** One target's change in a `reactions_changed` (§7.3): `summary` is
  *  the target as it stands, to replace whatever is held for it, `keys`
  *  empty once the last reaction is gone and `mine` this reader's indexes
- *  into them; `clear` takes them all, for a moderator's clear or a
- *  redaction. */
+ *  into them; `clear` takes a line's all, for a moderator's clear or a
+ *  redaction; `add` and `remove` are one key of an instant message's,
+ *  by `from`, which the client matches by its guid. */
 export type ReactionChange =
-  | { target: ReactionTarget; action: 'summary'; keys: ReactionCount[]; mine?: number[] }
-  | { target: ReactionTarget; action: 'clear' };
+  | { target: StoredReactionTarget; action: 'summary'; keys: ReactionCount[]; mine?: number[] }
+  | { target: { line: number; room?: number }; action: 'clear' }
+  | { target: { im: { login: string; guid: string } }; action: 'add' | 'remove'; key: ReactionKey; from: { login: string } };
 
 export interface ReactOk {
-  /** How many accounts hold the key after the change. */
+  /** How many accounts hold a line's key after the change. */
   count: number;
 }
 
-/** One line's reactions as `reactions` reads them again (§7.3): `keys`
- *  and `mine` as a `summary` carries them, `keys` empty for none. With
- *  `key`, `from` is who holds it, newest first and at most 100, by the
- *  nick each had when it reacted; the key's `count` less those listed
- *  is how many were not. */
+/** One line's or stored message's reactions as `reactions` reads them
+ *  again (§7.3): `keys` and `mine` as a `summary` carries them, `keys`
+ *  empty for none. With `key`, `from` is who holds it, newest first and
+ *  at most 100, by the nick each had when it reacted; the key's `count`
+ *  less those listed is how many were not. */
 export interface LineReactions {
-  target: ReactionTarget;
+  target: StoredReactionTarget;
   keys: ReactionCount[];
   mine?: number[];
   from?: { nick: string }[];
@@ -486,7 +492,8 @@ export interface LineReactions {
 export interface ReactionsOk {
   /** Each line asked for that this session could have read, in the
    *  order asked; one it could not, a tombstone and one that does not
-   *  exist are left out. */
+   *  exist are left out. A `pm` is always answered, with no keys where
+   *  this session is no party to it. */
   reactions: LineReactions[];
 }
 
@@ -659,6 +666,14 @@ export interface StoredMessage {
   signed?: string;
   /** To a session that said `replies`, what it answers. */
   re?: ReplyTarget;
+  /** An instant message, kept as mail: `guid` and `from.login` make the
+   *  `im` target that reacts to it. */
+  im?: true;
+  guid?: string;
+  /** To a session that said `reactions`, a private message's keys and
+   *  this account's indexes into them, as on a `HistoryLine`. */
+  reactions?: ReactionCount[];
+  reactions_mine?: number[];
 }
 
 export interface InboxParams {
@@ -2107,6 +2122,13 @@ export interface Events {
     sealed_lost?: true;
     /** To a session that said `replies`, what it answers. */
     re?: ReplyTarget;
+    /** An instant message handed over as mail, and its guid. */
+    im?: true;
+    guid?: string;
+    /** To a session that said `reactions`, a stored private message's
+     *  as they stand when it is handed over, as on `StoredMessage`. */
+    reactions?: ReactionCount[];
+    reactions_mine?: number[];
   };
   broadcast: { from: Sender; text: string };
   kicked: Record<string, never>;
@@ -2143,7 +2165,10 @@ export interface Events {
   chat_purged: { ids: number[]; room?: number };
   /** To a session that said `reactions`: one room's changes, gathered
    *  over a batch, a group for each target. Only a room's most recent
-   *  lines are told; an older one's are read again with `history`. */
+   *  lines are told; an older one's are read again with `history`. A
+   *  message's change comes at once rather than in a room's batch, but
+   *  an event may still carry many: an instant message's held for a
+   *  detached session, or what a purge or a link changed. */
   reactions_changed: { changes: ReactionChange[] };
   /** A report was filed. Moderators only. */
   report: Report;

@@ -62,6 +62,7 @@ import {
   type ReactionsConfig,
   type ReactionsOk,
   type ReactionTarget,
+  type StoredReactionTarget,
   type ReactOk,
   type RequestsOk,
   mergeRequests,
@@ -1845,26 +1846,41 @@ export class Connection {
     return this.request('report_close', params);
   }
 
-  /** Add `key` to `target`, or with `opts.remove` take it away, and
-   *  answer how many hold it after. Adding a key this account holds, or
-   *  removing one it does not, changes nothing and succeeds. A refusal
-   *  is a `WireFailure`: `no_such_target`, `too_many_reactions`,
+  /** Add `key` to `target`, or with `opts.remove` take it away. A line
+   *  answers how many hold it after; an instant message, which names
+   *  its other party's login as `opts.with`, and a stored message answer
+   *  `{}`. Adding a key this account holds, or removing one it does not,
+   *  changes nothing and succeeds. A refusal is a `WireFailure`:
+   *  `not_available`, `no_such_target`, `too_many_reactions`,
    *  `access_denied`, `bad_request`, or `rate_limited` with
-   *  `retry_after`; `reactionErrorText` words them. */
-  react(target: ReactionTarget, key: ReactionKey, opts: { remove?: boolean } = {}): Promise<ReactOk> {
+   *  `retry_after`, and never the second or third for a stored
+   *  message; `reactionErrorText` words them. */
+  react(target: { line: number; room?: number }, key: ReactionKey, opts?: { remove?: boolean }): Promise<ReactOk>;
+  react(target: { pm: string }, key: ReactionKey, opts?: { remove?: boolean }): Promise<Record<string, never>>;
+  react(
+    target: { im: { login: string; guid: string } },
+    key: ReactionKey,
+    opts: { remove?: boolean; with: string },
+  ): Promise<Record<string, never>>;
+  react(target: ReactionTarget, key: ReactionKey, opts: { remove?: boolean; with?: string } = {}): Promise<ReactOk | Record<string, never>> {
     // U+FE0E asks for the text form and is refused; without it the
     // server spells the key as the emoji it is.
     const emoji = key.emoji.replaceAll('\uFE0E', '');
-    return this.request<ReactOk>('react', { target, key: { emoji }, ...(opts.remove ? { remove: true } : {}) });
+    return this.request('react', {
+      target,
+      key: { emoji },
+      ...(opts.remove ? { remove: true } : {}),
+      ...(opts.with ? { with: opts.with } : {}),
+    });
   }
 
-  /** Read again the reactions on 1 to 50 lines: one older than the live
-   *  window, or every line shown after a resync. With `key` and exactly
-   *  one target, also who holds that key, sent without U+FE0E as `react`
-   *  sends it. No targets, more than 50, or `key` beside more than one
+  /** Read again the reactions on 1 to 50 lines and stored messages: a
+   *  line older than the live window, or every line shown after a
+   *  resync. With `key` and exactly one target, also who holds that key,
+   *  sent without U+FE0E as `react` sends it. No targets, more than 50, or `key` beside more than one
    *  is `bad_request`; from a session not granted `reactions`,
    *  `not_available`. */
-  reactionsGet(targets: ReactionTarget[], key?: ReactionKey): Promise<ReactionsOk> {
+  reactionsGet(targets: StoredReactionTarget[], key?: ReactionKey): Promise<ReactionsOk> {
     const params = key ? { targets, key: { emoji: key.emoji.replaceAll('\uFE0E', '') } } : { targets };
     return this.request<ReactionsOk>('reactions', params);
   }

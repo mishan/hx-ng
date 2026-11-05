@@ -332,6 +332,40 @@ describe('a private message\'s reactions', () => {
     expect(kinds()).toEqual(['pm', 'im', null]);
   });
 
+  it('told before their message under another server or account are not kept for it', async () => {
+    const { store, bob } = withBob();
+    store.heldBy('wss://a login:alice');
+    const desk = new ReactionDesk({} as never, { store, seq: new Sequencer(), changed: () => {}, refused: () => expect.unreachable() });
+    await desk.changed([{ target: { im: { login: 'bob', guid: GUID } }, action: 'add', key: { emoji: UP }, from: { login: 'bob' } }]);
+    store.heldBy('wss://b login:alice');
+    store.add(bob.id, bobsIm());
+    expect(bob.lines[0]!.reactions).toBeUndefined();
+  });
+
+  it.each(['im', 'pm'] as const)('answered to a desk closed while its answer waited its turn change nothing (%s)', async (kind) => {
+    const { store, bob } = withBob();
+    store.add(bob.id, kind === 'im' ? bobsIm() : bobsPm());
+    const line = bob.lines[0]!;
+    const seq = new Sequencer();
+    let open = (): void => {};
+    const conn = {
+      reactions: { targets: ['im', 'pm'], max_keys: 5, max_per_user: 5 },
+      react: async () => {
+        // The next turn is held until the desk has been closed.
+        void seq.run(() => new Promise<void>((r) => (open = r)));
+        return {};
+      },
+      reactionsGet: async () => ({ reactions: [{ target: { pm: 'AAEC' }, keys: counts([UP, 1]) }] }),
+    } as never;
+    const desk = new ReactionDesk(conn, { store, seq, changed: () => {}, refused: () => expect.unreachable() });
+    const toggled = desk.toggle(line, bob, UP, true);
+    await new Promise((r) => setTimeout(r));
+    desk.close();
+    open();
+    await toggled;
+    expect(line.reactions).toBeUndefined();
+  });
+
   it('after this reader\'s own are what the server reads back, not what was asked', async () => {
     const { store, bob } = withBob();
     store.add(bob.id, { ...bobsPm(), reactions: [{ emoji: UP, count: 1, mine: false }] });

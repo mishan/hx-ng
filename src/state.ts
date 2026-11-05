@@ -601,6 +601,7 @@ export class Store {
    *  were held under, and gives back those held under this one. */
   heldBy(holder: string): void {
     if (this.holder !== undefined && holder !== this.holder) {
+      this.earlyImReactions.clear();
       for (const c of this.conversations.values()) {
         if (c.kind !== 'pm') continue;
         for (const line of c.lines) {

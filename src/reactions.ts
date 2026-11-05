@@ -293,7 +293,7 @@ export class ReactionDesk {
     if (to.kind === 'pm') return this.readMessages([to.target]);
     // In the answer's turn, from what the line holds then: a batch that
     // came before the answer is older than it, and is applied first.
-    await this.host.seq.run(settle);
+    await this.host.seq.run(() => this.closed || settle());
   }
 
   /** After a catch-up: the newest lines each of `convs` holds read again,
@@ -359,6 +359,7 @@ export class ReactionDesk {
       limited = 0;
       at += IDS_MAX;
       await this.host.seq.run(() => {
+        if (this.closed) return;
         for (const r of read) if ('pm' in r.target) this.told(this.host.store.setPmReactions(r.target.pm, summaryOf(r.keys, r.mine)));
       });
     }

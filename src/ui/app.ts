@@ -920,6 +920,8 @@ export class App {
         this.onAccountChanged();
       },
       onResumed: (replay) => {
+        // A page that resumed a saved session logged in nowhere.
+        if (conn === this.conn && conn instanceof Connection && conn.self) this.store.heldBy(holderOf(way.url, conn.self, this.account));
         this.resumedAt = Date.now();
         this.say(
           replay > 0

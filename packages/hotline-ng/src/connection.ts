@@ -1862,6 +1862,7 @@ export class Connection {
     key: ReactionKey,
     opts: { remove?: boolean; with: string },
   ): Promise<Record<string, never>>;
+  react(target: StoredReactionTarget, key: ReactionKey, opts?: { remove?: boolean }): Promise<ReactOk | Record<string, never>>;
   react(target: ReactionTarget, key: ReactionKey, opts: { remove?: boolean; with?: string } = {}): Promise<ReactOk | Record<string, never>> {
     // U+FE0E asks for the text form and is refused; without it the
     // server spells the key as the emoji it is.

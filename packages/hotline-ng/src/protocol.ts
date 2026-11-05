@@ -632,6 +632,10 @@ export interface MsgOk {
    *  one answer it has, stored, held or dropped, with `queued` true and
    *  no `ref`. */
   requested?: true;
+  /** By `to_login`, a message that went as an instant message, and the
+   *  guid that names it: the one it was sent with, or the server's own. */
+  im?: true;
+  guid?: string;
 }
 
 export interface InboxCounts {
@@ -2615,7 +2619,7 @@ export function errorText(e: WireError): string {
 /** `errorText` for `react`, where `no_such_target` is a line gone or
  *  out of this reader's reach, not something to report. */
 export function reactionErrorText(e: WireError): string {
-  if (e.code === 'no_such_target') return 'That line cannot be reacted to: it may be gone, or out of reach.';
+  if (e.code === 'no_such_target') return 'That cannot be reacted to: it may be gone, or out of reach.';
   if (e.code === 'access_denied') return 'You may not react here.';
   return errorText(e);
 }

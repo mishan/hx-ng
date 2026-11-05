@@ -76,6 +76,8 @@ import {
   messageAddress,
   Claims,
   LOBBY,
+  holderOf,
+  mergeMail,
   mergePage,
   Sequencer,
   publicId,
@@ -153,7 +155,7 @@ import { KeeperSlot, PortableFriends } from '../friendships';
 import { mayAdminister } from '../accounts';
 import { NewsView } from './news';
 import { QuoteFetcher, resolveQuote, startReply, type Replying } from '../replies';
-import { historyReactions, LIVE_LINES, ReactionDesk, whyNotAdd } from '../reactions';
+import { historyReactions, LIVE_LINES, reactableAs, ReactionDesk, summaryOf, whyNotAdd } from '../reactions';
 import { pickReaction, redrawReactions } from './reactions';
 import { appendLine, isAtBottom, keepingPlace, lineOf, renderTranscript, rowOf, scrollToEnd, signedName, spoken, type TranscriptOptions } from './transcript';
 import { wrapSelection } from './markdown';
@@ -836,6 +838,7 @@ export class App {
       onModuleFailed: () => this.checkForUpdate(true),
       onLogin: (ok, replaced) => {
         this.store.server = ok.server;
+        if (conn === this.conn) this.store.heldBy(holderOf(way.url, ok.self, this.account));
         this.store.forgetPmUids();
         this.store.restartMail();
         // A new session: receipts owed under the last are not its to send.
@@ -969,7 +972,9 @@ export class App {
       onCaughtUp: () => {
         if (conn !== this.conn) return;
         const convs = [this.store.conversation(LOBBY)!, ...this.store.rooms().filter((r) => r.joined)];
-        void this.desk?.refetchHeld([...convs.filter((c) => c.id === this.store.active), ...convs.filter((c) => c.id !== this.store.active)]);
+        const first = (cs: Conversation[]) => [...cs.filter((c) => c.id === this.store.active), ...cs.filter((c) => c.id !== this.store.active)];
+        void this.desk?.refetchHeld(first(convs));
+        void this.desk?.refetchMessages(first([...this.store.conversations.values()].filter((c) => c.kind === 'pm')));
       },
       onEnded: (reason) => {
         this.say(reason);
@@ -1415,6 +1420,8 @@ export class App {
           ...(sealed ? { sealed: true } : this.clearMark()),
           ...(opened.hidden ? { hidden: true } : {}),
           ...(d.re ? { re: d.re } : {}),
+          ...(d.im ? { guid: d.guid } : {}),
+          reactions: summaryOf(d.reactions, d.reactions_mine),
         });
         const seen = sighting(signature, this.verifiedUnder(conv), d.from);
         if (seen) void rememberIdentity(conv, this.peerMemory, this.keyUrl, seen.fingerprint, seen.who, sealed ? { sealed: true } : {});
@@ -1646,7 +1653,7 @@ export class App {
           media: sent ? undefined : attached?.media,
           ...(signature ? { signature } : {}),
           ...(sealed !== undefined ? { sealed } : {}),
-          ...(under !== undefined ? { guid: under } : {}),
+          ...(ok.im ? { im: true, guid: ok.guid ?? under } : under !== undefined ? { guid: under } : {}),
           ...(ok.ref !== undefined ? { ref: ok.ref } : {}),
           ...(re && !sent ? { re } : {}),
         });
@@ -1767,15 +1774,17 @@ export class App {
     return q;
   }
 
-  /** Whether this session may react to `line` here. A guest, an account
-   *  that may not send chat, a room not joined, and a conversation where
-   *  the server refused it `access_denied` are offered none. A room it
-   *  may not post in is the server's to say: hxd-ng allows it there by
-   *  default. */
+  /** Whether this session may react to `line` here. A guest, a kind of
+   *  target the server takes none on, an account that may not send chat,
+   *  a room not joined, and a conversation where the server refused it
+   *  `access_denied` are offered none. A room it may not post in is the
+   *  server's to say: hxd-ng allows it there by default. */
   private mayReact(line: Line, conv: Conversation): boolean {
     const conn = this.conn;
-    if (!(conn instanceof Connection) || !conn.reactions?.targets.includes('line') || conv.kind === 'pm') return false;
-    if (line.id === undefined || line.deleted || line.hidden || (line.kind !== 'chat' && line.kind !== 'action')) return false;
+    if (!(conn instanceof Connection)) return false;
+    const to = conn.reactions && reactableAs(line, conv, conn.reactions.targets, this.store.me());
+    if (!to) return false;
+    if (line.deleted || line.hidden || (line.kind !== 'chat' && line.kind !== 'action')) return false;
     if (this.reactDenied.has(conv.id) || this.store.me() === null) return false;
     if (conn.accounts && !conn.accounts.access.includes('send_chat')) return false;
     return conv.kind !== 'room' || !!conv.joined;
@@ -1789,7 +1798,7 @@ export class App {
     const held = new Set(line.reactions?.filter((r) => r.mine).map((r) => r.emoji));
     this.reactNotes.delete(line);
     // What the caps leave for a key not on the line yet.
-    const emoji = await pickReaction({ held, note: whyNotAdd(line.reactions, '', caps) });
+    const emoji = await pickReaction({ held, note: whyNotAdd(line.reactions, '', caps, reactableAs(line, conv, caps.targets, this.store.me())?.kind) });
     if (emoji) await this.desk?.toggle(line, conv, emoji, !held.has(emoji));
   }
 
@@ -3456,19 +3465,29 @@ export class App {
    * line stamped Tuesday sitting under one from just now is better than
    * a client that quietly reorders a transcript.
    */
-  private async mergeStoredMail(ok: InboxOk): Promise<number> {
-    let added = 0;
+  private mergeStoredMail(ok: InboxOk): Promise<number> {
     // `inbox` lists newest first; put them back in the order they were
     // sent, and read them in it, so within a page the first of two
     // copies is the earlier (§3.6). A page read for a session since
     // replaced is not this one's.
     const sent = [...ok.messages].reverse();
     const messages = this.messages;
-    const reads = await Promise.all(sent.map((m) => messages.stored(m).catch(() => unreadable(m.signed))));
-    if (messages !== this.messages) return 0;
+    return mergeMail(
+      this.seq,
+      () => Promise.all(sent.map((m) => messages.stored(m).catch(() => unreadable(m.signed)))),
+      (reads) => (messages === this.messages ? this.placeStoredMail(ok, sent, reads) : 0),
+    );
+  }
+
+  /** `mergeStoredMail`'s page, its rows read, placed in its turn. */
+  private placeStoredMail(ok: InboxOk, sent: InboxOk['messages'], reads: LineRead[]): number {
+    let added = 0;
     for (const [i, m] of sent.entries()) {
       if (this.store.hasMail(m)) {
         this.store.noteCursor(m);
+        // Where another session's reactions are learned after a gap.
+        const restated = m.ref !== undefined && !m.im ? this.store.setPmReactions(m.ref, summaryOf(m.reactions, m.reactions_mine)) : undefined;
+        if (restated) this.drawReactions(...restated);
         continue;
       }
       if (reads[i]?.duplicate) {
@@ -3497,6 +3516,8 @@ export class App {
           ...(signature ? { signature } : {}),
           ...(m.signed !== undefined ? { signed: m.signed } : {}),
           ...(m.re ? { re: m.re } : {}),
+          ...(m.im ? { guid: m.guid } : {}),
+          reactions: summaryOf(m.reactions, m.reactions_mine),
           ...this.clearMark(),
         },
         !m.read,

@@ -44,6 +44,15 @@ says how.
   reactions on up to 50 lines, a `LineReactions` for each this session
   could have read, tombstones left out, and with `key` and one target
   `from`, who holds it; `FakeServer` does not serve it yet.
+  `ReactionTarget` is also an instant message, `{ im: { login, guid } }`,
+  whose `react` takes the other party's login as `{ with }`, and a stored
+  message, `{ pm: ref }`; both are answered `{}`. `reactionsGet` takes
+  lines and stored messages, `StoredReactionTarget`. A
+  `ReactionChange` is a stored message's `summary`, or an instant
+  message's key, `add` or `remove`, by `from.login`. `StoredMessage` and
+  the `msg` event carry `reactions`, `reactions_mine`, and an instant
+  message's `im: true` and `guid`. `FakeServer` takes `line` targets
+  alone.
 - `onCaughtUp` is called once the catch-up after a login or a resync
   has handed over its pages: where a client reads again what a gap may
   have changed on lines it holds.

@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { Connection, hasSavedSession, WireFailure, type ConnectionHooks, type Credentials } from '../src/connection';
 import { AuthError, SERVER_CHALLENGE_REFUSED } from '../src/identity';
-import { reactionErrorText, type HistoryLine, type InboxOk, type LoginOk, type Room, type SelfUser, type User } from '../src/protocol';
+import { reactionErrorText, type HistoryLine, type InboxOk, type LoginOk, type Room, type SelfUser, type StoredReactionTarget, type User } from '../src/protocol';
 import { FakeServer as FakeHotline } from '../src/testing';
 
 import { installFakeWire, settle, uninstallFakeWire, type FakeServer } from './fake-wire';
@@ -664,6 +664,21 @@ describe('reactions', () => {
     expect(server.sent('react').map((f) => f.params)).toEqual([
       { target: { line: 7 }, key: { emoji: '\u{1F44D}' } },
       { target: { line: 8, room: 3 }, key: { emoji: '\u2764' }, remove: true },
+    ]);
+  });
+
+  it('sends react on an instant message with its other party, and on a stored message', async () => {
+    const conn = await connect();
+    server.on('react', () => ({ ok: {} }));
+    const im = { im: { login: 'bob', guid: '5f5e1000-1234-4abc-89ab-000000000001' } };
+    expect(await conn.react(im, { emoji: '\u{1F44D}' }, { with: 'bob', remove: true })).toEqual({});
+    const reactTo = (target: StoredReactionTarget) => conn.react(target, { emoji: '\u{1F44D}' });
+    await reactTo({ pm: 'AAEC' });
+    // @ts-expect-error an `im` target names its other party
+    void (() => conn.react(im, { emoji: '\u{1F44D}' }));
+    expect(server.sent('react').map((f) => f.params)).toEqual([
+      { target: im, key: { emoji: '\u{1F44D}' }, remove: true, with: 'bob' },
+      { target: { pm: 'AAEC' }, key: { emoji: '\u{1F44D}' } },
     ]);
   });
 

@@ -341,12 +341,15 @@ if (conn.replies?.targets.includes('line')) await conn.chat({ text: 'yes', re: {
 
 A client that reacts says so with `reactions: true` in its
 `Credentials`; where the server takes reactions, `caps` lists
-`reactions` and `conn.reactions` says on what (`line`) and how many
-keys a line and an account may hold. `react` adds a key or, with
-`{ remove: true }`, takes it away. History lines carry `reactions` and this
-reader's `reactions_mine`, and `reactions_changed` restates each line
-that changed, which replaces what a client holds for it. Keys come
-back in the server's spelling: compare them as returned.
+`reactions` and `conn.reactions` says on what (`line`, `im`, `pm`) and
+how many keys a line and an account may hold. `react` adds a key or, with
+`{ remove: true }`, takes it away; an instant message's names the other
+party as `{ with: login }`. History lines, stored messages and `msg`
+events carry `reactions` and this reader's `reactions_mine`, and
+`reactions_changed` restates each line or stored message that changed,
+which replaces what a client holds for it, and tells an instant
+message's key added or removed. Keys come back in the server's
+spelling: compare them as returned.
 
 ```ts
 const conn = new Connection({ ...creds, reactions: true });

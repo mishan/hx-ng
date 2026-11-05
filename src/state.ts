@@ -787,11 +787,14 @@ export class Store {
     next: (held: Reaction[] | undefined) => Reaction[] | undefined,
   ): [ConvId, Line[]] | undefined {
     const c = this.pmWith({ login: peer });
-    const line = c?.lines.find((l) => !!l.local === sent && l.guid === guid && !l.elsewhere);
+    const named = (l: Line): boolean => !!l.local === sent && l.guid === guid;
+    const line = c?.lines.find((l) => named(l) && !l.elsewhere);
     if (c && line) {
       line.reactions = next(line.reactions);
       return [c.id, [line]];
     }
+    // Held under another server or account: no message of this one's.
+    if (c?.lines.some(named)) return undefined;
     const key = imKey(peer, sent, guid);
     const held = next(this.earlyImReactions.get(key));
     this.earlyImReactions.delete(key);

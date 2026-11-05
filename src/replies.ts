@@ -51,26 +51,25 @@ function said(line: { text: string; media?: unknown }): string {
 }
 
 /** The `re` a reply to `line` sends, or `null` where none can: a line
- *  by its id, an instant message received by its sender and guid, and
- *  any other stored message by its reference, each only where the server
- *  keeps that kind. */
-export function replyTarget(line: Line, conv: Conversation, targets: readonly ReplyKind[]): ReplyTarget | null {
-  if ((line.kind !== 'chat' && line.kind !== 'action') || line.deleted || line.hidden) return null;
+ *  by its id, an instant message by its sender (`me` for one this
+ *  account sent) and guid, and any other stored message by its
+ *  reference, each only where the server keeps that kind. */
+export function replyTarget(line: Line, conv: Conversation, targets: readonly ReplyKind[], me: string | null): ReplyTarget | null {
+  if ((line.kind !== 'chat' && line.kind !== 'action') || line.deleted || line.hidden || line.elsewhere) return null;
   if (conv.kind !== 'pm') {
     const room = roomOf(conv);
     return line.id !== undefined && targets.includes('line') ? { line: line.id, ...(room ? { room } : {}) } : null;
   }
   // One this client sent has a guid whether it went as an instant
-  // message or not, so its own are named by reference alone.
-  if (!line.local && line.guid !== undefined && line.from?.login && targets.includes('im')) {
-    return { im: { login: line.from.login, guid: line.guid } };
-  }
+  // message or not; the server's reply said which.
+  const login = line.local ? (line.im ? me : null) : line.from?.login;
+  if (line.guid !== undefined && login && targets.includes('im')) return { im: { login, guid: line.guid } };
   return line.ref !== undefined && targets.includes('pm') ? { pm: line.ref } : null;
 }
 
 /** Start a reply to `line`, or `null` where it cannot be named. */
-export function startReply(line: Line, conv: Conversation, targets: readonly ReplyKind[]): Replying | null {
-  const re = replyTarget(line, conv, targets);
+export function startReply(line: Line, conv: Conversation, targets: readonly ReplyKind[], me: string | null): Replying | null {
+  const re = replyTarget(line, conv, targets, me);
   if (!re) return null;
   return { conv: conv.id, re, nick: line.local ? 'yourself' : (line.from?.nick ?? ''), excerpt: said(line) };
 }

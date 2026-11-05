@@ -342,6 +342,17 @@ describe('a private message\'s reactions', () => {
     expect(bob.lines[0]!.reactions).toBeUndefined();
   });
 
+  it('told for an instant message held under another server or account are dropped, not kept', async () => {
+    const { store, bob } = withBob();
+    store.heldBy('wss://a login:alice');
+    store.add(bob.id, bobsIm());
+    store.heldBy('wss://b login:alice');
+    const desk = new ReactionDesk({} as never, { store, seq: new Sequencer(), changed: () => {}, refused: () => expect.unreachable() });
+    await desk.changed([{ target: { im: { login: 'bob', guid: GUID } }, action: 'add', key: { emoji: UP }, from: { login: 'bob' } }]);
+    store.add(bob.id, bobsIm());
+    expect(bob.lines.map((l) => l.reactions)).toEqual([undefined, undefined]);
+  });
+
   it.each(['im', 'pm'] as const)('answered to a desk closed while its answer waited its turn change nothing (%s)', async (kind) => {
     const { store, bob } = withBob();
     store.add(bob.id, kind === 'im' ? bobsIm() : bobsPm());

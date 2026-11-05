@@ -40,22 +40,25 @@ describe('starting a reply', () => {
       ['an instant message', pm, line({ ref: 'R', guid: 'G', from: bob }), ALL, { im: { login: 'bob', guid: 'G' } }],
       ['an instant message, with no im kept', pm, line({ ref: 'R', guid: 'G', from: bob }), ['pm'], { pm: 'R' }],
       ['one of ours, by reference', pm, line({ ref: 'R', guid: 'G', local: true }), ALL, { pm: 'R' }],
+      ['one of ours sent as an instant message', pm, line({ ref: 'R', guid: 'G', local: true, im: true }), ALL, { im: { login: 'alice', guid: 'G' } }],
+      ['one of ours sent as an instant message and never stored', pm, line({ guid: 'G', local: true, im: true }), ALL, { im: { login: 'alice', guid: 'G' } }],
       ['one never stored', pm, line({ from: bob }), ALL, null],
+      ['one held under another server or account', pm, line({ ref: 'R', guid: 'G', from: bob, elsewhere: 'wss://a login:alice' }), ALL, null],
       ['a hidden sealed one', pm, line({ ref: 'R', hidden: true }), ALL, null],
     ] as const) {
-      expect(startReply(l, conv, targets)?.re ?? null, what).toEqual(re);
+      expect(startReply(l, conv, targets, 'alice')?.re ?? null, what).toEqual(re);
     }
   });
 
   it('says whom and what, on one line and cut short', () => {
     const { lobby } = rooms();
     const long = `first\n\n${'word '.repeat(60)}`;
-    const r = startReply(line({ id: 1, text: long, from: { nick: 'Bob' } }), lobby, ALL)!;
+    const r = startReply(line({ id: 1, text: long, from: { nick: 'Bob' } }), lobby, ALL, 'alice')!;
     expect(r.nick).toBe('Bob');
     expect(r.excerpt).not.toContain('\n');
     expect([...r.excerpt]).toHaveLength(120);
     expect(r.excerpt.endsWith('…')).toBe(true);
-    expect(startReply(line({ id: 2, text: '', media: { width: 1, height: 1, type: 'image/png' } as never, local: true }), lobby, ALL)).toMatchObject({
+    expect(startReply(line({ id: 2, text: '', media: { width: 1, height: 1, type: 'image/png' } as never, local: true }), lobby, ALL, 'alice')).toMatchObject({
       nick: 'yourself',
       excerpt: 'an image',
     });

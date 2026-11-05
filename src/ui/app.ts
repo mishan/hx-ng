@@ -1710,7 +1710,7 @@ export class App {
 
   private reply(line: Line, conv: Conversation): void {
     const targets = this.conn instanceof Connection ? this.conn.replies?.targets : undefined;
-    const r = targets && this.mayReply(conv) ? startReply(line, conv, targets) : null;
+    const r = targets && this.mayReply(conv) ? startReply(line, conv, targets, this.store.me()) : null;
     if (!r) return;
     this.replying = r;
     this.showReply();
@@ -3974,7 +3974,7 @@ export class App {
       markdown: this.markdown,
       moderator: this.conn?.moderator ?? false,
       contact: this.contactOf(),
-      replyable: (line) => may && startReply(line, conv!, targets!) !== null,
+      replyable: (line) => may && startReply(line, conv!, targets!, this.store.me()) !== null,
       quote: (line) => resolveQuote(line.re!, conv!, this.quoteSources(conv!)),
       reactable: (line) => !!conv && this.mayReact(line, conv),
       reactionNote: (line) => this.reactNotes.get(line),

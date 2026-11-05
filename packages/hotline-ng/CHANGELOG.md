@@ -51,8 +51,9 @@ says how.
   `ReactionChange` is a stored message's `summary`, or an instant
   message's key, `add` or `remove`, by `from.login`. `StoredMessage` and
   the `msg` event carry `reactions`, `reactions_mine`, and an instant
-  message's `im: true` and `guid`. `FakeServer` takes `line` targets
-  alone.
+  message's `im: true` and `guid`. `MsgOk` carries `im: true` and the
+  `guid` for a message that went as an instant message. `FakeServer`
+  takes `line` targets alone.
 - `onCaughtUp` is called once the catch-up after a login or a resync
   has handed over its pages: where a client reads again what a gap may
   have changed on lines it holds.

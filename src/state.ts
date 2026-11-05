@@ -10,6 +10,7 @@ import type {
   InboxOk,
   ReplyTarget,
   Room,
+  SelfUser,
   ServerInfo,
   Status,
   User,
@@ -77,6 +78,11 @@ export interface Line {
   /** The `guid` an instant message went or came under, which receipts
    *  name it by. */
   guid?: string;
+  /** One this client sent went as an instant message, under `guid`. */
+  im?: true;
+  /** The server and account a private message was held under, where
+   *  that is not the login now: its `ref` and `guid` name nothing here. */
+  elsewhere?: string;
   /** How far a friend has told of one this client sent. */
   receipt?: 'delivered' | 'read';
   /** What it answers, as the server carried it (`replies`). */
@@ -213,11 +219,23 @@ export function addressOf(c: Conversation): Address | null {
   return null;
 }
 
-/** How many receipts may wait for lines not yet added. */
+/** How many receipts, and how many instant messages' reactions, may
+ *  wait for lines not yet added. */
 const EARLY_RECEIPTS = 256;
 
 const uidKey = (uid: number): string => `uid:${uid}`;
 const loginKey = (login: string): string => `login:${login.toLowerCase()}`;
+/** An instant message, by its other party, which way it went and its
+ *  guid. */
+const imKey = (peer: string, sent: boolean, guid: string): string => `${loginKey(peer)} ${sent ? 'to' : 'from'} ${guid}`;
+/** Whom private messages are held under (`Store.heldBy`): the server at
+ *  `url` and the account `self` landed on, or the identity of a guest
+ *  that has one, or else the login typed. */
+export function holderOf(url: string, self: SelfUser, login: string | null): string {
+  const account = self.identity ? self.identity.account : login;
+  const who = account !== null ? loginKey(account) : self.identity ? `fp:${self.identity.fingerprint}` : '';
+  return `${url} ${who}`;
+}
 /** The last-resort key, for a sender the wire gave no name at all. */
 const nickKey = (nick: string): string => `nick:${nick}`;
 
@@ -372,6 +390,12 @@ export class Store {
    *  friend's client can answer before the send's own reply lands, which
    *  is when the line is added. Oldest dropped past `EARLY_RECEIPTS`. */
   private earlyReceipts = new Map<string, boolean>();
+  /** Reactions to an instant message no line carries yet, by sender and
+   *  guid, as `earlyReceipts`: one is told only once, which may be
+   *  before its message is shown. */
+  private earlyImReactions = new Map<string, Reaction[]>();
+  /** The server and account private messages are held under. */
+  private holder?: string;
 
   constructor() {
     this.conversations.set(LOBBY, {
@@ -572,6 +596,23 @@ export class Store {
     this.pmWith(who)?.mailIds.set(key, mail.id);
   }
 
+  /** A login as `holder` (`holderOf`): one other than the last leaves
+   *  the private messages held as they are, marked with the holder they
+   *  were held under, and gives back those held under this one. */
+  heldBy(holder: string): void {
+    if (this.holder !== undefined && holder !== this.holder) {
+      this.earlyImReactions.clear();
+      for (const c of this.conversations.values()) {
+        if (c.kind !== 'pm') continue;
+        for (const line of c.lines) {
+          if (line.elsewhere === holder) delete line.elsewhere;
+          else line.elsewhere ??= this.holder;
+        }
+      }
+    }
+    this.holder = holder;
+  }
+
   /** A login, not a resume: its mailbox may be numbered anew, by a
    *  server upgraded since or for another account, so no cursor of the
    *  last session's holds. What was shown stays known by its `ref`, and a
@@ -721,6 +762,44 @@ export class Store {
     return changed;
   }
 
+  /** Give the private message `ref` names the reactions it now has, and
+   *  return its conversation and line where that changed them. One not
+   *  held is left to the `msg` or `inbox` row that shows it. */
+  setPmReactions(ref: string, reactions: Reaction[] | undefined): [ConvId, Line[]] | undefined {
+    for (const c of this.conversations.values()) {
+      const line = c.kind === 'pm' ? c.lines.find((l) => l.ref === ref && !l.elsewhere) : undefined;
+      if (!line) continue;
+      if (JSON.stringify(line.reactions) === JSON.stringify(reactions)) return undefined;
+      line.reactions = reactions;
+      return [c.id, [line]];
+    }
+    return undefined;
+  }
+
+  /** The instant message under `guid` with `peer`, which this account
+   *  `sent` or received, its reactions made `next` of what they were,
+   *  and its conversation and line; one not held yet keeps them for when
+   *  it is. */
+  imReactions(
+    peer: string,
+    guid: string,
+    sent: boolean,
+    next: (held: Reaction[] | undefined) => Reaction[] | undefined,
+  ): [ConvId, Line[]] | undefined {
+    const c = this.pmWith({ login: peer });
+    const line = c?.lines.find((l) => !!l.local === sent && l.guid === guid && !l.elsewhere);
+    if (c && line) {
+      line.reactions = next(line.reactions);
+      return [c.id, [line]];
+    }
+    const key = imKey(peer, sent, guid);
+    const held = next(this.earlyImReactions.get(key));
+    this.earlyImReactions.delete(key);
+    if (held) this.earlyImReactions.set(key, held);
+    if (this.earlyImReactions.size > EARLY_RECEIPTS) this.earlyImReactions.delete(this.earlyImReactions.keys().next().value!);
+    return undefined;
+  }
+
   /** The reactions a page's lines have, given to the lines of `conv` it
    *  shares with what is held, which may have changed out of the window
    *  told live. Returns the lines changed. */
@@ -816,6 +895,12 @@ export class Store {
         this.earlyReceipts.delete(key);
         line.receipt = read ? 'read' : 'delivered';
       }
+    }
+    const peer = line.local ? (line.im ? c.peer.login : undefined) : line.from?.login;
+    if (line.guid !== undefined && peer !== undefined) {
+      const key = imKey(peer, !!line.local, line.guid);
+      line.reactions ??= this.earlyImReactions.get(key);
+      this.earlyImReactions.delete(key);
     }
     if (c.log) this.trimPublic(c, c.log, 'oldest');
     else if (c.lines.length > MAX_LINES) c.lines.splice(0, c.lines.length - MAX_LINES);
@@ -924,6 +1009,14 @@ export function mergePage(
     const restated = store.restate(lines, page.conv);
     merged(store.mergeHistory(lines, page.hasMore, page.direction, page.conv), restated);
   });
+}
+
+/** A page of stored mail placed in its turn, as `mergePage` merges one
+ *  of history: `read`, which awaits its rows' signatures, runs inside
+ *  it, so a reactions summary told after the page waits for it rather
+ *  than being undone by it. */
+export function mergeMail<T>(seq: Sequencer, read: () => Promise<T>, place: (read: T) => number): Promise<number> {
+  return seq.run(async () => place(await read()));
 }
 
 /** A public notice, or a subject, said in the lobby or in a room this

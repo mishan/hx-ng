@@ -11,8 +11,10 @@ import {
   type Connection,
   type HistoryLine,
   type HistoryOk,
+  type LineReactions,
   type ReactionChange,
   type ReactionCount,
+  type ReactionKind,
   type ReactionsConfig,
 } from '@hotline-ng/client';
 
@@ -26,6 +28,10 @@ const RATE_TRIES = 5;
  *  hxd-ng's default `live_window`. Older ones are read again when shown,
  *  and a resync reads these. */
 export const LIVE_LINES = 200;
+/** The most stored messages a catch-up reads again, the conversation on
+ *  screen's first: four `reactions` requests, which leave most of
+ *  hxd-ng's default request bucket to the rest of a catch-up. */
+const MESSAGES_MAX = 200;
 /** How long a line read again as it came into view is not read again. */
 const SEEN_AGAIN_MS = 60_000;
 /** How long lines coming into view are gathered before they are read. */
@@ -62,6 +68,51 @@ export function changesByConv(changes: readonly ReactionChange[]): Map<ConvId, [
   return out;
 }
 
+export type Reactable =
+  | { kind: 'line'; target: { line: number; room?: number } }
+  | { kind: 'pm'; target: { pm: string } }
+  | { kind: 'im'; target: { im: { login: string; guid: string } }; with: string };
+
+/** What reacting to `line` in `conv` names, or `null` where nothing
+ *  does or the server takes none of its kind (`kinds`). A private
+ *  message received under a guid is an instant message, and one this
+ *  account (`me`) sent is where the server said so; either is reacted
+ *  to by its sender's login, which an identity guest's lacks. Any other
+ *  stored one is reacted to by its `ref`. */
+export function reactableAs(line: Line, conv: Conversation, kinds: readonly ReactionKind[], me: string | null): Reactable | null {
+  if (line.elsewhere) return null;
+  const room = roomOf(conv);
+  const [login, other] = line.local ? [me, conv.peer.login] : [line.from?.login, line.from?.login];
+  const to: Reactable | null =
+    conv.kind !== 'pm'
+      ? line.id === undefined
+        ? null
+        : { kind: 'line', target: { line: line.id, ...(room ? { room } : {}) } }
+      : line.guid !== undefined && (!line.local || line.im)
+        ? login && other
+          ? { kind: 'im', target: { im: { login, guid: line.guid } }, with: other }
+          : null
+        : line.ref === undefined
+          ? null
+          : { kind: 'pm', target: { pm: line.ref } };
+  return to && kinds.includes(to.kind) ? to : null;
+}
+
+/** An instant message's reactions once one of its two parties adds or
+ *  removes `emoji`. Only two can react, so a count and whether this
+ *  reader holds the key say whose it is. */
+export function afterParty(held: readonly Reaction[] | undefined, emoji: string, add: boolean, mine: boolean): Reaction[] | undefined {
+  // A key of a kind this client does not draw, as `summaryOf` leaves out.
+  if (typeof emoji !== 'string') return held?.length ? [...held] : undefined;
+  const was = held?.find((r) => r.emoji === emoji);
+  const me = mine ? add : !!was?.mine;
+  const them = mine ? (was?.count ?? 0) > Number(!!was?.mine) : add;
+  const count = Number(me) + Number(them);
+  const rest = (held ?? []).map((r) => (r.emoji === emoji ? { emoji, count, mine: me } : r)).filter((r) => r.count > 0);
+  if (count && !was) rest.push({ emoji, count, mine: me });
+  return rest.length ? rest : undefined;
+}
+
 /** A line's reactions once this account's own add or removal of `emoji`
  *  is answered `count`: drawn at once, rather than at the batch that
  *  restates it a moment later. */
@@ -71,21 +122,24 @@ export function afterOwn(held: readonly Reaction[] | undefined, emoji: string, a
   return rest.length ? rest : undefined;
 }
 
-/** Why `emoji` cannot be added to a line holding `held`, or `null` where
- *  it can. A key already on the line never counts against the server's
- *  caps. */
+/** Why `emoji` cannot be added to a target of `kind` holding `held`, or
+ *  `null` where it can. A key already there never counts against the
+ *  server's caps, and an instant message, kept nowhere, has none. */
 export function whyNotAdd(
   held: readonly Reaction[] | undefined,
   emoji: string,
   caps: Pick<ReactionsConfig, 'max_keys' | 'max_per_user'>,
+  kind: ReactionKind = 'line',
 ): string | null {
+  if (kind === 'im') return null;
+  const what = kind === 'line' ? 'line' : 'message';
   const keys = held ?? [];
   const there = keys.find((r) => r.emoji === emoji);
   if (there?.mine) return null;
   if (keys.filter((r) => r.mine).length >= caps.max_per_user) {
-    return `You have as many reactions on this line as you may (${caps.max_per_user}). Take one away first.`;
+    return `You have as many reactions on this ${what} as you may (${caps.max_per_user}). Take one away first.`;
   }
-  if (!there && keys.length >= caps.max_keys) return 'This line has as many different reactions as it may.';
+  if (!there && keys.length >= caps.max_keys) return `This ${what} has as many different reactions as it may.`;
   return null;
 }
 
@@ -165,12 +219,14 @@ export class ReactionDesk {
   private asked = new Map<string, number>();
   private queued = new Map<number, Set<number>>();
   private gathering = false;
+  private readingMessages = false;
+  private messagesAgain: readonly Conversation[] | null = null;
   private closed = false;
   private wait: (ms: number) => Promise<void>;
   private now: () => number;
 
   constructor(
-    private conn: Pick<Connection, 'react' | 'history' | 'reactions' | 'replies'>,
+    private conn: Pick<Connection, 'react' | 'reactionsGet' | 'history' | 'reactions' | 'replies'>,
     private host: DeskHost,
   ) {
     this.wait = host.wait ?? sleep;
@@ -186,6 +242,15 @@ export class ReactionDesk {
   changed(changes: readonly ReactionChange[]): Promise<void> {
     return this.host.seq.run(() => {
       for (const [conv, updates] of changesByConv(changes)) this.apply(conv, updates);
+      if (this.closed) return;
+      const store = this.host.store;
+      for (const c of changes) {
+        if (c.action === 'add' || c.action === 'remove') {
+          const { login, guid } = c.target.im;
+          const sent = login.toLowerCase() === store.me()?.toLowerCase();
+          this.told(store.imReactions(sent ? c.from.login : login, guid, sent, (held) => afterParty(held, c.key.emoji, c.action === 'add', false)));
+        } else if (c.action === 'summary' && 'pm' in c.target) this.told(store.setPmReactions(c.target.pm, summaryOf(c.keys, c.mine)));
+      }
     });
   }
 
@@ -193,14 +258,23 @@ export class ReactionDesk {
    *  once, as long as it says. */
   async toggle(line: Line, conv: Conversation, emoji: string, add: boolean, waited = false): Promise<void> {
     const caps = this.conn.reactions;
-    const id = line.id;
-    if (!caps || id === undefined || this.closed) return;
-    const why = add ? whyNotAdd(line.reactions, emoji, caps) : null;
+    const to = caps && reactableAs(line, conv, caps.targets, this.host.store.me());
+    if (!caps || !to || this.closed) return;
+    const why = add ? whyNotAdd(line.reactions, emoji, caps, to.kind) : null;
     if (why) return this.host.refused(line, conv.id, why, false);
-    const room = roomOf(conv);
-    let count: number;
+    let settle = (): void => {};
     try {
-      ({ count } = await this.conn.react({ line: id, ...(room ? { room } : {}) }, { emoji }, { remove: !add }));
+      if (to.kind === 'line') {
+        const { count } = await this.conn.react(to.target, { emoji }, { remove: !add });
+        settle = () => this.apply(conv.id, [[to.target.line, afterOwn(line.reactions, emoji, add, count)]]);
+      } else if (to.kind === 'im') {
+        // Nobody is told of this reader's own: the tally is kept here.
+        await this.conn.react(to.target, { emoji }, { remove: !add, with: to.with });
+        const { guid } = to.target.im;
+        settle = () => this.told(this.host.store.imReactions(to.with, guid, !!line.local, (held) => afterParty(held, emoji, add, true)));
+      } else {
+        await this.conn.react(to.target, { emoji }, { remove: !add });
+      }
     } catch (e) {
       if (this.closed) return;
       if (!(e instanceof WireFailure)) throw e;
@@ -213,9 +287,13 @@ export class ReactionDesk {
       return this.host.refused(line, conv.id, reactionErrorText(e.wire), e.wire.code === 'access_denied');
     }
     if (this.closed) return;
+    // Answered alike whether it was applied or dropped, and told to this
+    // session by no summary, so it is read back; a failure there is no
+    // refusal of the reaction.
+    if (to.kind === 'pm') return this.readMessages([to.target]);
     // In the answer's turn, from what the line holds then: a batch that
     // came before the answer is older than it, and is applied first.
-    await this.host.seq.run(() => this.apply(conv.id, [[id, afterOwn(line.reactions, emoji, add, count)]]));
+    await this.host.seq.run(() => this.closed || settle());
   }
 
   /** After a catch-up: the newest lines each of `convs` holds read again,
@@ -226,6 +304,64 @@ export class ReactionDesk {
       const ids = await this.host.seq.run(() => heldIds(c).slice(-LIVE_LINES));
       if (this.closed) return;
       await this.refetch(c.id, ids);
+    }
+  }
+
+  /** After a catch-up: the newest stored messages each of `convs` holds
+   *  read again, newest first, the first conversation first and
+   *  `MESSAGES_MAX` in all. A call while a read is under way is run once
+   *  it is done, with the conversations it names. Sent ones are in no
+   *  `inbox` page, and the catch-up's page lists only the newest
+   *  received mail. */
+  async refetchMessages(convs: readonly Conversation[]): Promise<void> {
+    if (!this.conn.reactions?.targets.includes('pm')) return;
+    if (this.readingMessages) return void (this.messagesAgain = convs);
+    this.readingMessages = true;
+    try {
+      for (let next: readonly Conversation[] | null = convs; next && !this.closed; next = this.messagesAgain) {
+        this.messagesAgain = null;
+        const these = next;
+        const me = this.host.store.me();
+        const targets = await this.host.seq.run(() =>
+          these
+            .flatMap((c) =>
+              c.lines
+                .flatMap((l) => {
+                  const to = reactableAs(l, c, ['pm'], me);
+                  return to?.kind === 'pm' ? [to.target] : [];
+                })
+                .slice(-LIVE_LINES)
+                .reverse(),
+            )
+            .slice(0, MESSAGES_MAX),
+        );
+        await this.readMessages(targets);
+      }
+    } finally {
+      this.readingMessages = false;
+    }
+  }
+
+  /** The reactions on `targets` read again, as many as one request
+   *  takes at a time, and applied in each answer's turn. A rate limit is
+   *  waited out as long as it says; any other refusal ends it, the
+   *  messages keeping what they had. */
+  private async readMessages(targets: readonly { pm: string }[]): Promise<void> {
+    for (let at = 0, limited = 0; at < targets.length && !this.closed; ) {
+      let read: LineReactions[];
+      try {
+        ({ reactions: read } = await this.conn.reactionsGet(targets.slice(at, at + IDS_MAX)));
+      } catch (e) {
+        if (!(e instanceof WireFailure && e.wire.code === RATE_LIMITED) || limited++ >= RATE_TRIES) return;
+        await this.wait((e.wire.retry_after ?? 1) * 1000);
+        continue;
+      }
+      limited = 0;
+      at += IDS_MAX;
+      await this.host.seq.run(() => {
+        if (this.closed) return;
+        for (const r of read) if ('pm' in r.target) this.told(this.host.store.setPmReactions(r.target.pm, summaryOf(r.keys, r.mine)));
+      });
     }
   }
 
@@ -265,6 +401,10 @@ export class ReactionDesk {
       },
       this.wait,
     );
+  }
+
+  private told(changed: [ConvId, Line[]] | undefined): void {
+    if (changed && !this.closed) this.host.changed(...changed);
   }
 
   private apply(conv: ConvId, updates: Iterable<readonly [number, Reaction[] | undefined]>): void {

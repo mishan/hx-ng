@@ -695,7 +695,7 @@ describe('reactions', () => {
   });
 
   it.each([
-    ['no_such_target', 'That line cannot be reacted to: it may be gone, or out of reach.'],
+    ['no_such_target', 'That cannot be reacted to: it may be gone, or out of reach.'],
     ['too_many_reactions', 'That line has as many reactions as it may, or you have as many on it as you may.'],
     ['access_denied', 'You may not react here.'],
     ['bad_request', 'not one emoji'],

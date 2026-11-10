@@ -325,6 +325,12 @@ export class NewsView {
   /** What the events since the last reread asked to be read again. */
   private timelineTouch: TimelineTouch = null;
   private timelineTimer: ReturnType<typeof setTimeout> | null = null;
+  /** `news_subs` answers taken, so a load can tell whether its own ask
+   *  for what is followed was answered. */
+  private followingFetches = 0;
+  /** Whether what is followed is known as of this timeline's opening:
+   *  until it is, an empty timeline cannot say that nothing is. */
+  private timelineFollowsKnown = false;
   /** Something changed while the first page was out. */
   private timelineMissed = false;
   /** Says which timeline threads have been on screen. */
@@ -451,6 +457,7 @@ export class NewsView {
       const ok = await conn.newsSubs();
       if (session !== this.session) return;
       this.following.load(ok.subs);
+      this.followingFetches++;
     } catch {
       return;
     }
@@ -875,6 +882,7 @@ export class NewsView {
     this.timeline = new Timeline();
     this.timelineTouch = null;
     this.timelineMissed = false;
+    this.timelineFollowsKnown = false;
     this.draft = null;
     this.naming = null;
     this.backlinks.clear();
@@ -992,14 +1000,16 @@ export class NewsView {
       } else if (s.at === 'timeline') {
         // A follow made on another device sends no event, so what is
         // followed is asked again whenever this is read afresh.
-        void this.refreshFollowing();
+        const fetches = this.followingFetches;
         // A refresh rereads as deep as the reader had paged.
         const oldest = this.timeline.threads.at(-1)?.article.id;
         const [tree, first] = await Promise.all([
           conn.newsTree({ depth: 4 }),
           oldest === undefined ? conn.newsTimeline() : null,
+          this.refreshFollowing(),
         ]);
         if (gen !== this.generation) return;
+        if (this.followingFetches > fetches) this.timelineFollowsKnown = true;
         this.hooks.articles().nodes(tree.nodes);
         this.timelineNodes = indexTree(tree.nodes);
         if (first) {
@@ -1871,7 +1881,7 @@ export class NewsView {
         h(
           'p',
           { class: 'news-empty' },
-          categories.some((sub) => !sub.muted)
+          !this.timelineFollowsKnown || categories.some((sub) => !sub.muted)
             ? 'Nothing has been started in the categories you follow yet.'
             : categories.length
               ? 'Every category you follow is muted, and a muted one is left out of this.'

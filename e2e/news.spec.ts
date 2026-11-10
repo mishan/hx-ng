@@ -42,22 +42,25 @@ delete_news_bundles = true
 /** `noTimeline` plays a server older than the timeline: the socket is
  *  the real server's, but `news_timeline` is answered as it would not
  *  know it. `slowTimeline` holds the server's answers to it back a
- *  while, as a busy server would. `sent` collects the frames the page
- *  sends. */
+ *  while, as a busy server would. `noSubs` has `news_subs` refused, as
+ *  a failing store would. `sent` collects the frames the page sends. */
 async function logIn(
   browser: Browser,
   server: RunningServer,
   login: string,
-  opts: { noTimeline?: boolean; slowTimeline?: boolean; sent?: Record<string, unknown>[] } = {},
+  opts: { noTimeline?: boolean; slowTimeline?: boolean; noSubs?: boolean; sent?: Record<string, unknown>[] } = {},
 ): Promise<Page> {
   const page = await (await browser.newContext()).newPage();
-  if (opts.noTimeline || opts.slowTimeline) {
+  if (opts.noTimeline || opts.slowTimeline || opts.noSubs) {
     await page.routeWebSocket(/\/ng/, (ws) => {
       const real = ws.connectToServer();
       const slow = new Set<number>();
       ws.onMessage((m) => {
         const frame = JSON.parse(String(m)) as { id?: number; req?: string };
-        if (frame.req !== 'news_timeline') return real.send(m);
+        if (opts.noSubs && frame.req === 'news_subs') {
+          return ws.send(JSON.stringify({ reply: frame.id, error: { code: 'store_failed', text: 'The store failed.' } }));
+        }
+        if (frame.req !== 'news_timeline' || !(opts.noTimeline || opts.slowTimeline)) return real.send(m);
         if (opts.slowTimeline) {
           slow.add(frame.id!);
           return real.send(m);
@@ -493,6 +496,11 @@ news_posts = 0
     await page.locator('.crumb', { hasText: 'News' }).click();
     await page.locator('.news-timeline').click();
     await expect(page.locator('.news-empty')).toHaveText('Nothing has been started in the categories you follow yet.');
+    // Not knowing what is followed is not following nothing.
+    const unsure = await logIn(browser, server, 'editor', { noSubs: true });
+    await openNews(unsure);
+    await unsure.locator('.news-timeline').click();
+    await expect(unsure.locator('.news-empty')).toHaveText('Nothing has been started in the categories you follow yet.');
     // Threads started into it as it stands empty, the second while the
     // first is still being read in, and a reply after.
     const poster = await openAccount(server, 'editor', 'pw');

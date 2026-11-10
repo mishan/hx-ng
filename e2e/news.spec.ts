@@ -44,8 +44,8 @@ delete_news_bundles = true
  *  know it. `slowTimeline` holds the server's answers to it back a
  *  while, as a busy server would. `noSubs` has `news_subs` refused, as
  *  a failing store would; `staleSubs` holds its first answer back a
- *  while and refuses the rest. `sent` collects the frames the page
- *  sends. */
+ *  while and refuses the rest. `refuseSeen` refuses the first timeline
+ *  `news_seen`. `sent` collects the frames the page sends. */
 async function logIn(
   browser: Browser,
   server: RunningServer,
@@ -55,17 +55,27 @@ async function logIn(
     slowTimeline?: boolean;
     noSubs?: boolean;
     staleSubs?: boolean;
+    refuseSeen?: boolean;
     sent?: Record<string, unknown>[];
   } = {},
 ): Promise<Page> {
   const page = await (await browser.newContext()).newPage();
-  if (opts.noTimeline || opts.slowTimeline || opts.noSubs || opts.staleSubs) {
+  const sent = opts.sent;
+  const routed = opts.noTimeline || opts.slowTimeline || opts.noSubs || opts.staleSubs || opts.refuseSeen;
+  if (routed) {
     await page.routeWebSocket(/\/ng/, (ws) => {
       const real = ws.connectToServer();
       const slow = new Set<number>();
       let held: number | undefined;
+      let refused = false;
       ws.onMessage((m) => {
-        const frame = JSON.parse(String(m)) as { id?: number; req?: string };
+        const frame = JSON.parse(String(m)) as { id?: number; req?: string; params?: { timeline?: boolean } };
+        // A routed socket's frames are not seen by `framesent`.
+        sent?.push(frame);
+        if (opts.refuseSeen && !refused && frame.req === 'news_seen' && frame.params?.timeline) {
+          refused = true;
+          return ws.send(JSON.stringify({ reply: frame.id, error: { code: 'store_failed', text: 'The store failed.' } }));
+        }
         if (opts.staleSubs && frame.req === 'news_subs' && held === undefined) {
           held = frame.id;
           return real.send(m);
@@ -88,8 +98,7 @@ async function logIn(
       });
     });
   }
-  const sent = opts.sent;
-  if (sent) page.on('websocket', (ws) => ws.on('framesent', (f) => sent.push(JSON.parse(String(f.payload)))));
+  if (sent && !routed) page.on('websocket', (ws) => ws.on('framesent', (f) => sent.push(JSON.parse(String(f.payload)))));
   // A distinct hostname makes this a custom-server deployment rather
   // than the dev proxy's default :5700, so its HTTP attachment route is
   // exercised directly (and through hxd-ng's CORS policy).
@@ -484,6 +493,43 @@ news_posts = 0
       await expect(rows.locator('.news-thread-category', { hasText: 'South' })).toHaveCount(0);
     } finally {
       await Promise.all([reader.close(), editor.close()]);
+    }
+  });
+
+  test('a refused claim on the timeline is made again without another scroll', async ({ browser }) => {
+    // The editor follows and the reader posts: the reader's page from the
+    // test before is still on its timeline, and would see the thread first.
+    const follower = await openAccount(server, 'editor', 'pw');
+    const poster = await openAccount(server, 'reader', 'pw');
+    let category: number | undefined;
+    try {
+      test.skip(!(await hasTimeline(follower)), 'this hxd-ng predates the news timeline');
+      category = ((await follower.ask('news_node_create', { kind: 'category', name: 'Retried' })) as { node: { id: number } })
+        .node.id;
+      await follower.ask('news_subscribe', { category });
+      await poster.ask('news_post', { category, subject: 'Seen at last', body: 'Once.' });
+      const unread = async () => {
+        const ok = (await follower.ask('news_timeline', { limit: 200 })) as {
+          threads: { article: { subject: string }; unread: boolean }[];
+        };
+        return ok.threads.filter((t) => t.unread).map((t) => t.article.subject);
+      };
+      expect(await unread()).toContain('Seen at last');
+
+      const sent: Record<string, unknown>[] = [];
+      const page = await logIn(browser, server, 'editor', { refuseSeen: true, sent });
+      await openNews(page);
+      await page.locator('.news-timeline').click();
+      await expect(page.locator('.news .news-thread-subject').first()).toHaveText('Seen at last');
+      // Refused once, and sent again with the page left as it is.
+      await expect
+        .poll(() => sent.filter((f) => f.req === 'news_seen').length, { timeout: 10_000 })
+        .toBeGreaterThanOrEqual(2);
+      await expect.poll(unread).not.toContain('Seen at last');
+    } finally {
+      // The test after this one has the editor following nothing.
+      if (category !== undefined) await follower.ask('news_unsubscribe', { category });
+      await Promise.all([follower.close(), poster.close()]);
     }
   });
 

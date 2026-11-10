@@ -161,6 +161,8 @@ export interface NewsHooks {
 
 /** The largest thread page the wire allows. */
 const THREAD_PAGE = 100;
+/** How long a claim the server refused waits to be made again. */
+const SEEN_RETRY = 3000;
 /** A timeline reread's page: the wire's ceiling, which a server may
  *  lower, and `has_more` says when it has. */
 const TIMELINE_PAGE = 200;
@@ -762,7 +764,7 @@ export class NewsView {
     if (touch === 'reload') return this.load();
     const gen = this.generation;
     try {
-      const rows = await this.rereadTimeline(conn, touch);
+      const rows = await this.rereadTimeline(conn, touch, gen);
       if (gen !== this.generation) return;
       this.timeline.replace(touch, rows);
       this.error = null;
@@ -775,18 +777,19 @@ export class NewsView {
 
   /** Every timeline thread in `span` to show, read as signed where
    *  they were. */
-  private async rereadTimeline(conn: Session, span: TimelineSpan): Promise<NewsTimelineThread[]> {
+  private async rereadTimeline(conn: Session, span: TimelineSpan, gen: number): Promise<NewsTimelineThread[]> {
     const rows = await readSpan((p) => conn.newsTimeline(p), span, TIMELINE_PAGE);
-    const shown = await this.shownOf(rows);
+    const shown = await this.shownOf(rows, gen);
     return rows.filter(shown);
   }
 
   /** Which of a timeline answer's threads to show, read as `readAll`
    *  reads a category's, each in its own category. */
-  private async shownOf(rows: NewsTimelineThread[]): Promise<(t: NewsTimelineThread) => boolean> {
+  private async shownOf(rows: NewsTimelineThread[], gen: number): Promise<(t: NewsTimelineThread) => boolean> {
     const shown = await this.readAll(
       rows.map((t) => t.article),
       (a) => this.timelineCategory(a.category),
+      gen,
     );
     return (t) => shown.has(t.article.id);
   }
@@ -836,7 +839,7 @@ export class NewsView {
   }
 
   /** Tell the server which runs of the timeline have been shown. A run
-   *  it did not take is unread again, to be claimed on the next scroll.
+   *  it did not take is unread again, to be claimed again.
    *  A category followed on another device since this was read is not
    *  in what was shown, and its threads inside a run are marked seen
    *  all the same: the server cannot tell, and a reread before every
@@ -853,8 +856,16 @@ export class NewsView {
         () => {
           if (session === this.session) void this.refreshFollowing();
         },
+        // Asked again after a pause, while this timeline is still the one
+        // on screen; a scroll or a redraw sooner asks sooner.
         () => {
-          if (session === this.session) timeline.unclaim(run);
+          if (session !== this.session) return;
+          timeline.unclaim(run);
+          if (this.seenTimer !== null) clearTimeout(this.seenTimer);
+          this.seenTimer = setTimeout(() => {
+            this.seenTimer = null;
+            if (session === this.session && timeline === this.timeline) this.acknowledgeTimeline();
+          }, SEEN_RETRY);
         },
       );
     }
@@ -980,7 +991,7 @@ export class NewsView {
         // throw away the older threads they scrolled down to.
         const limit = Math.min(200, Math.max(50, this.threads.length));
         const ok = await conn.newsThreads({ category: s.category.id, limit });
-        const shown = await this.readAll(ok.threads.map((t) => t.article), s.category);
+        const shown = await this.readAll(ok.threads.map((t) => t.article), s.category, gen);
         if (gen !== this.generation) return;
         this.threads = ok.threads.filter((t) => shown.has(t.article.id));
         this.threadsMore = ok.has_more;
@@ -1016,7 +1027,7 @@ export class NewsView {
         this.hooks.articles().nodes(tree.nodes);
         this.timelineNodes = indexTree(tree.nodes);
         if (first) {
-          const keep = await this.shownOf(first.threads);
+          const keep = await this.shownOf(first.threads, gen);
           if (gen !== this.generation) return;
           this.timeline.load(first, keep);
         } else if (oldest !== undefined) {
@@ -1043,7 +1054,7 @@ export class NewsView {
           after = page.articles.at(-1)?.id;
           if (after === undefined) break;
         }
-        const shown = await this.readAll(all, s.category);
+        const shown = await this.readAll(all, s.category, gen);
         if (gen !== this.generation) return;
         this.articles = all.filter((a) => shown.has(a.id));
         this.articlesMore = more;
@@ -1088,7 +1099,7 @@ export class NewsView {
     this.paging = true;
     try {
       const ok = await conn.newsThreads({ category: s.category.id, before });
-      const shown = await this.readAll(ok.threads.map((t) => t.article), s.category);
+      const shown = await this.readAll(ok.threads.map((t) => t.article), s.category, gen);
       if (gen !== this.generation) return;
       this.threads = this.threads.concat(
         ok.threads.filter((t) => shown.has(t.article.id) && !this.threads.some((x) => x.article.id === t.article.id)),
@@ -1111,7 +1122,7 @@ export class NewsView {
     this.paging = true;
     try {
       const ok = await conn.newsTimeline({ before });
-      const keep = await this.shownOf(ok.threads);
+      const keep = await this.shownOf(ok.threads, gen);
       if (gen !== this.generation) return;
       this.timeline.addOlder(ok, keep);
     } catch (e) {
@@ -1133,7 +1144,7 @@ export class NewsView {
     this.paging = true;
     try {
       const page = await conn.newsThread({ root: s.root, after, snapshot, limit: THREAD_PAGE });
-      const shown = await this.readAll(page.articles, s.category);
+      const shown = await this.readAll(page.articles, s.category, gen);
       if (gen !== this.generation) return;
       // An article already here is not drawn twice, whatever the page
       // overlapped: two elements with one id is a thread that scrolls to
@@ -1154,11 +1165,12 @@ export class NewsView {
   /** Read a listing's articles in its order, a reply after its parent,
    *  and say which to show: a second copy of a signed article under its
    *  id is not (§3.6). One that cannot be read is shown as unverified,
-   *  never left out, and a read for a session since replaced is not
-   *  kept. */
+   *  never left out, and a read for a session since replaced, or begun
+   *  under an older `gen`, is not kept. */
   private async readAll(
     list: readonly NewsArticle[],
     category: NewsNode | ((a: NewsArticle) => NewsNode),
+    gen: number,
   ): Promise<Set<number>> {
     const reader = this.hooks.articles();
     const reads = await Promise.all(
@@ -1169,7 +1181,9 @@ export class NewsView {
       ),
     );
     const shown = new Set<number>();
-    if (reader !== this.hooks.articles()) return new Set(list.map((a) => a.id));
+    // A read for a screen since left or refreshed is not kept: it may be
+    // older than what a later read stored.
+    if (reader !== this.hooks.articles() || gen !== this.generation) return new Set(list.map((a) => a.id));
     list.forEach((a, i) => {
       this.reads.set(a.id, reads[i]!);
       if (!reads[i]!.duplicate) shown.add(a.id);

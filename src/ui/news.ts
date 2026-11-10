@@ -89,7 +89,7 @@ import {
 import type { ContactOf } from '../contacts';
 import { unreadable, type ArticleRead, type ArticleReader } from '../signing';
 import { ask } from './ask';
-import { badge, fill, h, linkify } from './dom';
+import { badge, fill, h, linkify, morph } from './dom';
 import { blockNodes, wrapSelection } from './markdown';
 import { MediaCache } from './media';
 import { signatureTag, signedBy, signedName } from './transcript';
@@ -340,6 +340,9 @@ export class NewsView {
   /** Says which timeline threads have been on screen. */
   private seenWatch: IntersectionObserver | null = null;
   private seenTimer: ReturnType<typeof setTimeout> | null = null;
+  /** The timeline's rows by thread, kept while it is the screen, so a
+   *  redraw patches them rather than replacing them. */
+  private timelineRows = new Map<number, HTMLElement>();
 
   constructor(private hooks: NewsHooks) {
     this.bar.append(this.crumbsEl, h('span', { class: 'spacer' }), this.searchBox, this.actionsEl);
@@ -397,6 +400,12 @@ export class NewsView {
   shown(on: boolean): void {
     this.onScreen = on;
     if (!on) return;
+    // What a row reported while hidden was dropped; observed afresh, it
+    // reports again.
+    for (const row of this.timelineRows.values()) {
+      this.seenWatch?.unobserve(row);
+      this.seenWatch?.observe(row);
+    }
     if (this.stale) void this.load();
     this.render();
   }
@@ -430,6 +439,7 @@ export class NewsView {
     this.timelineNodes.clear();
     this.timelineTouch = null;
     this.timelineMissed = false;
+    this.forgetTimelineRows();
     this.forgetDeferred();
     this.images.clear();
     this.session++;
@@ -814,7 +824,6 @@ export class NewsView {
    *  Claimed a moment after the last one came into view, so scrolling
    *  is one claim rather than one per thread. */
   private watchSeen(el: HTMLElement, id: number): void {
-    el.dataset.root = String(id);
     if (typeof IntersectionObserver === 'undefined') {
       this.timeline.saw(id);
       return;
@@ -836,6 +845,11 @@ export class NewsView {
       { root: this.body, threshold: 0.5 },
     );
     this.seenWatch.observe(el);
+  }
+
+  private forgetTimelineRows(): void {
+    this.seenWatch?.disconnect();
+    this.timelineRows.clear();
   }
 
   /** Tell the server which runs of the timeline have been shown. A run
@@ -897,6 +911,7 @@ export class NewsView {
     this.timelineTouch = null;
     this.timelineMissed = false;
     this.timelineFollowsKnown = false;
+    this.forgetTimelineRows();
     this.draft = null;
     this.naming = null;
     this.backlinks.clear();
@@ -1505,17 +1520,12 @@ export class NewsView {
     const at = this.focusable(this.body).indexOf(had!);
     // The bar's controls come and go, so one is found again by its label.
     const label = had && this.bar.contains(had) && had !== this.searchBox ? had.textContent : null;
-    // A timeline thread is found again by which it is, since threads
-    // arriving above it move its place in the list, and without
-    // scrolling to it, which would take the reader somewhere else.
-    const root = had && this.body.contains(had) ? had.dataset.root : undefined;
     const moved = this.screen !== this.drawn;
     this.drawn = this.screen;
     this.renderBar();
     // Every placeholder the last draw was watching is about to be
     // replaced, and this draw watches its own.
     this.forgetDeferred();
-    this.seenWatch?.disconnect();
     const s = this.screen;
     const content =
       s.at === 'tree'
@@ -1550,16 +1560,13 @@ export class NewsView {
       );
       field?.focus();
     } else if ((at >= 0 || label !== null || this.focusOwed) && !this.el.contains(document.activeElement)) {
-      const same = moved || root === undefined ? null : this.body.querySelector<HTMLElement>(`[data-root="${root}"]`);
       const target =
         moved || this.focusOwed
           ? this.body.querySelector<HTMLElement>(FOCUSABLE)
-          : same
-            ? same
-            : at >= 0
-              ? this.focusable(this.body)[at]
-              : this.focusable(this.bar).find((b) => b.textContent === label);
-      target?.focus(same ? { preventScroll: true } : undefined);
+          : at >= 0
+            ? this.focusable(this.body)[at]
+            : this.focusable(this.bar).find((b) => b.textContent === label);
+      target?.focus();
       this.focusOwed = !target;
     }
     this.acknowledge();
@@ -1906,12 +1913,13 @@ export class NewsView {
         ),
       );
     }
+    const rows = new Map<number, HTMLElement>();
     for (const t of threads) {
       const a = this.asSigned(t.article);
       const category = this.timelineCategory(a.category);
-      const row = h(
+      const drawn = h(
         'button',
-        { class: `news-thread${a.deleted ? ' deleted' : ''}${this.sigClass(a)}` },
+        { class: `news-thread${a.deleted ? ' deleted' : ''}${this.sigClass(a)}`, dataset: { root: String(a.id) } },
         h(
           'span',
           { class: 'news-thread-head' },
@@ -1929,13 +1937,19 @@ export class NewsView {
           stamp(t.last_at),
         ),
       );
+      const kept = this.timelineRows.get(a.id);
+      if (kept) morph(kept, drawn);
+      else this.watchSeen(drawn, a.id);
+      const row = kept ?? drawn;
       row.onclick = () => {
         const path = trailTo(category.id, this.timelineNodes);
         this.openThread(path?.slice(0, -1) ?? [], category, a.id);
       };
-      this.watchSeen(row, a.id);
+      rows.set(a.id, row);
       out.push(row);
     }
+    for (const [id, row] of this.timelineRows) if (!rows.has(id)) this.seenWatch?.unobserve(row);
+    this.timelineRows = rows;
     if (this.timeline.older) {
       const more = h('button', { class: 'news-more' }, 'Older threads');
       more.onclick = () => {

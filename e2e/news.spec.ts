@@ -159,6 +159,7 @@ news_posts = 0
       accounts: {
         editor: account('Editor', EDITOR),
         reader: account('Reader', 'read_news = true\npost_news = true\nsend_media = true\n'),
+        watcher: account('Watcher', 'read_news = true\n'),
       },
     });
   });
@@ -409,8 +410,6 @@ news_posts = 0
         pane.scrollTop += r.top + r.height * 0.2 - foot;
         return Number(next.getAttribute('data-root'));
       });
-      // Rows are watched afresh on every draw, and the draw after this
-      // claim's answer reports the peeking one as on screen at all.
       await expect.poll(() => seenSent().length).toBeGreaterThanOrEqual(2);
       await page.waitForTimeout(1000);
       expect(seenSent().map((f) => f.from as number).filter((from) => from <= peeking)).toEqual([]);
@@ -419,8 +418,6 @@ news_posts = 0
       await page.getByRole('button', { name: 'Older threads' }).click();
       await expect(rows).toHaveCount(followed.length);
       await expect(page.getByRole('button', { name: 'Older threads' })).toHaveCount(0);
-      // The pane, not a row: rows are redrawn whenever counts change, and
-      // a row handed over may be gone by the time it is scrolled to.
       await page.locator('.news-body').evaluate((el) => (el.scrollTop = el.scrollHeight));
       // The end of the timeline is claimed from 0, and is seen; the middle,
       // skipped, is not, nor the top above it.
@@ -530,6 +527,65 @@ news_posts = 0
       // The test after this one has the editor following nothing.
       if (category !== undefined) await follower.ask('news_unsubscribe', { category });
       await Promise.all([follower.close(), poster.close()]);
+    }
+  });
+
+  test("a redraw keeps the timeline's rows: the reader's place holds as threads arrive above, and a press across it clicks", async ({
+    browser,
+  }) => {
+    const watcher = await openAccount(server, 'watcher', 'pw');
+    const editor = await openAccount(server, 'editor', 'pw');
+    try {
+      test.skip(!(await hasTimeline(watcher)), 'this hxd-ng predates the news timeline');
+      const category = ((await editor.ask('news_node_create', { kind: 'category', name: 'Kept' })) as { node: { id: number } })
+        .node.id;
+      await watcher.ask('news_subscribe', { category });
+      const ids: number[] = [];
+      for (let i = 1; i <= 20; i++) {
+        ids.push(((await editor.ask('news_post', { category, subject: `Kept ${i}`, body: `Thread ${i}.` })) as { id: number }).id);
+      }
+      const reply = (to: number) => editor.ask('news_post', { category, parent: to, subject: 'Re', body: 'An answer.' });
+
+      const page = await logIn(browser, server, 'watcher');
+      await page.setViewportSize({ width: 1000, height: 500 });
+      await openNews(page);
+      await page.locator('.news-timeline').click();
+      const rows = page.locator('.news .news-thread');
+      const row = (id: number) => page.locator(`.news .news-thread[data-root="${id}"]`);
+      await expect(rows).toHaveCount(20);
+
+      // --- a reply redraws the list, and every row is the one it was -------
+      await rows.evaluateAll((els) => els.forEach((el) => ((el as { kept?: true }).kept = true)));
+      await reply(ids[19]!);
+      await expect(row(ids[19]!)).toContainText('1 reply');
+      expect(await rows.evaluateAll((els) => els.filter((el) => (el as { kept?: true }).kept).length)).toBe(20);
+
+      // --- a thread arriving at the top leaves the row read where it was ---
+      const pane = page.locator('.news-body');
+      const middle = await pane.evaluate((el) => {
+        el.scrollTop = el.clientHeight;
+        const mid = el.getBoundingClientRect().top + el.clientHeight / 2;
+        const at = [...el.querySelectorAll('.news-thread')].find((r) => r.getBoundingClientRect().bottom > mid)!;
+        return Number(at.getAttribute('data-root'));
+      });
+      const before = (await row(middle).boundingBox())!.y;
+      await editor.ask('news_post', { category, subject: 'Kept late', body: 'Above.' });
+      await expect(rows.first().locator('.news-thread-subject')).toHaveText('Kept late');
+      // A row height off when the anchor is lost; a pixel's rounding is not that.
+      expect(Math.abs((await row(middle).boundingBox())!.y - before)).toBeLessThan(2);
+
+      // --- pressed before a redraw and released after, a row still opens ---
+      const subject = await row(middle).locator('.news-thread-subject').textContent();
+      const box = (await row(middle).boundingBox())!;
+      await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+      await page.mouse.down();
+      await reply(ids[19]!);
+      await expect(row(ids[19]!)).toContainText('2 replies');
+      await page.mouse.up();
+      await expect(page.locator('.news-article')).toHaveCount(1);
+      await expect(page.locator('.news-article')).toContainText(subject!);
+    } finally {
+      await Promise.all([watcher.close(), editor.close()]);
     }
   });
 

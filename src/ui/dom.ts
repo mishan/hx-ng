@@ -47,9 +47,34 @@ export function badge(n: number, what = 'unread', title?: string): HTMLElement {
   return h('span', { class: 'badge', title }, String(n), h('span', { class: 'sr-only' }, ` ${what}`));
 }
 
-/** Replace an element's children in one go. */
+/** Replace an element's children, leaving in place those it already has
+ *  in order: taken out and put back, one would lose a press on it, its
+ *  hover and the scroll anchoring it gives. */
 export function fill(el: Element, ...children: Child[]): void {
-  el.replaceChildren(...flatten(children));
+  const want = flatten(children).map((c) => (typeof c === 'string' ? document.createTextNode(c) : c));
+  if (!want.some((c) => c.parentNode === el)) return el.replaceChildren(...want);
+  const keep = new Set(want);
+  for (const c of [...el.childNodes]) if (!keep.has(c)) c.remove();
+  want.forEach((c, i) => {
+    if (el.childNodes[i] !== c) el.insertBefore(c, el.childNodes[i] ?? null);
+  });
+}
+
+/** Make `old` look like `fresh`, changing only what differs, so each of
+ *  its nodes that `fresh` still has in the same place is kept. Handlers
+ *  set as properties are not attributes, and are the caller's to copy. */
+export function morph(old: Element, fresh: Element): void {
+  for (const a of [...old.attributes]) if (!fresh.hasAttribute(a.name)) old.removeAttribute(a.name);
+  for (const a of fresh.attributes) if (old.getAttribute(a.name) !== a.value) old.setAttribute(a.name, a.value);
+  const want = [...fresh.childNodes];
+  want.forEach((f, i) => {
+    const o = old.childNodes[i];
+    if (!o) old.append(f);
+    else if (o.nodeName !== f.nodeName) old.replaceChild(f, o);
+    else if (o instanceof Element) morph(o, f as Element);
+    else if (o.nodeValue !== f.nodeValue) o.nodeValue = f.nodeValue;
+  });
+  while (old.childNodes.length > want.length) old.lastChild!.remove();
 }
 
 export function $<T extends Element = HTMLElement>(sel: string, root: ParentNode = document): T {

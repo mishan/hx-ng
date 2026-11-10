@@ -212,6 +212,25 @@ ${opts.sections ?? IDENTITY_SECTIONS}`,
  * session outlives the probe.
  */
 export async function loginNews(server: RunningServer, login: string, password: string): Promise<Record<string, unknown> | null> {
+  const session = await openAccount(server, login, password);
+  await session.close();
+  return (session.ok.news as Record<string, unknown> | undefined) ?? null;
+}
+
+/** A session of `login`'s over a bare socket, as `loginNews` opens one:
+ *  for a spec to set up more than it would click through, or to read
+ *  what the server holds rather than what a page drew of it. `ask`
+ *  rejects with the code of a refusal. Closed with a logout, so no
+ *  detached session outlives it. */
+export async function openAccount(
+  server: RunningServer,
+  login: string,
+  password: string,
+): Promise<{
+  ok: Record<string, unknown>;
+  ask: (req: string, params?: object) => Promise<Record<string, unknown>>;
+  close: () => Promise<void>;
+}> {
   type Reply = { reply: number; ok?: Record<string, unknown>; error?: { code: string } };
   const ws = new WebSocket(server.wsUrl);
   const replies = new Map<number, (r: Reply) => void>();
@@ -220,23 +239,34 @@ export async function loginNews(server: RunningServer, login: string, password: 
     const frame = JSON.parse(String(e.data)) as Partial<Reply>;
     if (typeof frame.reply === 'number') replies.get(frame.reply)?.(frame as Reply);
   };
-  const ask = (id: number, req: string, params: object) =>
+  let next = 0;
+  const send = (req: string, params: object) =>
     new Promise<Reply>((resolve) => {
+      const id = ++next;
       replies.set(id, resolve);
       ws.send(JSON.stringify({ id, req, params }));
     });
+  const close = async () => {
+    // The server may close as it answers; either is a logout.
+    if (ws.readyState === WebSocket.OPEN) await Promise.race([send('logout', {}), closed]);
+    ws.close();
+  };
   try {
     await new Promise<void>((resolve, reject) => {
       ws.onopen = () => resolve();
       ws.onerror = () => reject(new Error(`could not reach ${server.wsUrl}`));
     });
-    const reply = await ask(1, 'login', { login, password });
+    const reply = await send('login', { login, password });
     if (!reply.ok) throw new Error(`login as ${login} was refused: ${reply.error?.code ?? 'no reason given'}`);
-    // The server may close as it answers; either is a logout.
-    await Promise.race([ask(2, 'logout', {}), closed]);
-    return (reply.ok.news as Record<string, unknown> | undefined) ?? null;
-  } finally {
-    ws.close();
+    const ask = async (req: string, params: object = {}) => {
+      const r = await send(req, params);
+      if (!r.ok) throw new Error(`${req} was refused: ${r.error?.code ?? 'no reason given'}`);
+      return r.ok;
+    };
+    return { ok: reply.ok, ask, close };
+  } catch (e) {
+    await close();
+    throw e;
   }
 }
 

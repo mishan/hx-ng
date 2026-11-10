@@ -1235,6 +1235,12 @@ export class ClassicConnection implements Session {
   async newsSeen(): Promise<never> {
     throw unavailable('following news');
   }
+  async newsTimeline(): Promise<never> {
+    throw unavailable('following news');
+  }
+  async newsSeenTimeline(): Promise<never> {
+    throw unavailable('following news');
+  }
   async uploadNewsAttachment(): Promise<never> {
     throw unavailable('news images');
   }

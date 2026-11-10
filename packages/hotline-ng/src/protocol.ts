@@ -1400,6 +1400,28 @@ export interface NewsThreadsOk {
   has_more: boolean;
 }
 
+/** The timeline: the threads started in every category this account
+ *  follows and has not muted, **newest first**, paged by starter id
+ *  across all of them as `NewsThreadsParams` pages one category. A
+ *  server older than the timeline answers `unknown_method`. */
+export interface NewsTimelineParams {
+  before?: number;
+  after?: number;
+  /** Default 50, at most the server's page ceiling. */
+  limit?: number;
+}
+
+/** A timeline thread: a listing's thread, its `article.category` saying
+ *  where it is, and whether that category's badge counts it. */
+export interface NewsTimelineThread extends NewsThread {
+  unread: boolean;
+}
+
+export interface NewsTimelineOk {
+  threads: NewsTimelineThread[];
+  has_more: boolean;
+}
+
 /** A thread in reading order: every reply directly under the article it
  *  answers, siblings oldest first. `after` is an article in the thread. */
 export interface NewsThreadParams {

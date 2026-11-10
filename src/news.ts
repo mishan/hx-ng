@@ -3,6 +3,7 @@
 
 import {
   newsScopeOf,
+  WireFailure,
   type Events,
   type NewsArticle,
   type NewsAttachment,
@@ -12,6 +13,8 @@ import {
   type NewsNode,
   type NewsScope,
   type NewsSub,
+  type NewsTimelineOk,
+  type NewsTimelineThread,
 } from '@hotline-ng/client';
 
 /** A reply's default subject: the parent's with one `Re: ` in front, never
@@ -442,6 +445,20 @@ export class Following {
     return n;
   }
 
+  /** Is this category followed and not muted: one the timeline reads? */
+  followsCategory(category: number): boolean {
+    const sub = this.subs.get(scopeKey({ category }));
+    return !!sub && !sub.muted;
+  }
+
+  /** Unread across the categories the timeline reads, as their rows
+   *  count it: new threads, not replies. */
+  timelineUnread(): number {
+    let n = 0;
+    for (const s of this.subs.values()) if (s.scope === 'category' && !s.muted) n += s.unread;
+    return n;
+  }
+
   /** The rail's badge. `fallback` is the login reply's total, which
    *  stands in until the list has been fetched — alone, because it
    *  already counts every followed scope a loose count might turn out to
@@ -452,5 +469,211 @@ export class Following {
     for (const s of this.subs.values()) if (!s.muted) n += s.unread;
     for (const l of this.loose.values()) n += l.unread;
     return n;
+  }
+}
+
+// --- the timeline (hxd-ng's docs/news.md §10.8, §10.9) ------------------
+
+/** Starter ids to reread, both bounds exclusive; no `before` reaches the
+ *  newest thread there is. */
+export interface TimelineSpan {
+  after: number;
+  before?: number;
+}
+
+/** What a live event asks of a timeline: a span to reread, a fresh load
+ *  because nothing is held to reread around, or nothing at all. */
+export type TimelineTouch = TimelineSpan | 'reload' | null;
+
+/** The one reread that covers two touches, so a burst of events is one. */
+export function spanHull(a: TimelineTouch, b: TimelineTouch): TimelineTouch {
+  if (a === 'reload' || b === 'reload') return 'reload';
+  if (!a || !b) return a ?? b;
+  return {
+    after: Math.min(a.after, b.after),
+    ...(a.before !== undefined && b.before !== undefined ? { before: Math.max(a.before, b.before) } : {}),
+  };
+}
+
+/** A run the reader has been shown, as `newsSeenTimeline` takes it. */
+export interface TimelineRun {
+  from: number;
+  upTo: number;
+}
+
+/** Does this refusal mean the server has no timeline at all? */
+export function timelineMissing(e: unknown): boolean {
+  return e instanceof WireFailure && e.wire.code === 'unknown_method';
+}
+
+const around = (id: number): TimelineSpan => ({ after: id - 1, before: id + 1 });
+
+/** Every timeline thread in `span`, by `after` pages of `limit` up from
+ *  its bottom. */
+export async function readSpan(
+  fetch: (p: { after: number; before?: number; limit: number }) => Promise<NewsTimelineOk>,
+  span: TimelineSpan,
+  limit: number,
+): Promise<NewsTimelineThread[]> {
+  const rows: NewsTimelineThread[] = [];
+  let after = span.after;
+  for (;;) {
+    const ok = await fetch(span.before === undefined ? { after, limit } : { after, before: span.before, limit });
+    rows.push(...ok.threads);
+    // An `after` page is newest first too, so its first is its top.
+    const top = ok.threads[0]?.article.id;
+    if (!ok.has_more || top === undefined || top <= after) return rows;
+    after = top;
+  }
+}
+
+/**
+ * The timeline as far as the reader has paged it: one unbroken stretch
+ * of the server's, newest first, which is what lets a run of it shown on
+ * screen be told to the server as two ids.
+ *
+ * It grows downward by `before` pages and is kept current by rereading a
+ * span with `after` pages, which also reach the threads started above
+ * it. The server's `unread` marks are what seen is claimed from; what is
+ * drawn as new is what arrived unread this visit, so the mark does not
+ * vanish from under the reader the moment it is seen.
+ */
+export class Timeline {
+  threads: NewsTimelineThread[] = [];
+  /** More threads older than the oldest held. */
+  older = false;
+  /** Where the next older page starts: the last the server listed, which
+   *  is not the oldest held when the reader left threads out. */
+  bottom: number | undefined;
+  private fresh = new Set<number>();
+  private shown = new Set<number>();
+  private claimed: TimelineRun[] = [];
+
+  /** `keep` says which of a page's threads to show. */
+  load(page: NewsTimelineOk, keep: (t: NewsTimelineThread) => boolean = () => true): void {
+    this.threads = [];
+    this.bottom = undefined;
+    this.addOlder(page, keep);
+  }
+
+  addOlder(page: NewsTimelineOk, keep: (t: NewsTimelineThread) => boolean = () => true): void {
+    const oldest = this.bottom ?? Infinity;
+    this.replace({ after: -Infinity, before: oldest }, page.threads.filter((t) => t.article.id < oldest && keep(t)));
+    this.bottom = page.threads.at(-1)?.article.id ?? this.bottom;
+    this.older = page.has_more;
+  }
+
+  /** What a reread of `span` found, in place of what was held inside it. */
+  replace(span: TimelineSpan, rows: readonly NewsTimelineThread[]): void {
+    const inside = (id: number) => id > span.after && (span.before === undefined || id < span.before);
+    const kept = this.threads.filter((t) => !inside(t.article.id));
+    const got = rows.filter((t) => inside(t.article.id));
+    const held = new Set(this.threads.map((t) => t.article.id));
+    for (const t of got) if (t.unread) this.fresh.add(t.article.id);
+    // An unread thread new to a run already claimed, from a category
+    // followed since, was not in what that claim covered.
+    const arrived = got.filter((t) => t.unread && !held.has(t.article.id)).map((t) => t.article.id);
+    this.claimed = this.claimed.filter((c) => !arrived.some((id) => c.from <= id && id <= c.upTo));
+    const byId = new Map([...kept, ...got].map((t) => [t.article.id, t]));
+    this.threads = [...byId.values()].sort((a, b) => b.article.id - a.article.id);
+  }
+
+  isNew(id: number): boolean {
+    return this.fresh.has(id);
+  }
+
+  private holds(id: number): boolean {
+    return this.threads.some((t) => t.article.id === id);
+  }
+
+  /** Everything held, and whatever has been started above it. */
+  whole(): TimelineTouch {
+    const oldest = this.threads.at(-1)?.article.id;
+    return oldest === undefined ? null : { after: oldest - 1 };
+  }
+
+  /** Whatever has been started above what is held. */
+  private top(): TimelineSpan | 'reload' {
+    const newest = this.threads[0]?.article.id;
+    return newest === undefined ? 'reload' : { after: newest };
+  }
+
+  /** `follows` says whether the timeline reads a category: a thread
+   *  started anywhere else is not in it. */
+  posted(d: Events['news_posted'], follows: (category: number) => boolean): TimelineTouch {
+    if (d.parent === null) return follows(d.category) ? this.top() : null;
+    return this.holds(d.root) ? around(d.root) : null;
+  }
+
+  edited(d: Events['news_edited']): TimelineTouch {
+    return this.holds(d.id) ? around(d.id) : null;
+  }
+
+  /** A starter held becomes a tombstone. A reply changes nothing a row
+   *  shows, since a thread counts its tombstones and keeps their times,
+   *  except where its category holds a tombstoned starter that may have
+   *  been kept for it: then its thread leaves the listing, and which one
+   *  a reply's event does not say. */
+  deleted(d: Events['news_deleted']): TimelineTouch {
+    if (this.holds(d.id)) return around(d.id);
+    return this.threads.some((t) => t.article.deleted && t.article.category === d.category) ? this.whole() : null;
+  }
+
+  purged(d: Events['news_purged']): TimelineTouch {
+    return d.articles.reduce<TimelineTouch>((acc, a) => spanHull(acc, this.deleted(a)), null);
+  }
+
+  /** A bundle says nothing of the categories that went with it. */
+  nodeDeleted(): TimelineTouch {
+    return this.whole();
+  }
+
+  /** A category's new thread. `covered` says the followed list knew of
+   *  its subscription; one it did not was made on another device since,
+   *  and that category's older threads may belong among those held. */
+  notified(d: Events['news_notify'], covered: boolean): TimelineTouch {
+    if (d.scope !== 'category') return null;
+    return covered ? this.top() : (this.whole() ?? 'reload');
+  }
+
+  /** A thread has been on screen. */
+  saw(id: number): void {
+    this.shown.add(id);
+  }
+
+  /**
+   * The runs to tell the server have been seen.
+   *
+   * A run is an unbroken stretch of threads shown, and one is claimed
+   * while it holds something unread, unless it lies inside a run already
+   * claimed. The server stops a category's cursor below an unread thread
+   * of its own older than `from`, so a claim may move nothing until the
+   * run reaches down past that thread; a run inside one claimed reaches
+   * no further and can move nothing more, and any other may. The marks
+   * stay the server's until a reread brings its own. A run down to the
+   * end of the timeline says so with `from: 0`.
+   */
+  claimSeen(): TimelineRun[] {
+    const runs: TimelineRun[] = [];
+    let run: NewsTimelineThread[] = [];
+    const close = (end: boolean) => {
+      if (run.some((t) => t.unread)) {
+        const r = { from: end && !this.older ? 0 : run.at(-1)!.article.id, upTo: run[0]!.article.id };
+        if (!this.claimed.some((c) => c.from <= r.from && r.upTo <= c.upTo)) runs.push(r);
+      }
+      run = [];
+    };
+    for (const t of this.threads) {
+      if (this.shown.has(t.article.id)) run.push(t);
+      else close(false);
+    }
+    close(true);
+    this.claimed.push(...runs);
+    return runs;
+  }
+
+  /** A claim the server did not take, to be made again. */
+  unclaim(run: TimelineRun): void {
+    this.claimed = this.claimed.filter((c) => c !== run);
   }
 }

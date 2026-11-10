@@ -52,6 +52,7 @@ import {
   type NewsScope,
   type NewsSub,
   type NewsThread,
+  type NewsTimelineThread,
 } from '@hotline-ng/client';
 
 import {
@@ -74,10 +75,16 @@ import {
   nextSearchOffset,
   notifiesThread,
   replySubject,
+  readSpan,
+  spanHull,
   staleProblem,
+  Timeline,
+  timelineMissing,
   tooManyAttachments,
   trailTo,
   type DraftAttachment,
+  type TimelineSpan,
+  type TimelineTouch,
 } from '../news';
 import type { ContactOf } from '../contacts';
 import { unreadable, type ArticleRead, type ArticleReader } from '../signing';
@@ -125,7 +132,9 @@ type Screen =
   | { at: 'search'; trail: NewsNode[]; q: string; scope: NewsNode | null }
   /** Everything followed or muted. `trail` is always empty; it is here
    *  so every screen can be walked the same way. */
-  | { at: 'following'; trail: NewsNode[] };
+  | { at: 'following'; trail: NewsNode[] }
+  /** The threads started in every category followed, newest first. */
+  | { at: 'timeline'; trail: NewsNode[] };
 
 type InCategory = Extract<Screen, { at: 'category' | 'thread' }>;
 
@@ -152,6 +161,11 @@ export interface NewsHooks {
 
 /** The largest thread page the wire allows. */
 const THREAD_PAGE = 100;
+/** How long a claim the server refused waits to be made again. */
+const SEEN_RETRY = 3000;
+/** A timeline reread's page: the wire's ceiling, which a server may
+ *  lower, and `has_more` says when it has. */
+const TIMELINE_PAGE = 200;
 /** How much of a thread a refresh re-reads before it stops and offers
  *  "more": enough for any conversation a person reads in one sitting,
  *  and a bound on a loop that a runaway thread could otherwise keep
@@ -302,6 +316,30 @@ export class NewsView {
   /** Whether a jump to an article may still land: of two in flight only
    *  the newer, and neither once the reader has moved on. */
   private jumps = new Jumps(() => this.screen);
+  /** The timeline as far as it has been paged, replaced with the screen. */
+  private timeline = new Timeline();
+  /** False once the server has answered that it keeps no timeline. */
+  private timelineOffered = true;
+  /** The tree as deep as one request reaches, for the categories the
+   *  timeline lists: their names, their guids for reading what is signed
+   *  in them, and the way down to each. */
+  private timelineNodes = new Map<number, NewsNode>();
+  /** What the events since the last reread asked to be read again. */
+  private timelineTouch: TimelineTouch = null;
+  private timelineTimer: ReturnType<typeof setTimeout> | null = null;
+  /** `news_subs` asks numbered as they go out, and the last one whose
+   *  answer was taken, so a load can tell an answer to an ask begun
+   *  after its own from one to an older ask that was still out. */
+  private followingAsked = 0;
+  private followingAnswered = 0;
+  /** Whether what is followed is known as of this timeline's opening:
+   *  until it is, an empty timeline cannot say that nothing is. */
+  private timelineFollowsKnown = false;
+  /** Something changed while the first page was out. */
+  private timelineMissed = false;
+  /** Says which timeline threads have been on screen. */
+  private seenWatch: IntersectionObserver | null = null;
+  private seenTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(private hooks: NewsHooks) {
     this.bar.append(this.crumbsEl, h('span', { class: 'spacer' }), this.searchBox, this.actionsEl);
@@ -387,6 +425,11 @@ export class NewsView {
     this.hitsNext = null;
     this.searchBox.value = '';
     this.following.clear();
+    this.timeline = new Timeline();
+    this.timelineOffered = true;
+    this.timelineNodes.clear();
+    this.timelineTouch = null;
+    this.timelineMissed = false;
     this.forgetDeferred();
     this.images.clear();
     this.session++;
@@ -414,10 +457,12 @@ export class NewsView {
     const conn = this.hooks.conn();
     if (!conn || !this.subscribable()) return;
     const session = this.session;
+    const fetch = ++this.followingAsked;
     try {
       const ok = await conn.newsSubs();
       if (session !== this.session) return;
       this.following.load(ok.subs);
+      this.followingAnswered = fetch;
     } catch {
       return;
     }
@@ -433,7 +478,9 @@ export class NewsView {
   onNotify(d: Events['news_notify']): boolean {
     // Not covered means a subscription made since the list was fetched,
     // or none at all; only the server knows which.
-    if (!this.following.notify(d)) void this.refreshFollowing();
+    const covered = this.following.notify(d);
+    if (!covered) void this.refreshFollowing();
+    this.touchTimeline(this.timeline.notified(d, covered));
     this.hooks.onUnread();
     const s = this.screen;
     const onScreen = this.visible && s.at === 'thread' && notifiesThread(d, s.root);
@@ -459,6 +506,11 @@ export class NewsView {
   private openFollowing(): void {
     this.error = null;
     this.go({ at: 'following', trail: [] });
+  }
+
+  private openTimeline(): void {
+    this.error = null;
+    this.go({ at: 'timeline', trail: [] });
   }
 
   /** The counts beside things changed. Redraw them — but not under
@@ -569,6 +621,7 @@ export class NewsView {
   }
 
   onPosted(d: Events['news_posted']): void {
+    this.touchTimeline(this.timeline.posted(d, (c) => this.following.followsCategory(c)));
     const s = this.screen;
     if (
       (s.at === 'category' && s.category.id === d.category) ||
@@ -582,11 +635,13 @@ export class NewsView {
   /** A feed's article rewritten: the words on screen are stale, and
    *  nothing else is. */
   onEdited(d: Events['news_edited']): void {
+    this.touchTimeline(this.timeline.edited(d));
     if (this.shows(d)) this.invalidate();
   }
 
   onDeleted(d: Events['news_deleted']): void {
     this.refreshFollowingIn(d.category);
+    this.touchTimeline(this.timeline.deleted(d));
     if (this.shows(d)) this.invalidate();
   }
 
@@ -594,6 +649,7 @@ export class NewsView {
    *  but the following list and the screen refresh once for the lot. */
   onPurged(d: Events['news_purged']): void {
     if (d.articles.some((a) => this.following.touches(a.category))) void this.refreshFollowing();
+    this.touchTimeline(this.timeline.purged(d));
     if (d.articles.some((a) => this.shows(a))) this.invalidate();
   }
 
@@ -610,6 +666,8 @@ export class NewsView {
   onNode(d: Events['news_node']): void {
     const node = d.node;
     this.refreshFollowingIn(node.id);
+    const known = this.timelineNodes.get(node.id);
+    if (known) this.timelineNodes.set(node.id, { ...known, name: node.name });
     const s = this.screen;
     // A rename of something in the breadcrumb is a new label and nothing
     // else; take it straight from the event.
@@ -619,6 +677,8 @@ export class NewsView {
     if (s.at === 'search' && s.scope) s.scope = renamed(s.scope);
     if (s.at === 'tree' && (node.parent === (s.trail.at(-1)?.id ?? null) || this.nodes.some((n) => n.id === node.id))) {
       this.invalidate();
+    } else if (s.at === 'timeline' && known) {
+      if (this.visible) this.render();
     } else if (this.visible) {
       this.renderBar();
     }
@@ -626,6 +686,7 @@ export class NewsView {
 
   onNodeDeleted(d: Events['news_node_deleted']): void {
     this.refreshFollowingIn(d.id);
+    this.touchTimeline(this.timeline.nodeDeleted());
     const s = this.screen;
     const gone = s.trail.findIndex((n) => n.id === d.id);
     const current = inCategory(s) ? s.category : s.at === 'search' ? s.scope : null;
@@ -662,6 +723,154 @@ export class NewsView {
     }, 150);
   }
 
+  /**
+   * Reread what an event changed on the timeline, a burst of events as
+   * one reread of the span covering them all. Only the span: rereading
+   * from the top on every reply would cost a page per post.
+   */
+  private touchTimeline(touch: TimelineTouch): void {
+    if (this.screen.at !== 'timeline') return;
+    // While the first page is out nothing is held for an event to touch,
+    // and restarting the load for each would keep a busy server's from
+    // ever landing: whatever it was is reread once the page is in.
+    if (this.loading) {
+      this.timelineMissed = true;
+      return;
+    }
+    if (!touch) return;
+    if (!this.visible) {
+      this.stale = true;
+      return;
+    }
+    this.timelineTouch = spanHull(this.timelineTouch, touch);
+    if (this.timelineTimer !== null) return;
+    this.timelineTimer = setTimeout(() => {
+      this.timelineTimer = null;
+      void this.applyTimeline();
+    }, 150);
+  }
+
+  /** One reread at a time, so an older answer never lands over a newer:
+   *  a refresh's reread of everything held goes through here too. */
+  private readonly applyTimeline = coalesced(async () => {
+    let touch = this.timelineTouch;
+    this.timelineTouch = null;
+    const conn = this.hooks.conn();
+    if (!touch || !conn || this.screen.at !== 'timeline') return;
+    // A reload asked for while nothing was held may find threads held by
+    // now, and a refresh's reread comes back through here, waiting on
+    // this very run: a reload then would wait on itself.
+    if (touch === 'reload') touch = this.timeline.whole() ?? 'reload';
+    if (touch === 'reload') return this.load();
+    const gen = this.generation;
+    try {
+      const rows = await this.rereadTimeline(conn, touch, gen);
+      if (gen !== this.generation) return;
+      this.timeline.replace(touch, rows);
+      this.error = null;
+    } catch (e) {
+      if (gen !== this.generation) return;
+      this.error = describe(e);
+    }
+    this.render();
+  });
+
+  /** Every timeline thread in `span` to show, read as signed where
+   *  they were. */
+  private async rereadTimeline(conn: Session, span: TimelineSpan, gen: number): Promise<NewsTimelineThread[]> {
+    const rows = await readSpan((p) => conn.newsTimeline(p), span, TIMELINE_PAGE);
+    const shown = await this.shownOf(rows, gen);
+    return rows.filter(shown);
+  }
+
+  /** Which of a timeline answer's threads to show, read as `readAll`
+   *  reads a category's, each in its own category. */
+  private async shownOf(rows: NewsTimelineThread[], gen: number): Promise<(t: NewsTimelineThread) => boolean> {
+    const shown = await this.readAll(
+      rows.map((t) => t.article),
+      (a) => this.timelineCategory(a.category),
+      gen,
+    );
+    return (t) => shown.has(t.article.id);
+  }
+
+  /** A timeline thread's category as the tree gave it, or as its
+   *  subscription names it where the tree did not reach. */
+  private timelineCategory(id: number): NewsNode {
+    return (
+      this.timelineNodes.get(id) ?? {
+        id,
+        parent: null,
+        kind: 'category',
+        name: this.following.get({ category: id })?.name ?? 'Category',
+        count: 0,
+        created_at: 0,
+      }
+    );
+  }
+
+  /** Which threads have been at least half on screen, which is what
+   *  shown means here: a page scrolled past to reach the next counts.
+   *  Claimed a moment after the last one came into view, so scrolling
+   *  is one claim rather than one per thread. */
+  private watchSeen(el: HTMLElement, id: number): void {
+    el.dataset.root = String(id);
+    if (typeof IntersectionObserver === 'undefined') {
+      this.timeline.saw(id);
+      return;
+    }
+    this.seenWatch ??= new IntersectionObserver(
+      (entries) => {
+        if (!this.visible || this.screen.at !== 'timeline') return;
+        // Any overlap is intersecting, and a row peeking in at the edge
+        // has not been shown.
+        for (const e of entries) {
+          if (e.intersectionRatio >= 0.5) this.timeline.saw(Number((e.target as HTMLElement).dataset.root));
+        }
+        if (this.seenTimer !== null) clearTimeout(this.seenTimer);
+        this.seenTimer = setTimeout(() => {
+          this.seenTimer = null;
+          this.acknowledgeTimeline();
+        }, 250);
+      },
+      { root: this.body, threshold: 0.5 },
+    );
+    this.seenWatch.observe(el);
+  }
+
+  /** Tell the server which runs of the timeline have been shown. A run
+   *  it did not take is unread again, to be claimed again.
+   *  A category followed on another device since this was read is not
+   *  in what was shown, and its threads inside a run are marked seen
+   *  all the same: the server cannot tell, and a reread before every
+   *  claim would cost a page each. */
+  private acknowledgeTimeline(): void {
+    const conn = this.hooks.conn();
+    if (!conn || !this.visible || this.screen.at !== 'timeline' || this.stale) return;
+    const session = this.session;
+    const timeline = this.timeline;
+    for (const run of timeline.claimSeen()) {
+      conn.newsSeenTimeline(run.from, run.upTo).then(
+        // The answer is the timeline's total; the badges are per category,
+        // and only the list says how it fell across them.
+        () => {
+          if (session === this.session) void this.refreshFollowing();
+        },
+        // Asked again after a pause, while this timeline is still the one
+        // on screen; a scroll or a redraw sooner asks sooner.
+        () => {
+          if (session !== this.session) return;
+          timeline.unclaim(run);
+          if (this.seenTimer !== null) clearTimeout(this.seenTimer);
+          this.seenTimer = setTimeout(() => {
+            this.seenTimer = null;
+            if (session === this.session && timeline === this.timeline) this.acknowledgeTimeline();
+          }, SEEN_RETRY);
+        },
+      );
+    }
+  }
+
   private cancelRefresh(): void {
     if (this.refreshTimer !== null) {
       clearTimeout(this.refreshTimer);
@@ -684,6 +893,10 @@ export class NewsView {
     this.hitsTotal = 0;
     this.hitsCapped = false;
     this.hitsNext = null;
+    this.timeline = new Timeline();
+    this.timelineTouch = null;
+    this.timelineMissed = false;
+    this.timelineFollowsKnown = false;
     this.draft = null;
     this.naming = null;
     this.backlinks.clear();
@@ -778,7 +991,7 @@ export class NewsView {
         // throw away the older threads they scrolled down to.
         const limit = Math.min(200, Math.max(50, this.threads.length));
         const ok = await conn.newsThreads({ category: s.category.id, limit });
-        const shown = await this.readAll(ok.threads.map((t) => t.article), s.category);
+        const shown = await this.readAll(ok.threads.map((t) => t.article), s.category, gen);
         if (gen !== this.generation) return;
         this.threads = ok.threads.filter((t) => shown.has(t.article.id));
         this.threadsMore = ok.has_more;
@@ -798,6 +1011,30 @@ export class NewsView {
         if (gen !== this.generation) return;
         this.following.load(ok.subs);
         this.hooks.onUnread();
+      } else if (s.at === 'timeline') {
+        // A follow made on another device sends no event, so what is
+        // followed is asked again whenever this is read afresh.
+        const asked = this.followingAsked;
+        // A refresh rereads as deep as the reader had paged.
+        const oldest = this.timeline.threads.at(-1)?.article.id;
+        const [tree, first] = await Promise.all([
+          conn.newsTree({ depth: 4 }),
+          oldest === undefined ? conn.newsTimeline() : null,
+          this.refreshFollowing(),
+        ]);
+        if (gen !== this.generation) return;
+        if (this.followingAnswered > asked) this.timelineFollowsKnown = true;
+        this.hooks.articles().nodes(tree.nodes);
+        this.timelineNodes = indexTree(tree.nodes);
+        if (first) {
+          const keep = await this.shownOf(first.threads, gen);
+          if (gen !== this.generation) return;
+          this.timeline.load(first, keep);
+        } else if (oldest !== undefined) {
+          this.timelineTouch = spanHull(this.timelineTouch, { after: oldest - 1 });
+          await this.applyTimeline();
+          if (gen !== this.generation) return;
+        }
       } else {
         const want = Math.max(this.articles.length, THREAD_PAGE);
         let all: NewsArticle[] = [];
@@ -817,7 +1054,7 @@ export class NewsView {
           after = page.articles.at(-1)?.id;
           if (after === undefined) break;
         }
-        const shown = await this.readAll(all, s.category);
+        const shown = await this.readAll(all, s.category, gen);
         if (gen !== this.generation) return;
         this.articles = all.filter((a) => shown.has(a.id));
         this.articlesMore = more;
@@ -825,6 +1062,12 @@ export class NewsView {
       }
     } catch (e) {
       if (gen !== this.generation) return;
+      if (s.at === 'timeline' && timelineMissing(e)) {
+        this.timelineOffered = false;
+        this.go({ at: 'tree', trail: [] });
+        this.notice = 'This server keeps no timeline.';
+        return this.render();
+      }
       // The thing on screen has gone — a category deleted, a thread
       // pruned. Say so and step up a level rather than drawing an error
       // over nothing.
@@ -841,6 +1084,10 @@ export class NewsView {
     }
     this.loading = false;
     this.render();
+    if (this.timelineMissed) {
+      this.timelineMissed = false;
+      this.touchTimeline(this.timeline.whole() ?? 'reload');
+    }
   }
 
   private async loadOlderThreads(): Promise<void> {
@@ -852,12 +1099,32 @@ export class NewsView {
     this.paging = true;
     try {
       const ok = await conn.newsThreads({ category: s.category.id, before });
-      const shown = await this.readAll(ok.threads.map((t) => t.article), s.category);
+      const shown = await this.readAll(ok.threads.map((t) => t.article), s.category, gen);
       if (gen !== this.generation) return;
       this.threads = this.threads.concat(
         ok.threads.filter((t) => shown.has(t.article.id) && !this.threads.some((x) => x.article.id === t.article.id)),
       );
       this.threadsMore = ok.has_more;
+    } catch (e) {
+      if (gen !== this.generation) return;
+      this.error = describe(e);
+    } finally {
+      this.paging = false;
+    }
+    this.render();
+  }
+
+  private async loadOlderTimeline(): Promise<void> {
+    const conn = this.hooks.conn();
+    const before = this.timeline.bottom;
+    if (!conn || this.screen.at !== 'timeline' || before === undefined || this.paging) return;
+    const gen = this.generation;
+    this.paging = true;
+    try {
+      const ok = await conn.newsTimeline({ before });
+      const keep = await this.shownOf(ok.threads, gen);
+      if (gen !== this.generation) return;
+      this.timeline.addOlder(ok, keep);
     } catch (e) {
       if (gen !== this.generation) return;
       this.error = describe(e);
@@ -877,7 +1144,7 @@ export class NewsView {
     this.paging = true;
     try {
       const page = await conn.newsThread({ root: s.root, after, snapshot, limit: THREAD_PAGE });
-      const shown = await this.readAll(page.articles, s.category);
+      const shown = await this.readAll(page.articles, s.category, gen);
       if (gen !== this.generation) return;
       // An article already here is not drawn twice, whatever the page
       // overlapped: two elements with one id is a thread that scrolls to
@@ -898,17 +1165,25 @@ export class NewsView {
   /** Read a listing's articles in its order, a reply after its parent,
    *  and say which to show: a second copy of a signed article under its
    *  id is not (§3.6). One that cannot be read is shown as unverified,
-   *  never left out, and a read for a session since replaced is not
-   *  kept. */
-  private async readAll(list: readonly NewsArticle[], category: NewsNode): Promise<Set<number>> {
+   *  never left out, and a read for a session since replaced, or begun
+   *  under an older `gen`, is not kept. */
+  private async readAll(
+    list: readonly NewsArticle[],
+    category: NewsNode | ((a: NewsArticle) => NewsNode),
+    gen: number,
+  ): Promise<Set<number>> {
     const reader = this.hooks.articles();
     const reads = await Promise.all(
       list.map((a) =>
-        reader.read(a, category).catch((): ArticleRead => ({ ...unreadable(a.signed), article: null })),
+        reader
+          .read(a, typeof category === 'function' ? category(a) : category)
+          .catch((): ArticleRead => ({ ...unreadable(a.signed), article: null })),
       ),
     );
     const shown = new Set<number>();
-    if (reader !== this.hooks.articles()) return new Set(list.map((a) => a.id));
+    // A read for a screen since left or refreshed is not kept: it may be
+    // older than what a later read stored.
+    if (reader !== this.hooks.articles() || gen !== this.generation) return new Set(list.map((a) => a.id));
     list.forEach((a, i) => {
       this.reads.set(a.id, reads[i]!);
       if (!reads[i]!.duplicate) shown.add(a.id);
@@ -1230,12 +1505,17 @@ export class NewsView {
     const at = this.focusable(this.body).indexOf(had!);
     // The bar's controls come and go, so one is found again by its label.
     const label = had && this.bar.contains(had) && had !== this.searchBox ? had.textContent : null;
+    // A timeline thread is found again by which it is, since threads
+    // arriving above it move its place in the list, and without
+    // scrolling to it, which would take the reader somewhere else.
+    const root = had && this.body.contains(had) ? had.dataset.root : undefined;
     const moved = this.screen !== this.drawn;
     this.drawn = this.screen;
     this.renderBar();
     // Every placeholder the last draw was watching is about to be
     // replaced, and this draw watches its own.
     this.forgetDeferred();
+    this.seenWatch?.disconnect();
     const s = this.screen;
     const content =
       s.at === 'tree'
@@ -1246,7 +1526,9 @@ export class NewsView {
             ? this.searchView(s)
             : s.at === 'following'
               ? this.followingView()
-              : this.threadView();
+              : s.at === 'timeline'
+                ? this.timelineView()
+                : this.threadView();
     fill(this.body, this.errorEl(), ...content);
     if (this.notice) this.body.prepend(h('p', { class: 'news-notice' }, this.notice));
     if (this.loading) this.body.append(h('p', { class: 'news-loading' }, 'Loading…'));
@@ -1268,16 +1550,20 @@ export class NewsView {
       );
       field?.focus();
     } else if ((at >= 0 || label !== null || this.focusOwed) && !this.el.contains(document.activeElement)) {
+      const same = moved || root === undefined ? null : this.body.querySelector<HTMLElement>(`[data-root="${root}"]`);
       const target =
         moved || this.focusOwed
           ? this.body.querySelector<HTMLElement>(FOCUSABLE)
-          : at >= 0
-            ? this.focusable(this.body)[at]
-            : this.focusable(this.bar).find((b) => b.textContent === label);
-      target?.focus();
+          : same
+            ? same
+            : at >= 0
+              ? this.focusable(this.body)[at]
+              : this.focusable(this.bar).find((b) => b.textContent === label);
+      target?.focus(same ? { preventScroll: true } : undefined);
       this.focusOwed = !target;
     }
     this.acknowledge();
+    this.acknowledgeTimeline();
   }
 
   private focusable(root: HTMLElement): HTMLElement[] {
@@ -1332,6 +1618,7 @@ export class NewsView {
       crumb(`Search: ${s.q}`, null);
     }
     if (s.at === 'following') crumb('Following', null);
+    if (s.at === 'timeline') crumb('Timeline', null);
 
     const actions: HTMLElement[] = [];
     const action = (label: string, fn: () => void, opts: { on?: boolean; title?: string; disabled?: boolean } = {}) => {
@@ -1427,6 +1714,18 @@ export class NewsView {
       out.push(h('div', { class: 'news-manage' }, make('category', 'New category'), make('bundle', 'New bundle')));
     }
     if (this.naming && 'kind' in this.naming) out.push(this.nameForm());
+    if (!s.trail.length && this.subscribable() && this.timelineOffered) {
+      const n = this.following.timelineUnread();
+      const open = h(
+        'button',
+        { class: 'news-node news-timeline', title: 'New threads in the categories you follow' },
+        h('span', { class: 'glyph', ariaHidden: 'true' }, '≡'),
+        h('span', { class: 'name' }, 'Timeline'),
+        n ? badge(n, 'new', plural(n, 'new thread', 'new threads')) : null,
+      );
+      open.onclick = () => this.openTimeline();
+      out.push(h('div', { class: 'news-node-row' }, open));
+    }
     if (!s.trail.length && this.subscribable()) {
       // What is followed sits above the tree rather than in the bar:
       // it is somewhere to go, like a category, not something to do.
@@ -1586,6 +1885,66 @@ export class NewsView {
       drop.onclick = () =>
         void this.changeFollowing((c) => (sub.muted ? c.newsMute(scope, false) : c.newsUnsubscribe(scope)));
       out.push(h('div', { class: 'news-node-row' }, open, drop));
+    }
+    return out;
+  }
+
+  private timelineView(): (HTMLElement | null)[] {
+    const out: (HTMLElement | null)[] = [];
+    const threads = this.timeline.threads;
+    if (!threads.length && !this.loading) {
+      const categories = this.following.list().filter((sub) => sub.scope === 'category');
+      out.push(
+        h(
+          'p',
+          { class: 'news-empty' },
+          !this.timelineFollowsKnown || categories.some((sub) => !sub.muted)
+            ? 'Nothing has been started in the categories you follow yet.'
+            : categories.length
+              ? 'Every category you follow is muted, and a muted one is left out of this.'
+              : 'You follow no categories yet. Follow one from its own page, and the threads started there gather here.',
+        ),
+      );
+    }
+    for (const t of threads) {
+      const a = this.asSigned(t.article);
+      const category = this.timelineCategory(a.category);
+      const row = h(
+        'button',
+        { class: `news-thread${a.deleted ? ' deleted' : ''}${this.sigClass(a)}` },
+        h(
+          'span',
+          { class: 'news-thread-head' },
+          h('span', { class: 'news-thread-subject' }, a.deleted ? 'Deleted article' : a.subject),
+          this.timeline.isNew(a.id) ? h('span', { class: 'badge news-new' }, 'new') : null,
+        ),
+        a.deleted ? null : h('span', { class: 'news-thread-excerpt' }, excerpt(listingText(a))),
+        h(
+          'span',
+          { class: 'news-thread-meta' },
+          h('span', { class: 'news-thread-category' }, category.name),
+          ' · ',
+          ...(a.deleted ? ['—'] : this.author(a, 'news-thread-author')),
+          ` · ${plural(t.replies, 'reply', 'replies')} · `,
+          stamp(t.last_at),
+        ),
+      );
+      row.onclick = () => {
+        const path = trailTo(category.id, this.timelineNodes);
+        this.openThread(path?.slice(0, -1) ?? [], category, a.id);
+      };
+      this.watchSeen(row, a.id);
+      out.push(row);
+    }
+    if (this.timeline.older) {
+      const more = h('button', { class: 'news-more' }, 'Older threads');
+      more.onclick = () => {
+        // Busy, not disabled, so it keeps the focus until what it adds arrives.
+        if (more.ariaDisabled === 'true') return;
+        more.ariaDisabled = 'true';
+        void this.loadOlderTimeline();
+      };
+      out.push(more);
     }
     return out;
   }

@@ -106,6 +106,8 @@ import {
   type NewsThreadParams,
   type NewsThreadsOk,
   type NewsThreadsParams,
+  type NewsTimelineOk,
+  type NewsTimelineParams,
   type NewsTreeOk,
   type NewsTreeParams,
   type PushConfig,
@@ -1800,6 +1802,20 @@ export class Connection {
    *  a client may fetch what it never draws. */
   newsSeen(scope: NewsScope, upTo: number): Promise<NewsSeenOk> {
     return this.request<NewsSeenOk>('news_seen', { ...scope, up_to: upTo });
+  }
+
+  /** The threads started in what this account follows, newest first. */
+  newsTimeline(params: NewsTimelineParams = {}): Promise<NewsTimelineOk> {
+    return this.request<NewsTimelineOk>('news_timeline', params);
+  }
+
+  /** Say the reader has been shown the timeline's unbroken run of
+   *  starters from `from` up to `upTo`; `from` is 0 when the run reached
+   *  the end of the timeline. Each followed category's cursor moves, but
+   *  never past an unread starter of its own older than the run, which
+   *  was not shown. `unread` is what is left across the timeline. */
+  newsSeenTimeline(from: number, upTo: number): Promise<NewsSeenOk> {
+    return this.request<NewsSeenOk>('news_seen', { timeline: true, from, up_to: upTo });
   }
 
   // --- push devices (hxd-ng's docs/push-notifications.md §8) ------------

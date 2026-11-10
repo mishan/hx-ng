@@ -4,6 +4,7 @@
 
 import type {
   ChatStyle,
+  EmojiRef,
   Events,
   HistoryMedia,
   InboxCounts,
@@ -87,13 +88,17 @@ export interface Line {
   receipt?: 'delivered' | 'read';
   /** What it answers, as the server carried it (`replies`). */
   re?: ReplyTarget;
+  /** The server emoji its text names, as the server carried them
+   *  (`emoji`), or as this client sent them on its own copy. */
+  emoji?: EmojiRef[];
   /** Its reactions as last told, keys in the order first added. */
   reactions?: Reaction[];
 }
 
 /** A key on a line as this reader is shown it (`reactions`). */
 export interface Reaction {
-  /** As the server spells it, which is what keys are compared as. */
+  /** As the server spells it, which is what keys are compared as, or
+   *  for one of its own emoji `customKey`'s name for it. */
   emoji: string;
   count: number;
   /** This reader's account holds it. */
@@ -1048,6 +1053,7 @@ function blank(line: Line): string | undefined {
   line.signature = undefined;
   line.signed = undefined;
   line.re = undefined;
+  line.emoji = undefined;
   line.reactions = undefined;
   if (line.media) {
     const { id: _gone, ...rest } = line.media;

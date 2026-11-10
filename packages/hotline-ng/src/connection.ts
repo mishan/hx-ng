@@ -142,6 +142,9 @@ import {
   bannerIsHeld,
   type Avatar,
   type AvatarLimits,
+  type EmojiConfig,
+  type EmojiListOk,
+  type EmojiListParams,
   type User,
   type VideoConfig,
   type WireCode,
@@ -257,6 +260,11 @@ export interface Credentials {
    *  (§7.3). A resume keeps what the login was granted, which
    *  `Connection.reactions` says. */
   reactions?: boolean;
+  /** Say `emoji` at login: this client knows the server's own emoji
+   *  (hxd-ng's `docs/server-emoji.md` §8), so is sent their references
+   *  and may react with one. A resume keeps what the login was granted,
+   *  which `Connection.emoji` says. */
+  emoji?: boolean;
   /** Opens each socket in place of the global `WebSocket`: for a
    *  runtime without one, or a test's fake server
    *  (`@hotline-ng/client/testing`). */
@@ -328,6 +336,7 @@ interface Saved {
   messaging?: MessagingConfig | null;
   replies?: RepliesConfig | null;
   reactions?: ReactionsConfig | null;
+  emoji?: EmojiConfig | null;
   /** The session speaks the friend family: its login said so, or it
    *  has sent one of the family's requests. */
   speaks?: boolean;
@@ -580,6 +589,10 @@ export class Connection {
    *  caps, from the login reply or the saved session. `null` means it
    *  was not granted `reactions`: offer none. */
   reactions: ReactionsConfig | null = null;
+  /** The catalog's revision at login and the limits its images were made
+   *  to, from the login reply or the saved session. `null` means it was
+   *  not granted `emoji`: send no references, and offer no picker. */
+  emoji: EmojiConfig | null = null;
   /** This session speaks the friend family, so is sent its events. */
   private speaks = false;
   /** Round-trip time of the last explicit `ping`, in milliseconds. */
@@ -648,6 +661,7 @@ export class Connection {
       this.messaging = saved.messaging ?? null;
       this.replies = saved.replies ?? null;
       this.reactions = saved.reactions ?? null;
+      this.emoji = saved.emoji ?? null;
       this.speaks = saved.speaks ?? false;
     } else if (opts.resumeOnly) {
       throw new Error('no session to resume');
@@ -776,6 +790,7 @@ export class Connection {
     if (this.speaks && this.creds.friendships) params.friendships = true;
     if (this.creds.replies) params.replies = true;
     if (this.creds.reactions) params.reactions = true;
+    if (this.creds.emoji) params.emoji = true;
 
     const ok = await this.request<LoginOk>('login', params);
     this.signing = ok.signs ?? null;
@@ -805,6 +820,7 @@ export class Connection {
     this.messaging = ok.messaging ?? null;
     this.replies = ok.replies ?? null;
     this.reactions = ok.reactions ?? null;
+    this.emoji = ok.emoji ?? null;
     // Only a session that may detach is worth remembering: without the
     // permission a resume can only ever answer session_expired, and
     // storing a token we know is useless just invites a confusing
@@ -1359,6 +1375,27 @@ export class Connection {
     return res.blob();
   }
 
+  // --- server emoji (hxd-ng's docs/server-emoji.md §8) ------------------
+
+  /** A page of the catalog, from the revision the caller holds and after
+   *  the last id it was sent; `EmojiCatalog` pages it and keeps it. From
+   *  a session not granted `emoji`, `not_available`. */
+  emojiList(params: EmojiListParams = {}): Promise<EmojiListOk> {
+    return this.request<EmojiListOk>('emoji_list', params);
+  }
+
+  /** Fetch a live emoji's image, PNG or GIF, by its entry's `hash`. Any
+   *  session may fetch any; the bytes never change under a hash, but a
+   *  hash no live emoji has is refused `no_such_emoji`, so an entry the
+   *  catalog says was removed is not drawn from bytes held. */
+  async fetchEmoji(hash: string): Promise<Blob> {
+    const res = await fetch(`${this.httpBase()}/emoji/${encodeURIComponent(hash.toLowerCase())}`, {
+      headers: { Authorization: this.bearer() },
+    });
+    if (!res.ok) throw await httpFailure(res, 'no_such_emoji', 'bad_request');
+    return res.blob();
+  }
+
   // --- Files (docs/hotline-ng.md §7.2) --------------------------------
 
   async filesList(path = ''): Promise<FilesListOk> {
@@ -1868,9 +1905,11 @@ export class Connection {
    *  `{}`. Adding a key this account holds, or removing one it does not,
    *  changes nothing and succeeds. A refusal is a `WireFailure`:
    *  `not_available`, `no_such_target`, `too_many_reactions`,
-   *  `access_denied`, `bad_request`, or `rate_limited` with
+   *  `no_such_emoji` for one of the server's own emoji added that is not
+   *  live, `access_denied`, `bad_request`, or `rate_limited` with
    *  `retry_after`, and never the second or third for a stored
-   *  message; `reactionErrorText` words them. */
+   *  message; `reactionErrorText` words them. A server emoji is a key
+   *  only from a session granted `emoji`. */
   react(target: { line: number; room?: number }, key: ReactionKey, opts?: { remove?: boolean }): Promise<ReactOk>;
   react(target: { pm: string }, key: ReactionKey, opts?: { remove?: boolean }): Promise<Record<string, never>>;
   react(
@@ -1880,12 +1919,9 @@ export class Connection {
   ): Promise<Record<string, never>>;
   react(target: StoredReactionTarget, key: ReactionKey, opts?: { remove?: boolean }): Promise<ReactOk | Record<string, never>>;
   react(target: ReactionTarget, key: ReactionKey, opts: { remove?: boolean; with?: string } = {}): Promise<ReactOk | Record<string, never>> {
-    // U+FE0E asks for the text form and is refused; without it the
-    // server spells the key as the emoji it is.
-    const emoji = key.emoji.replaceAll('\uFE0E', '');
     return this.request('react', {
       target,
-      key: { emoji },
+      key: wireKey(key),
       ...(opts.remove ? { remove: true } : {}),
       ...(opts.with ? { with: opts.with } : {}),
     });
@@ -1898,7 +1934,7 @@ export class Connection {
    *  is `bad_request`; from a session not granted `reactions`,
    *  `not_available`. */
   reactionsGet(targets: StoredReactionTarget[], key?: ReactionKey): Promise<ReactionsOk> {
-    const params = key ? { targets, key: { emoji: key.emoji.replaceAll('\uFE0E', '') } } : { targets };
+    const params = key ? { targets, key: wireKey(key) } : { targets };
     return this.request<ReactionsOk>('reactions', params);
   }
 
@@ -2195,6 +2231,7 @@ export class Connection {
       messaging: this.messaging,
       replies: this.replies,
       reactions: this.reactions,
+      emoji: this.emoji,
       speaks: this.speaks,
       writer: this.writer,
       login: this.self?.identity?.account ?? this.creds.login,
@@ -2240,6 +2277,13 @@ function readRaw(store?: SessionStore): string | null {
   } catch {
     return null;
   }
+}
+
+/** A key as `react` and `reactions` send it. U+FE0E asks for an emoji's
+ *  text form and is refused; without it the server spells the key as
+ *  the emoji it is. */
+function wireKey(key: ReactionKey): ReactionKey {
+  return key.custom !== undefined ? { custom: key.custom } : { emoji: key.emoji.replaceAll('\uFE0E', '') };
 }
 
 function parseSaved(raw: string | null): Saved | null {

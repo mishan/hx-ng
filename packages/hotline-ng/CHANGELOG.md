@@ -16,6 +16,9 @@ says how.
 - `onLogin` is handed, beside the reply, the rooms the session that
   login replaces was in, from the record saved with the session, so a
   client can join them again after a reload whose resume failed.
+- Breaking: `ReactionKey` is `{ emoji }` or, for one of the server's
+  own emoji, `{ custom: id }`, which every reader of reactions may be
+  shown, so a caller reading `key.emoji` checks it is there.
 - Breaking: `MsgOk` has no `id`. A stored message's `id` is its place
   in the recipient's mailbox, shown to the recipient alone, and `ref`
   names it to both parties (hxd-ng's `docs/hotline-ng.md` §7.1):
@@ -27,6 +30,27 @@ says how.
 
 ### Added
 
+- Server emoji (hxd-ng's `docs/server-emoji.md` §8): `Credentials.emoji`
+  says `emoji` at login, and `Connection.emoji` is the login reply's
+  `EmojiConfig`, the catalog's revision and its limits, saved with the
+  session; `CAP_EMOJI`. `emojiList({ revision, after })` answers a page
+  of `EmojiEntry`s, `LiveEmoji` or `RemovedEmoji`, as `EmojiListOk`,
+  and `EmojiCatalog` keeps them: it pages, keeps the first page's
+  revision, starts again when a delta's later page comes back whole,
+  and runs a refresh asked for while one pages once more after it. The
+  `emoji_changed` event says when to refresh. `fetchEmoji(hash)` gets an
+  image with the session's bearer, refused `no_such_emoji` once no live
+  entry has it. `EmojiRef` is `emoji` on `chat` and `msg`, on the
+  `chat`, `msg` and `im` events, `HistoryLine`, `StoredMessage` and
+  `RequestMessage`; `emojiRefsFor` makes them for a text from the
+  catalog, and `emojiSegments` splits a text by them, only a name a
+  reference binds to a live id becoming an emoji. `react` and
+  `reactionsGet` take `{ custom: id }`, and `react` may be refused
+  `no_such_emoji`. `FakeServer` serves it: granted to a login that
+  asks, a catalog the test edits with `addEmoji`, `renameEmoji` and
+  `removeEmoji`, each told as `emoji_changed`, `emoji_list` paged by
+  `emojiPage`, references kept and carried as hxd-ng keeps them, and
+  server emoji as reaction keys.
 - The news timeline (hxd-ng's `docs/news.md` §10.8, §10.9):
   `newsTimeline({ before, after, limit })` answers `NewsTimelineOk`, the
   threads started in every category the account follows and has not

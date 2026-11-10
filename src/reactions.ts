@@ -14,6 +14,7 @@ import {
   type LineReactions,
   type ReactionChange,
   type ReactionCount,
+  type ReactionKey,
   type ReactionKind,
   type ReactionsConfig,
 } from '@hotline-ng/client';
@@ -39,13 +40,37 @@ const SEEN_GATHER_MS = 250;
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
+/** One of the server's own emoji as a line's key is held: under a name
+ *  no emoji has, since none holds a space. */
+export function customKey(id: number): string {
+  return `custom ${id}`;
+}
+
+/** The catalog id a held key names, if it is a server emoji. */
+export function customOf(key: string): number | undefined {
+  const m = /^custom (\d+)$/.exec(key);
+  return m ? Number(m[1]) : undefined;
+}
+
+/** A key off the wire as it is held, or `undefined` for a kind this
+ *  client does not know. */
+export function heldKey(k: ReactionKey): string | undefined {
+  return Number.isSafeInteger(k.custom) ? customKey(k.custom!) : typeof k.emoji === 'string' ? k.emoji : undefined;
+}
+
+/** A held key as `react` sends it. */
+export function wireKey(key: string): ReactionKey {
+  const id = customOf(key);
+  return id !== undefined ? { custom: id } : { emoji: key };
+}
+
 /** A summary as the wire carries it, as held: `undefined` for none. A
- *  key of a kind this client does not draw, such as a server's own
- *  emoji, is left out. */
+ *  key of a kind this client does not know is left out. */
 export function summaryOf(keys: readonly ReactionCount[] | undefined, mine: readonly number[] = []): Reaction[] | undefined {
-  const held = (keys ?? []).flatMap((k, i): Reaction[] =>
-    typeof k.key.emoji === 'string' && k.count > 0 ? [{ emoji: k.key.emoji, count: k.count, mine: mine.includes(i) }] : [],
-  );
+  const held = (keys ?? []).flatMap((k, i): Reaction[] => {
+    const emoji = heldKey(k.key);
+    return emoji !== undefined && k.count > 0 ? [{ emoji, count: k.count, mine: mine.includes(i) }] : [];
+  });
   return held.length ? held : undefined;
 }
 
@@ -101,9 +126,9 @@ export function reactableAs(line: Line, conv: Conversation, kinds: readonly Reac
 /** An instant message's reactions once one of its two parties adds or
  *  removes `emoji`. Only two can react, so a count and whether this
  *  reader holds the key say whose it is. */
-export function afterParty(held: readonly Reaction[] | undefined, emoji: string, add: boolean, mine: boolean): Reaction[] | undefined {
-  // A key of a kind this client does not draw, as `summaryOf` leaves out.
-  if (typeof emoji !== 'string') return held?.length ? [...held] : undefined;
+export function afterParty(held: readonly Reaction[] | undefined, emoji: string | undefined, add: boolean, mine: boolean): Reaction[] | undefined {
+  // A key of a kind this client does not know, as `summaryOf` leaves out.
+  if (emoji === undefined) return held?.length ? [...held] : undefined;
   const was = held?.find((r) => r.emoji === emoji);
   const me = mine ? add : !!was?.mine;
   const them = mine ? (was?.count ?? 0) > Number(!!was?.mine) : add;
@@ -248,14 +273,14 @@ export class ReactionDesk {
         if (c.action === 'add' || c.action === 'remove') {
           const { login, guid } = c.target.im;
           const sent = login.toLowerCase() === store.me()?.toLowerCase();
-          this.told(store.imReactions(sent ? c.from.login : login, guid, sent, (held) => afterParty(held, c.key.emoji, c.action === 'add', false)));
+          this.told(store.imReactions(sent ? c.from.login : login, guid, sent, (held) => afterParty(held, heldKey(c.key), c.action === 'add', false)));
         } else if (c.action === 'summary' && 'pm' in c.target) this.told(store.setPmReactions(c.target.pm, summaryOf(c.keys, c.mine)));
       }
     });
   }
 
-  /** Add `emoji` to `line` or take it away. A rate limit is waited out
-   *  once, as long as it says. */
+  /** Add `emoji`, a held key, to `line` or take it away. A rate limit
+   *  is waited out once, as long as it says. */
   async toggle(line: Line, conv: Conversation, emoji: string, add: boolean, waited = false): Promise<void> {
     const caps = this.conn.reactions;
     const to = caps && reactableAs(line, conv, caps.targets, this.host.store.me());
@@ -265,15 +290,15 @@ export class ReactionDesk {
     let settle = (): void => {};
     try {
       if (to.kind === 'line') {
-        const { count } = await this.conn.react(to.target, { emoji }, { remove: !add });
+        const { count } = await this.conn.react(to.target, wireKey(emoji), { remove: !add });
         settle = () => this.apply(conv.id, [[to.target.line, afterOwn(line.reactions, emoji, add, count)]]);
       } else if (to.kind === 'im') {
         // Nobody is told of this reader's own: the tally is kept here.
-        await this.conn.react(to.target, { emoji }, { remove: !add, with: to.with });
+        await this.conn.react(to.target, wireKey(emoji), { remove: !add, with: to.with });
         const { guid } = to.target.im;
         settle = () => this.told(this.host.store.imReactions(to.with, guid, !!line.local, (held) => afterParty(held, emoji, add, true)));
       } else {
-        await this.conn.react(to.target, { emoji }, { remove: !add });
+        await this.conn.react(to.target, wireKey(emoji), { remove: !add });
       }
     } catch (e) {
       if (this.closed) return;

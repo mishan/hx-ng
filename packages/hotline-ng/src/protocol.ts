@@ -317,6 +317,9 @@ export interface LoginParams {
   replies?: true;
   /** This client reacts and reads reactions (§7.3), so is sent them. */
   reactions?: true;
+  /** This client knows the server's own emoji (hxd-ng's
+   *  `docs/server-emoji.md` §8), so is sent their references. */
+  emoji?: true;
 }
 
 export interface VideoLimits {
@@ -398,6 +401,75 @@ export interface LoginOk {
   /** Present exactly when `caps` lists `reactions`, which only a login
    *  that said `reactions` is granted. */
   reactions?: ReactionsConfig;
+  /** Present exactly when `caps` lists `emoji`, which only a login that
+   *  said `emoji` is granted. */
+  emoji?: EmojiConfig;
+}
+
+// --- Server emoji (hxd-ng's docs/server-emoji.md §8) --------------------
+
+/** The `emoji` block: the catalog's revision as the session attached,
+ *  and the limits its images were made to. `manage` is whether this
+ *  session may change the catalog, which on hxd-ng nobody may from a
+ *  wire. */
+export interface EmojiConfig {
+  revision: number;
+  max_count: number;
+  max_bytes: number;
+  max_dimension: number;
+  manage: boolean;
+}
+
+/** A live catalog entry. `hash` is its image's SHA-256 in lowercase
+ *  hex, what `GET /emoji/{hash}` serves; an id always draws the same
+ *  picture, so its bytes may be kept for good. An animation is a GIF,
+ *  anything else a PNG. */
+export interface LiveEmoji {
+  id: number;
+  revision: number;
+  name: string;
+  hash: string;
+  width: number;
+  height: number;
+  animated?: true;
+}
+
+/** A removed entry: its id and its last name, so what named it can
+ *  still say `:name:`, and no image. */
+export interface RemovedEmoji {
+  id: number;
+  revision: number;
+  name: string;
+  removed: true;
+}
+
+export type EmojiEntry = LiveEmoji | RemovedEmoji;
+
+export interface EmojiListParams {
+  /** The revision the client holds; absent, it holds nothing. */
+  revision?: number;
+  /** The last id of the page before, to ask for the next. */
+  after?: number;
+}
+
+/** A page of the catalog, ascending by id: what changed since the
+ *  revision asked from when `delta`, every entry kept otherwise. A
+ *  client keeps the first page's `revision` while it pages. */
+export interface EmojiListOk {
+  revision: number;
+  emoji?: EmojiEntry[];
+  delta?: true;
+  has_more?: true;
+}
+
+/** What makes `:name:` in a line or a message one of the server's own
+ *  emoji: sent beside the text on `chat` and `msg`, and carried as the
+ *  server kept them, a ref to a live entry under exactly its name at
+ *  the time. It names an id, so a later rename leaves the picture the
+ *  sender saw. */
+export interface EmojiRef {
+  name: string;
+  id: number;
 }
 
 /** The kinds of target a server keeps (§7.3): `line` where it keeps
@@ -450,10 +522,10 @@ export type ReactionTarget = { line: number; room?: number } | { im: { login: st
 export type StoredReactionTarget = Exclude<ReactionTarget, { im: unknown }>;
 
 /** One emoji, fully qualified as the server spells every key: a key is
- *  compared as the server returns it, never as it was sent. */
-export interface ReactionKey {
-  emoji: string;
-}
+ *  compared as the server returns it, never as it was sent. Or, from a
+ *  session granted `emoji`, one of the server's own by its catalog id,
+ *  which every reader of reactions is shown whether or not it was. */
+export type ReactionKey = { emoji: string; custom?: never } | { custom: number; emoji?: never };
 
 /** A key on a target and how many accounts hold it. */
 export interface ReactionCount {
@@ -546,6 +618,8 @@ export type MsgParams = {
   signed?: string;
   /** With `replies`, the message this answers: `pm`, `im` or `signed`. */
   re?: ReplyTarget;
+  /** With `emoji`, the server emoji the text names. */
+  emoji?: EmojiRef[];
 } & (
   | { to: number; to_login?: never }
   | { to_login: string; to?: never }
@@ -584,6 +658,8 @@ export interface ChatParams {
   signed?: string;
   /** With `replies`, the line this answers: `line` or `signed`. */
   re?: ReplyTarget;
+  /** With `emoji`, the server emoji the text names. */
+  emoji?: EmojiRef[];
 }
 
 export interface ChatOk {
@@ -670,6 +746,8 @@ export interface StoredMessage {
   signed?: string;
   /** To a session that said `replies`, what it answers. */
   re?: ReplyTarget;
+  /** To a session that said `emoji`, the server emoji its text names. */
+  emoji?: EmojiRef[];
   /** An instant message, kept as mail: `guid` and `from.login` make the
    *  `im` target that reacts to it. */
   im?: true;
@@ -727,6 +805,9 @@ export interface HistoryLine {
   /** To a session that said `replies`, what it answers. A redacted
    *  line has lost it with its words. */
   re?: ReplyTarget;
+  /** To a session that said `emoji`, the server emoji its text names;
+   *  a redacted line has lost them with its words. */
+  emoji?: EmojiRef[];
   /** To a session that said `reactions`, its keys in the order they
    *  were first added; absent when it has none. */
   reactions?: ReactionCount[];
@@ -1084,6 +1165,7 @@ export interface RequestMessage {
   guid: string;
   signed?: string;
   re?: ReplyTarget;
+  emoji?: EmojiRef[];
 }
 
 /** One sender's waiting message requests, oldest first. */
@@ -2106,6 +2188,8 @@ export interface Events {
     signed?: string;
     /** To a session that said `replies`, what it answers. */
     re?: ReplyTarget;
+    /** To a session that said `emoji`, the server emoji its text names. */
+    emoji?: EmojiRef[];
   };
   /** `room`, with `rooms`, is never present for the lobby. */
   notice: { text: string; room?: number };
@@ -2148,6 +2232,9 @@ export interface Events {
     sealed_lost?: true;
     /** To a session that said `replies`, what it answers. */
     re?: ReplyTarget;
+    /** To a session that said `emoji`, the server emoji its text names;
+     *  never on a sealed one. */
+    emoji?: EmojiRef[];
     /** An instant message handed over as mail, and its guid. */
     im?: true;
     guid?: string;
@@ -2196,6 +2283,10 @@ export interface Events {
    *  an event may still carry many: an instant message's held for a
    *  detached session, or what a purge or a link changed. */
   reactions_changed: { changes: ReactionChange[] };
+  /** To a session that said `emoji`, once per reload of the server's
+   *  catalog that moved its revision: `emojiList` from the revision
+   *  held. */
+  emoji_changed: { revision: number };
   /** A report was filed. Moderators only. */
   report: Report;
   /** A report was closed. It reaches the reporter, with `yours` true,
@@ -2288,6 +2379,8 @@ export interface Events {
     approval?: true;
     /** To a session that said `replies`, what it answers. */
     re?: ReplyTarget;
+    /** To a session that said `emoji`, the server emoji its text names. */
+    emoji?: EmojiRef[];
   };
   /** A friend received (`read` false) or read a message this account
    *  sent under `guid`. Under an approval only reads are told. */
@@ -2337,6 +2430,9 @@ export const CAP_REPLIES = 'replies';
 /** Listed only in reply to a login that asked for it, where the server
  *  takes reactions on some kind of target. */
 export const CAP_REACTIONS = 'reactions';
+/** Listed only in reply to a login that asked for it, where the server
+ *  keeps an emoji catalog. */
+export const CAP_EMOJI = 'emoji';
 
 /**
  * `resync_required` is not a failure: the session is still alive and the
@@ -2500,6 +2596,9 @@ const RETRY = {
   own_report: 'never',
   // Reactions (§7.3): one already there may still be toggled.
   too_many_reactions: 'never',
+  // A server emoji added as a key that is not live, or an image no live
+  // emoji has (server-emoji.md §5, §8).
+  no_such_emoji: 'never',
   no_such_ban: 'never',
   config_ban: 'never',
   // Accounts (account-admin.md).
@@ -2607,6 +2706,7 @@ export const ERROR_TEXT: Record<string, string> = {
   own_report: 'That report is about you. Another moderator closes it.',
   protected: 'That user cannot be moderated by you.',
   too_many_reactions: 'That line has as many reactions as it may, or you have as many on it as you may.',
+  no_such_emoji: 'That emoji is not on this server anymore.',
   // Accounts.
   outranked: 'That account or role may do, or would be allowed to do, something you may not.',
   no_such_account: 'There is no such account.',

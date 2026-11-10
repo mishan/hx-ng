@@ -26,6 +26,7 @@ import type { KeptFriendship, PortableFriends } from '../friendships';
 import type { Session } from '../session';
 import { ask } from './ask';
 import { badge, h } from './dom';
+import { emojiText } from './server-emoji';
 import { Sight } from './sight';
 
 function problem(e: unknown): string {
@@ -105,6 +106,10 @@ export class FriendsView {
     this.drafts.clear();
     this.error = this.notice = null;
     this.el.replaceChildren();
+  }
+
+  emojiChanged(): void {
+    if (this.sight.on) this.render();
   }
 
   noteApproval(login: string): void {
@@ -607,7 +612,7 @@ export class FriendsView {
           this.button('Delete', `delete:${r.login}`, () => void this.answer(r.login, 'delete'), true),
         ),
         ...r.messages.map((m) =>
-          h('p', { class: 'friends-message' }, h('span', { class: 'time' }, new Date(m.at * 1000).toLocaleString()), ' ', m.text),
+          h('p', { class: 'friends-message' }, h('span', { class: 'time' }, new Date(m.at * 1000).toLocaleString()), ' ', ...emojiText(m.text, m.emoji)),
         ),
       );
     const approvals = listing.approvals.map((a) =>

@@ -357,6 +357,32 @@ await conn.start();
 if (conn.reactions?.targets.includes('line')) await conn.react({ line: id }, { emoji: '\u{1F44D}' });
 ```
 
+### Server emoji
+
+A client that knows the server's own emoji says so with `emoji: true`
+in its `Credentials`; where the server keeps a catalog, `caps` lists
+`emoji` and `conn.emoji` is its block, the revision at login and the
+limits its images were made to. `EmojiCatalog` keeps the catalog from
+`emojiList`: `refresh` after the login, after `emoji_changed` and after
+a resync, and it pages, keeps the first page's revision, and starts
+again when a delta's later page comes back whole. `fetchEmoji(hash)`
+fetches an entry's image with the session's bearer. A line or message
+names the emoji its text says as `emoji: [{ name, id }]` on `chat` and
+`msg`, which `emojiRefsFor` makes from the catalog; the events,
+history lines, inbox rows and requests carry them as the server kept
+them, and `emojiSegments` splits a text by them, a name becoming an
+emoji only where a reference binds it to a live id. A reaction may be
+one of them, `{ custom: id }`.
+
+```ts
+const conn = new Connection({ ...creds, emoji: true });
+await conn.start();
+const catalog = new EmojiCatalog((p) => conn.emojiList(p));
+if (conn.emoji) await catalog.refresh();
+conn.on('emoji_changed', () => void catalog.refresh().catch(() => {}));
+await conn.chat({ text: 'hi :party:', emoji: emojiRefsFor('hi :party:', catalog) });
+```
+
 ### Portable friendships
 
 A friendship can belong to the two people rather than to one server:

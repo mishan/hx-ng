@@ -735,3 +735,139 @@ describe('reactions on the fake server', () => {
     await expect(alice.react({ line: id! }, UP)).resolves.toEqual({ count: 1 });
   });
 });
+
+describe('server emoji on the fake server', () => {
+  async function asking(server: FakeServer, login: string, extra: Partial<Parameters<FakeServer['credentials']>[0]> = {}): Promise<Connection> {
+    const conn = new Connection(server.credentials({ login, password: 'pw', emoji: true, replies: true, reactions: true, ...extra }));
+    await conn.start();
+    return conn;
+  }
+
+  it('grants emoji to a login that asks, with the block, and lists its catalog by revision', async () => {
+    const server = new FakeServer({ accounts: ACCOUNTS, emojiPage: 2 });
+    const party = server.addEmoji('party', { animated: true });
+    const cat = server.addEmoji('cat');
+    server.addEmoji('dog');
+    const alice = await asking(server, 'alice');
+    expect([alice.hasCap('emoji'), alice.emoji]).toEqual([true, { revision: 3, max_count: 200, max_bytes: 16384, max_dimension: 128, manage: false }]);
+    const first = await alice.emojiList();
+    expect(first).toMatchObject({ revision: 3, has_more: true });
+    expect(first.delta).toBeUndefined();
+    expect(first.emoji).toEqual([
+      { id: party, revision: 1, name: 'party', hash: party.toString(16).padStart(64, '0'), width: 32, height: 32, animated: true },
+      { id: cat, revision: 2, name: 'cat', hash: cat.toString(16).padStart(64, '0'), width: 32, height: 32 },
+    ]);
+    expect((await alice.emojiList({ after: cat })).emoji?.map((e) => e.name)).toEqual(['dog']);
+    expect(await alice.emojiList({ revision: 3 })).toEqual({ revision: 3, delta: true });
+
+    const changed = heard(alice, 'emoji_changed');
+    server.renameEmoji(cat, 'kitty');
+    server.removeEmoji(party);
+    await waitFor('the changes', () => changed.length === 2);
+    expect(changed).toEqual([{ revision: 4 }, { revision: 5 }]);
+    expect(await alice.emojiList({ revision: 3 })).toEqual({
+      revision: 5,
+      delta: true,
+      emoji: [
+        { id: party, revision: 5, name: 'party', removed: true },
+        { id: cat, revision: 4, name: 'kitty', hash: cat.toString(16).padStart(64, '0'), width: 32, height: 32 },
+      ],
+    });
+    // Ahead of the catalog, as after a restore: everything, whole.
+    expect((await alice.emojiList({ revision: 99 })).delta).toBeUndefined();
+
+    const bob = await connect(server, 'bob');
+    const bobChanged = heard(bob, 'emoji_changed');
+    expect([bob.hasCap('emoji'), bob.emoji]).toEqual([false, null]);
+    await expect(bob.emojiList()).rejects.toMatchObject({ wire: { code: 'not_available' } });
+    server.addEmoji('owl');
+    await waitFor('alice told', () => changed.length === 3);
+    expect(bobChanged).toEqual([]);
+    const off = await asking(new FakeServer({ accounts: ACCOUNTS, caps: ['history'] }), 'alice');
+    expect([off.hasCap('emoji'), off.emoji]).toEqual([false, null]);
+  });
+
+  it('keeps of a line\'s references those naming a live entry by its name, each id once, and carries them to sessions that asked', async () => {
+    const server = new FakeServer({ accounts: ACCOUNTS });
+    const party = server.addEmoji('party');
+    const gone = server.addEmoji('gone');
+    server.removeEmoji(gone);
+    const alice = await asking(server, 'alice');
+    const bob = await connect(server, 'bob');
+    const aliceHeard = heard(alice, 'chat');
+    const bobHeard = heard(bob, 'chat');
+    const sent = [
+      { name: 'fiesta', id: party },
+      { name: 'party', id: party },
+      { name: 'party', id: party },
+      { name: 'gone', id: gone },
+      { name: 'nobody', id: 99 },
+    ];
+    const { id } = await alice.chat({ text: ':party: :gone:', emoji: sent });
+    await alice.chat({ text: 'none kept', emoji: [{ name: 'gone', id: gone }] });
+    await bob.chat({ text: 'ignored', emoji: [{ name: 'party', id: party }] });
+    await waitFor('the lines', () => aliceHeard.length === 3 && bobHeard.length === 3);
+    expect(aliceHeard.map((d) => d.emoji)).toEqual([[{ name: 'party', id: party }], undefined, undefined]);
+    expect(bobHeard.every((d) => d.emoji === undefined)).toBe(true);
+    expect((await alice.history({ ids: [id!] })).lines[0]!.emoji).toEqual([{ name: 'party', id: party }]);
+    expect((await bob.history()).lines.find((l) => l.id === id)).not.toHaveProperty('emoji');
+
+    // Only the first 32 are read.
+    const late = [...Array.from({ length: 32 }, () => ({ name: 'nobody', id: 99 })), { name: 'party', id: party }];
+    await alice.chat({ text: 'late', emoji: late });
+    await waitFor('the late line', () => aliceHeard.length === 4);
+    expect(aliceHeard[3]!.emoji).toBeUndefined();
+    for (const emoji of [{ name: 'party', id: party }, [{ name: 'party' }], [{ name: 1, id: party }], [{ name: 'party', id: 1.5 }]]) {
+      await expect(alice.chat({ text: 'x', emoji: emoji as never }), JSON.stringify(emoji)).rejects.toMatchObject({ wire: { code: 'bad_request' } });
+    }
+  });
+
+  it('carries a message\'s references live, held for an absent recipient, and on its inbox row', async () => {
+    const server = new FakeServer({ accounts: ACCOUNTS });
+    const party = server.addEmoji('party');
+    const alice = await asking(server, 'alice');
+    const refs = [{ name: 'party', id: party }];
+    const got: Events['msg'][] = [];
+    const bob = new Connection(server.credentials({ login: 'bob', password: 'pw', emoji: true }));
+    bob.on('msg', (d) => got.push(d));
+    await bob.start();
+    await alice.msg({ to_login: 'bob', text: ':party: live', emoji: refs });
+    await waitFor('the live message', () => got.length === 1);
+    await bob.logout();
+    await alice.msg({ to_login: 'bob', text: ':party: waited', emoji: refs });
+    const back = new Connection(server.credentials({ login: 'bob', password: 'pw', emoji: true }));
+    back.on('msg', (d) => got.push(d));
+    await back.start();
+    await waitFor('the waiting message', () => got.length === 2);
+    expect(got.map((d) => [d.text, d.emoji])).toEqual([
+      [':party: live', refs],
+      [':party: waited', refs],
+    ]);
+    expect((await back.inbox()).messages.map((m) => m.emoji)).toEqual([refs, refs]);
+    const plain = await connect(server, 'bob');
+    expect((await plain.inbox()).messages.every((m) => m.emoji === undefined)).toBe(true);
+  });
+
+  it('takes a server emoji as a reaction key from a session that asked, live to add and gone or not to take away', async () => {
+    const server = new FakeServer({ accounts: ACCOUNTS });
+    const party = server.addEmoji('party');
+    const owl = server.addEmoji('owl');
+    const alice = await asking(server, 'alice');
+    const plain = new Connection(server.credentials({ login: 'bob', password: 'pw', reactions: true }));
+    await plain.start();
+    const { id } = await alice.chat({ text: 'react to me' });
+    expect(await alice.react({ line: id! }, { custom: party })).toEqual({ count: 1 });
+    await alice.react({ line: id! }, { custom: owl });
+    server.removeEmoji(owl);
+    await expect(alice.react({ line: id! }, { custom: 99 })).rejects.toMatchObject({ wire: { code: 'no_such_emoji' } });
+    await expect(alice.react({ line: id! }, { custom: party + 0.5 })).rejects.toMatchObject({ wire: { code: 'bad_request' } });
+    await expect(plain.react({ line: id! }, { custom: party })).rejects.toMatchObject({ wire: { code: 'bad_request' } });
+    // Every reader of reactions is shown it.
+    expect((await plain.history({ ids: [id!] })).lines[0]!.reactions).toEqual([
+      { key: { custom: party }, count: 1 },
+      { key: { custom: owl }, count: 1 },
+    ]);
+    expect(await alice.react({ line: id! }, { custom: owl }, { remove: true })).toEqual({ count: 0 });
+    await expect(alice.react({ line: id! }, { custom: owl })).rejects.toMatchObject({ wire: { code: 'no_such_emoji' } });
+  });
+});

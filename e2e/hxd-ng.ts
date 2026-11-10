@@ -101,6 +101,9 @@ export interface RunningServer {
   wsUrl: string;
   httpBase: string;
   hlidDir: string;
+  /** SIGHUP: the server rereads what it rereads, its emoji catalog
+   *  among it. */
+  reload(): void;
   stop(): void;
 }
 
@@ -195,8 +198,18 @@ ${opts.sections ?? IDENTITY_SECTIONS}`,
     wsUrl: `${httpBase.replace('http://', 'ws://')}/ng`,
     httpBase,
     hlidDir: dir,
+    reload: () => void proc.kill('SIGHUP'),
     stop: () => proc.kill(),
   };
+}
+
+/** An operator's command, `hxd emoji add` say, run in a server's
+ *  directory on its config, beside it as an operator runs one. Throws
+ *  with what it said on a failure. */
+export function hxd(server: RunningServer, args: string[]): string {
+  const result = spawnSync(bin('hxd'), ['--config', 'hxd-ng.toml', ...args], { cwd: server.hlidDir, encoding: 'utf8' });
+  if (result.status !== 0) throw new Error(`hxd ${args.join(' ')} failed (exit ${result.status}):\n${result.stderr}`);
+  return result.stdout;
 }
 
 /**

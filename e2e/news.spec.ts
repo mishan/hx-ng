@@ -43,21 +43,34 @@ delete_news_bundles = true
  *  the real server's, but `news_timeline` is answered as it would not
  *  know it. `slowTimeline` holds the server's answers to it back a
  *  while, as a busy server would. `noSubs` has `news_subs` refused, as
- *  a failing store would. `sent` collects the frames the page sends. */
+ *  a failing store would; `staleSubs` holds its first answer back a
+ *  while and refuses the rest. `sent` collects the frames the page
+ *  sends. */
 async function logIn(
   browser: Browser,
   server: RunningServer,
   login: string,
-  opts: { noTimeline?: boolean; slowTimeline?: boolean; noSubs?: boolean; sent?: Record<string, unknown>[] } = {},
+  opts: {
+    noTimeline?: boolean;
+    slowTimeline?: boolean;
+    noSubs?: boolean;
+    staleSubs?: boolean;
+    sent?: Record<string, unknown>[];
+  } = {},
 ): Promise<Page> {
   const page = await (await browser.newContext()).newPage();
-  if (opts.noTimeline || opts.slowTimeline || opts.noSubs) {
+  if (opts.noTimeline || opts.slowTimeline || opts.noSubs || opts.staleSubs) {
     await page.routeWebSocket(/\/ng/, (ws) => {
       const real = ws.connectToServer();
       const slow = new Set<number>();
+      let held: number | undefined;
       ws.onMessage((m) => {
         const frame = JSON.parse(String(m)) as { id?: number; req?: string };
-        if (opts.noSubs && frame.req === 'news_subs') {
+        if (opts.staleSubs && frame.req === 'news_subs' && held === undefined) {
+          held = frame.id;
+          return real.send(m);
+        }
+        if ((opts.noSubs || opts.staleSubs) && frame.req === 'news_subs') {
           return ws.send(JSON.stringify({ reply: frame.id, error: { code: 'store_failed', text: 'The store failed.' } }));
         }
         if (frame.req !== 'news_timeline' || !(opts.noTimeline || opts.slowTimeline)) return real.send(m);
@@ -70,6 +83,7 @@ async function logIn(
       real.onMessage((m) => {
         const frame = JSON.parse(String(m)) as { reply?: number };
         if (frame.reply !== undefined && slow.delete(frame.reply)) setTimeout(() => ws.send(m), 400);
+        else if (frame.reply !== undefined && frame.reply === held) setTimeout(() => ws.send(m), 3000);
         else ws.send(m);
       });
     });
@@ -483,6 +497,10 @@ news_posts = 0
     // The editor follows no category in this file: an empty timeline,
     // said as such rather than as a server that has none.
     await expect(page.locator('.news-empty')).toHaveText(/^You follow no categories yet\./);
+    // A page whose ask for what is followed, made at login, is answered
+    // late with what was so then: the timeline's own ask, queued behind
+    // it and refused, leaves it not knowing.
+    const stale = await logIn(browser, server, 'editor', { staleSubs: true });
     // Followed from another device, which tells this page nothing: the
     // timeline asks again when it is opened.
     const other = await openAccount(server, 'editor', 'pw');
@@ -497,6 +515,9 @@ news_posts = 0
     await page.locator('.news-timeline').click();
     await expect(page.locator('.news-empty')).toHaveText('Nothing has been started in the categories you follow yet.');
     // Not knowing what is followed is not following nothing.
+    await openNews(stale);
+    await stale.locator('.news-timeline').click();
+    await expect(stale.locator('.news-empty')).toHaveText('Nothing has been started in the categories you follow yet.');
     const unsure = await logIn(browser, server, 'editor', { noSubs: true });
     await openNews(unsure);
     await unsure.locator('.news-timeline').click();

@@ -325,9 +325,11 @@ export class NewsView {
   /** What the events since the last reread asked to be read again. */
   private timelineTouch: TimelineTouch = null;
   private timelineTimer: ReturnType<typeof setTimeout> | null = null;
-  /** `news_subs` answers taken, so a load can tell whether its own ask
-   *  for what is followed was answered. */
-  private followingFetches = 0;
+  /** `news_subs` asks numbered as they go out, and the last one whose
+   *  answer was taken, so a load can tell an answer to an ask begun
+   *  after its own from one to an older ask that was still out. */
+  private followingAsked = 0;
+  private followingAnswered = 0;
   /** Whether what is followed is known as of this timeline's opening:
    *  until it is, an empty timeline cannot say that nothing is. */
   private timelineFollowsKnown = false;
@@ -453,11 +455,12 @@ export class NewsView {
     const conn = this.hooks.conn();
     if (!conn || !this.subscribable()) return;
     const session = this.session;
+    const fetch = ++this.followingAsked;
     try {
       const ok = await conn.newsSubs();
       if (session !== this.session) return;
       this.following.load(ok.subs);
-      this.followingFetches++;
+      this.followingAnswered = fetch;
     } catch {
       return;
     }
@@ -1000,7 +1003,7 @@ export class NewsView {
       } else if (s.at === 'timeline') {
         // A follow made on another device sends no event, so what is
         // followed is asked again whenever this is read afresh.
-        const fetches = this.followingFetches;
+        const asked = this.followingAsked;
         // A refresh rereads as deep as the reader had paged.
         const oldest = this.timeline.threads.at(-1)?.article.id;
         const [tree, first] = await Promise.all([
@@ -1009,7 +1012,7 @@ export class NewsView {
           this.refreshFollowing(),
         ]);
         if (gen !== this.generation) return;
-        if (this.followingFetches > fetches) this.timelineFollowsKnown = true;
+        if (this.followingAnswered > asked) this.timelineFollowsKnown = true;
         this.hooks.articles().nodes(tree.nodes);
         this.timelineNodes = indexTree(tree.nodes);
         if (first) {

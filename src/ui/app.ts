@@ -155,8 +155,9 @@ import { KeeperSlot, PortableFriends } from '../friendships';
 import { mayAdminister } from '../accounts';
 import { NewsView } from './news';
 import { QuoteFetcher, resolveQuote, startReply, type Replying } from '../replies';
-import { historyReactions, LIVE_LINES, reactableAs, ReactionDesk, summaryOf, whyNotAdd } from '../reactions';
-import { pickReaction, redrawReactions } from './reactions';
+import { customOf, historyReactions, LIVE_LINES, reactableAs, ReactionDesk, summaryOf, whyNotAdd } from '../reactions';
+import { pickEmoji, pickReaction, redrawReactions } from './reactions';
+import { emojiImages, serverEmoji } from './server-emoji';
 import { appendLine, isAtBottom, keepingPlace, lineOf, renderTranscript, rowOf, scrollToEnd, signedName, spoken, type TranscriptOptions } from './transcript';
 import { wrapSelection } from './markdown';
 import { contentWords, disablePush, enablePush, pushEnabled, pushSupported, refreshPush } from '../push/client';
@@ -492,6 +493,13 @@ export class App {
     'button',
     { class: 'ghost attach', title: 'Attach an image', ariaLabel: 'Attach an image', hidden: true },
     '📎',
+  );
+  /** Puts one of the server's own emoji in the message, where the
+   *  session has them. */
+  private emojiBtn = h(
+    'button',
+    { class: 'ghost emoji-insert', title: "Insert one of this server's emoji", ariaLabel: "Insert one of this server's emoji", ariaHasPopup: 'dialog', hidden: true },
+    '\u263A',
   );
   /** The file picker, kept out of the layout: the paperclip clicks it. */
   private filePicker = h('input', { type: 'file', hidden: true });
@@ -841,6 +849,11 @@ export class App {
         if (conn === this.conn) this.store.heldBy(holderOf(way.url, ok.self, this.account));
         this.store.forgetPmUids();
         this.store.restartMail();
+        if (conn === this.conn) {
+          if (serverEmoji.held && serverEmoji.held.revision !== ok.emoji?.revision) serverEmoji.refresh();
+          // A login after a failed resume may be granted them no more.
+          if (!serverEmoji.held) this.emojiChanged();
+        }
         // A new session: receipts owed under the last are not its to send.
         this.pendingReads.clear();
         this.reactDenied.clear();
@@ -923,6 +936,8 @@ export class App {
         // A page that resumed a saved session logged in nowhere.
         if (conn === this.conn && conn instanceof Connection && conn.self) this.store.heldBy(holderOf(way.url, conn.self, this.account));
         this.resumedAt = Date.now();
+        // A page that resumed a saved session holds no catalog yet.
+        if (conn === this.conn && serverEmoji.held?.revision === null) serverEmoji.refresh();
         this.say(
           replay > 0
             ? `Reconnected — ${replay} ${replay === 1 ? 'message' : 'messages'} replayed.`
@@ -973,6 +988,9 @@ export class App {
       // the conversation on screen first.
       onCaughtUp: () => {
         if (conn !== this.conn) return;
+        // A resync may have swallowed an `emoji_changed`; after a login
+        // this asks again from what the login's own refresh read.
+        serverEmoji.refresh();
         const convs = [this.store.conversation(LOBBY)!, ...this.store.rooms().filter((r) => r.joined)];
         const first = (cs: Conversation[]) => [...cs.filter((c) => c.id === this.store.active), ...cs.filter((c) => c.id !== this.store.active)];
         void this.desk?.refetchHeld(first(convs));
@@ -995,6 +1013,7 @@ export class App {
         // seen, and nothing could refetch them anyway.
         this.images.clear();
         avatars.clear();
+        emojiImages.attach(null);
         this.clearAttachment();
         // The news reader goes with the session it read through, and the
         // chat pane comes back so the reason just said is on screen.
@@ -1015,6 +1034,7 @@ export class App {
         // it opens a picker whose upload can only fail with "not logged
         // in" — inert chrome saying something this client cannot do.
         this.attachBtn.hidden = true;
+        this.emojiBtn.hidden = true;
         this.notifyBtn.hidden = true;
         if (this.pingTimer !== null) {
           clearInterval(this.pingTimer);
@@ -1063,6 +1083,7 @@ export class App {
               messaging: true,
               replies: true,
               reactions: true,
+              emoji: true,
               sessionStore: this.sessionStore,
               ...(signs ? { signs, sealed: true } : {}),
               ...(d.identity ? { friendships: true } : {}),
@@ -1095,6 +1116,7 @@ export class App {
     this.cancelReply();
     this.images.attach(conn);
     avatars.attach(conn);
+    serverEmoji.attach(conn);
     // Voice and video ride the ng wire; a classic server has neither here.
     this.media = !(conn instanceof Connection) ? null : new VoiceSession(conn, {
       onLog: (text, bad) => this.say(bad ? `Media error: ${text}` : text),
@@ -1118,6 +1140,7 @@ export class App {
         this.media = null;
         this.images.attach(null);
         avatars.attach(null);
+        serverEmoji.attach(null);
       }
       throw new Error(
         e instanceof WireFailure ? errorText(e.wire) : e instanceof Error ? e.message : String(e),
@@ -1133,6 +1156,7 @@ export class App {
     // capability, or it does not and inert chrome would be a promise
     // this client cannot keep.
     this.attachBtn.hidden = conn.media === null;
+    this.emojiBtn.hidden = serverEmoji.held === null;
     this.filePicker.accept = conn.media?.types.join(',') ?? '';
     // The reports pane is a moderator's. The count the login reply gave
     // is where the badge starts; a listing corrects it — which matters
@@ -1252,6 +1276,9 @@ export class App {
   }
 
   private bindEvents(conn: Session): void {
+    serverEmoji.changed = () => {
+      if (conn === this.conn) this.emojiChanged();
+    };
     conn.on('user_joined', (d) => {
       this.store.put(d.user);
       this.certs.delete(d.user.uid);
@@ -1318,6 +1345,7 @@ export class App {
           ...(signature ? { signature } : {}),
           ...(d.signed !== undefined ? { signed: d.signed } : {}),
           ...(d.re ? { re: d.re } : {}),
+          ...(d.emoji ? { emoji: d.emoji } : {}),
         });
         if (d.id !== undefined && this.redacted.has(d.id)) this.blank([d.id], conv);
       });
@@ -1351,6 +1379,9 @@ export class App {
 
     conn.on('reactions_changed', (d) => {
       if (conn === this.conn) void this.desk?.changed(d.changes);
+    });
+    conn.on('emoji_changed', () => {
+      if (conn === this.conn) serverEmoji.refresh();
     });
 
     conn.on('report', (d) => this.moderation.onReport(d));
@@ -1422,6 +1453,7 @@ export class App {
           ...(sealed ? { sealed: true } : this.clearMark()),
           ...(opened.hidden ? { hidden: true } : {}),
           ...(d.re ? { re: d.re } : {}),
+          ...(d.emoji ? { emoji: d.emoji } : {}),
           ...(d.im ? { guid: d.guid } : {}),
           reactions: summaryOf(d.reactions, d.reactions_mine),
         });
@@ -1658,6 +1690,7 @@ export class App {
           ...(ok.im ? { im: true, guid: ok.guid ?? under } : under !== undefined ? { guid: under } : {}),
           ...(ok.ref !== undefined ? { ref: ok.ref } : {}),
           ...(re && !sent ? { re } : {}),
+          ...(sealed ? {} : serverEmoji.refsFor(part)),
         });
         sent += part.length;
         queued ||= ok.queued;
@@ -1800,8 +1833,40 @@ export class App {
     const held = new Set(line.reactions?.filter((r) => r.mine).map((r) => r.emoji));
     this.reactNotes.delete(line);
     // What the caps leave for a key not on the line yet.
-    const emoji = await pickReaction({ held, note: whyNotAdd(line.reactions, '', caps, reactableAs(line, conv, caps.targets, this.store.me())?.kind) });
+    const emoji = await pickReaction({
+      held,
+      note: whyNotAdd(line.reactions, '', caps, reactableAs(line, conv, caps.targets, this.store.me())?.kind),
+      custom: serverEmoji.held?.entries(),
+    });
     if (emoji) await this.desk?.toggle(line, conv, emoji, !held.has(emoji));
+  }
+
+  /** One of the server's emoji, put in the message where the caret is
+   *  as its `:name:`, a word of its own; the send names it by the
+   *  catalog. */
+  private async insertEmoji(): Promise<void> {
+    const catalog = serverEmoji.held;
+    if (!catalog) return;
+    const key = await pickEmoji({ title: "This server's emoji", held: new Set(), custom: catalog.entries(), unicode: false });
+    const id = key === null ? undefined : customOf(key);
+    const e = id === undefined ? undefined : catalog.live(id);
+    const c = this.composer;
+    c.focus();
+    if (!e) return;
+    const [start, end] = [c.selectionStart, c.selectionEnd];
+    const before = start > 0 && !/\s/.test(c.value[start - 1]!) ? ' ' : '';
+    const after = end < c.value.length && /\s/.test(c.value[end]!) ? '' : ' ';
+    c.setRangeText(`${before}:${e.name}:${after}`, start, end, 'end');
+    this.autoGrow();
+    this.noteTyping();
+  }
+
+  /** What the server's emoji catalog holds changed: draw anew what
+   *  names them. */
+  private emojiChanged(): void {
+    keepingPlace(this.transcript, () => this.renderTranscript());
+    this.friends.emojiChanged();
+    this.emojiBtn.hidden = serverEmoji.held === null;
   }
 
   /** Say something under `line`, and to a screen reader, until a later
@@ -1863,7 +1928,7 @@ export class App {
       await (style === 'action' ? conn.request('chat', { text, style }) : conn.chat({ text, media }));
       return;
     }
-    const params = { text, style, media, ...(room ? { room } : {}) };
+    const params = { text, style, media, ...(room ? { room } : {}), ...serverEmoji.refsFor(text) };
     // Only an unsigned line says what it answers: beside `signed`, `re`
     // is refused.
     const unsigned = { ...params, ...(conn.hasCap(CAP_CHAT_GUID) ? { guid: newGuid() } : {}), ...(re ? { re } : {}) };
@@ -1913,7 +1978,10 @@ export class App {
     // Once one piece goes unsigned, so do the rest, rather than ask again.
     let sign = true;
     for (const [i, text] of parts.entries()) {
-      const part = i === 0 ? { ...params, text } : { ...params, text, guid: newGuid(), media: undefined, re: undefined };
+      const part = {
+        ...(i === 0 ? { ...params, text } : { ...params, text, guid: newGuid(), media: undefined, re: undefined }),
+        emoji: serverEmoji.refsFor(text).emoji,
+      };
       const clear = await this.sendClear(conn, conv, part, sign);
       sign = clear.signature !== undefined;
       sent({ ...clear, text, guid: part.guid, ...this.clearMark() });
@@ -3004,6 +3072,7 @@ export class App {
         ...(signature ? { signature } : {}),
         ...(d.signed !== undefined ? { signed: d.signed } : {}),
         ...(d.re ? { re: d.re } : {}),
+        ...(d.emoji ? { emoji: d.emoji } : {}),
       });
       ack();
       const seen = sighting(signature, this.verifiedUnder(conv), d.from);
@@ -3316,6 +3385,7 @@ export class App {
           ...(read?.signature ? { signature: read.signature } : {}),
           ...(line.signed !== undefined ? { signed: line.signed } : {}),
           ...(line.re ? { re: line.re } : {}),
+          ...(line.emoji ? { emoji: line.emoji } : {}),
           ...(line.reactions ? { reactions: historyReactions(line) } : {}),
         },
       ];
@@ -3518,6 +3588,7 @@ export class App {
           ...(signature ? { signature } : {}),
           ...(m.signed !== undefined ? { signed: m.signed } : {}),
           ...(m.re ? { re: m.re } : {}),
+          ...(m.emoji ? { emoji: m.emoji } : {}),
           ...(m.im ? { guid: m.guid } : {}),
           reactions: summaryOf(m.reactions, m.reactions_mine),
           ...this.clearMark(),
@@ -4039,6 +4110,7 @@ export class App {
     // line with the same words.
     const cannot = conv ? this.whyNoPost(conv) : null;
     this.attachBtn.disabled = cannot !== null;
+    this.emojiBtn.disabled = cannot !== null;
     this.composer.placeholder =
       cannot ?? (pm ? `Message ${conv.title}…` : conv?.kind === 'room' ? `Message ${conv.title}…` : 'Say something to everyone…');
     // `transport` is on every roster row whether or not the server runs
@@ -4294,6 +4366,7 @@ export class App {
     // being told it exists — a screenshot in the clipboard and Ctrl-V —
     // and it costs six lines.
     this.attachBtn.onclick = () => this.filePicker.click();
+    this.emojiBtn.onclick = () => void this.insertEmoji();
     this.deniableBtn.onclick = () => {
       const conv = this.store.conversation(this.store.active);
       if (conv?.kind !== 'pm') return;
@@ -4398,7 +4471,7 @@ export class App {
       // already sent to the server that the next line will carry.
       this.attachChip,
       this.replyChip,
-      h('div', { class: 'composer' }, this.attachBtn, this.composer, this.compareBtn, this.deniableBtn, this.composerHint, this.composerWhy, this.filePicker),
+      h('div', { class: 'composer' }, this.attachBtn, this.emojiBtn, this.composer, this.compareBtn, this.deniableBtn, this.composerHint, this.composerWhy, this.filePicker),
     );
 
     this.shell.append(

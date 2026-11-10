@@ -26,6 +26,7 @@ import { icon } from './icons';
 import { chatNodes } from './markdown';
 import { mediaEl, type MediaCache } from './media';
 import { reactionsEl } from './reactions';
+import { withEmoji } from './server-emoji';
 
 /** Chat-gutter icons stay at 1× — at 2× they compete with the text for
  *  attention, and the roster is where you go to look at people. */
@@ -245,7 +246,7 @@ function chatLine(
       sameSpeaker ? null : who.compared,
       sameSpeaker ? null : who.aside,
       quoteOf(line, opts),
-      ...body.nodes,
+      ...(line.hidden ? body.nodes : withEmoji(body.nodes, line.emoji)),
       line.receipt ? h('span', { class: 'tag receipt', title: 'As their client told it' }, line.receipt) : null,
       // An image is a block under the text, not a word in it: a line
       // may carry one with nothing said at all, which is a picture
@@ -468,8 +469,8 @@ function eventLine(line: Line, prev: Line | undefined, media: MediaCache, opts: 
       ...(line.article !== undefined
         ? [h('a', { href: `#news-${line.article}`, class: 'news-notice', dataset: { article: String(line.article) } }, text)]
         : body
-          ? [prefix, ...body.nodes]
-          : linkify(text)),
+          ? [prefix, ...withEmoji(body.nodes, line.emoji)]
+          : withEmoji(linkify(text), line.emoji)),
       // The same renderer a chat line gets. A redacted history row is
       // the *only* line that ever carries `removed`, so drawing it any
       // other way would leave that state with no renderer at all — and

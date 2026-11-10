@@ -105,6 +105,7 @@ export default defineConfig({
       // `PUT /avatar` and `GET /avatars/{id}`, and nothing else that
       // happens to start with the word.
       '^/avatars?(/|$)': 'http://127.0.0.1:5700',
+      '^/emoji/': 'http://127.0.0.1:5700',
       '/files': 'http://127.0.0.1:5700',
       '/news': 'http://127.0.0.1:5700',
       '/.well-known': 'http://127.0.0.1:5700',

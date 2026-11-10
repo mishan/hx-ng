@@ -94,6 +94,12 @@ export class MediaCache {
     this.generation++;
   }
 
+  /** Ask the server again for a handle it would not give: one a
+   *  server can give again, as the same picture added anew. */
+  retry(id: string): void {
+    this.missing.delete(id);
+  }
+
   wasRevoked(id: string): boolean {
     return this.revoked.has(id);
   }

@@ -5,10 +5,25 @@
  * The picker is a native `<dialog>`, as the icon picker is, so Escape and
  * giving the focus back to its opener are the platform's. */
 
+import type { LiveEmoji } from '@hotline-ng/client';
+
 import { emojiName, searchEmoji } from '../emoji';
-import { chipLabel, chipWho } from '../reactions';
-import type { Line } from '../state';
+import { chipLabel, chipWho, customKey, customOf } from '../reactions';
+import type { Line, Reaction } from '../state';
 import { h } from './dom';
+import { emojiImage, emojiMatches, serverEmoji } from './server-emoji';
+
+/** A key as a chip draws it and is read out: a server emoji by the
+ *  name the catalog gives it, its picture while it is live, and a
+ *  placeholder where this client knows nothing of it. */
+function keyFace(r: Reaction): { face: Node | string; name: string } {
+  const id = customOf(r.emoji);
+  if (id === undefined) return { face: r.emoji, name: emojiName(r.emoji) };
+  const e = serverEmoji.catalog?.get(id);
+  if (!e) return { face: '\u25A1', name: `server emoji ${id}` };
+  if ('removed' in e) return { face: `:${e.name}:`, name: `:${e.name}:` };
+  return { face: emojiImage(e, e.name), name: `:${e.name}:` };
+}
 
 /** The chips under `line`, with a refusal said beside them, or `null`
  *  where there is neither. */
@@ -16,13 +31,18 @@ export function reactionsEl(line: Line, reactable: boolean, note: string | undef
   const keys = line.reactions ?? [];
   if (!keys.length && !note) return null;
   const chips = keys.map((r) => {
-    const label = chipLabel(r, emojiName(r.emoji));
-    const kids = [h('span', { class: 'reaction-emoji', ariaHidden: 'true' }, r.emoji), h('span', { class: 'reaction-count', ariaHidden: 'true' }, String(r.count))];
+    const { face, name } = keyFace(r);
+    // A server emoji is a key only from a session granted them, and one
+    // not live may be taken back but never added.
+    const id = customOf(r.emoji);
+    const toggles = reactable && (id === undefined || (serverEmoji.held !== null && (r.mine || !!serverEmoji.held.live(id))));
+    const label = chipLabel(r, name);
+    const kids = [h('span', { class: 'reaction-emoji', ariaHidden: 'true' }, face), h('span', { class: 'reaction-count', ariaHidden: 'true' }, String(r.count))];
     const cls = `reaction${r.mine ? ' mine' : ''}`;
     // Who it stands for shows on hover and on focus alike, which a
     // `title` would not.
     const who = chipWho(r);
-    return reactable
+    return toggles
       ? h('button', { type: 'button', class: cls, ariaLabel: label, ariaPressed: String(r.mine), dataset: { act: 'reaction', emoji: r.emoji, who } }, ...kids)
       : h('span', { class: cls, role: 'img', ariaLabel: label, dataset: { who } }, ...kids);
   });
@@ -50,34 +70,50 @@ export function redrawReactions(row: HTMLElement, line: Line, reactable: boolean
   (chips.find((b) => b.dataset.emoji === focused) ?? chips[0] ?? row.querySelector<HTMLElement>('button[data-act="react"]'))?.focus();
 }
 
+/** Ask which emoji to react with: `pickEmoji`, with the server's own
+ *  among them where this session may react with one. */
+export function pickReaction(o: { held: ReadonlySet<string>; note?: string | null; custom?: readonly LiveEmoji[] }): Promise<string | null> {
+  return pickEmoji({ ...o, title: 'Add a reaction', unicode: true });
+}
+
 /**
- * Ask which emoji to react with: the frequent ones first, then the rest,
- * narrowed by what is typed. Enter in the search box takes the first
- * that matches; the arrows move through the grid. `held` are this
- * reader's on the line, marked as such, and `note` says up front what
- * the server's caps leave.
+ * Ask which emoji: the server's own first, by name, then the frequent
+ * ones, then the rest, narrowed by what is typed. Enter in the search
+ * box takes the first that matches; the arrows move through the grid.
+ * `held` are this reader's on the line, marked as such, and `note` says
+ * up front what the server's caps leave. It answers the key as a line
+ * holds it, a server emoji's by `customKey`.
  */
-export function pickReaction(o: { held: ReadonlySet<string>; note?: string | null }): Promise<string | null> {
+export function pickEmoji(o: {
+  title: string;
+  held: ReadonlySet<string>;
+  note?: string | null;
+  custom?: readonly LiveEmoji[];
+  unicode: boolean;
+}): Promise<string | null> {
   return new Promise((resolve) => {
     const grid = h('div', { class: 'emoji-grid', role: 'group', ariaLabel: 'Emoji' });
-    const status = h('p', { class: 'muted emoji-status', role: 'status' }, o.note ?? '');
+    const empty = o.unicode || o.custom?.length ? o.note ?? '' : 'This server has no emoji of its own yet.';
+    const status = h('p', { class: 'muted emoji-status', role: 'status' }, empty);
     const search = h('input', { type: 'search', placeholder: 'Search emoji…', ariaLabel: 'Search emoji', spellcheck: false });
     let shown: HTMLButtonElement[] = [];
 
     const rove = (to: HTMLButtonElement | undefined): void => {
       for (const b of shown) b.tabIndex = b === to ? 0 : -1;
     };
+    const cell = (key: string, name: string, face: Node | string): HTMLButtonElement => {
+      const mine = o.held.has(key);
+      const b = h('button', { type: 'button', class: `emoji-cell${mine ? ' on' : ''}`, title: name, ariaLabel: mine ? `${name}, yours` : name, dataset: { key } }, face);
+      b.onclick = () => done(key);
+      return b;
+    };
     const draw = (): void => {
-      shown = searchEmoji(search.value).map((emoji) => {
-        const name = emojiName(emoji);
-        const mine = o.held.has(emoji);
-        const b = h('button', { type: 'button', class: `emoji-cell${mine ? ' on' : ''}`, title: name, ariaLabel: mine ? `${name}, yours` : name }, emoji);
-        b.onclick = () => done(emoji);
-        return b;
-      });
+      const custom = (o.custom ?? []).filter((e) => emojiMatches(e, search.value)).map((e) => cell(customKey(e.id), `:${e.name}:`, emojiImage(e, e.name)));
+      const unicode = o.unicode ? searchEmoji(search.value).map((emoji) => cell(emoji, emojiName(emoji), emoji)) : [];
+      shown = [...custom, ...unicode];
       grid.replaceChildren(...shown);
       rove(shown[0]);
-      status.textContent = shown.length ? (o.note ?? '') : 'No emoji match that.';
+      status.textContent = shown.length ? empty : search.value ? 'No emoji match that.' : empty;
     };
     search.oninput = draw;
     search.onkeydown = (e) => {
@@ -88,7 +124,7 @@ export function pickReaction(o: { held: ReadonlySet<string>; note?: string | nul
         done(null);
       } else if (e.key === 'Enter' && shown[0]) {
         e.preventDefault();
-        done(shown[0].textContent ?? '');
+        done(shown[0].dataset.key!);
       } else if (e.key === 'ArrowDown' && shown[0]) {
         e.preventDefault();
         shown[0].focus();
@@ -115,8 +151,8 @@ export function pickReaction(o: { held: ReadonlySet<string>; note?: string | nul
     cancel.onclick = () => done(null);
     const dialog = h(
       'dialog',
-      { class: 'picker emoji-picker', ariaLabel: 'Add a reaction' },
-      h('header', {}, h('h2', {}, 'Add a reaction'), h('div', { class: 'spacer' }), search),
+      { class: 'picker emoji-picker', ariaLabel: o.title },
+      h('header', {}, h('h2', {}, o.title), h('div', { class: 'spacer' }), search),
       status,
       grid,
       h('footer', {}, cancel),

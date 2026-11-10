@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { Connection, WireFailure, type HistoryLine, type HistoryOk, type ReactionChange } from '@hotline-ng/client';
+import { Connection, WireFailure, type HistoryLine, type HistoryOk, type ReactionChange, type ReactionKey } from '@hotline-ng/client';
 import { FakeServer } from '../packages/hotline-ng/src/testing';
 
 import {
@@ -8,6 +8,8 @@ import {
   changesByConv,
   chipLabel,
   chipWho,
+  customKey,
+  customOf,
   historyReactions,
   LIVE_LINES,
   reactableAs,
@@ -15,6 +17,7 @@ import {
   refetchLines,
   summaryOf,
   whyNotAdd,
+  wireKey,
 } from '../src/reactions';
 import { holderOf, LOBBY, mergeMail, mergePage, publicId, Sequencer, Store, type ConvId, type Line, type Reaction } from '../src/state';
 
@@ -134,6 +137,28 @@ describe('a line\'s reactions', () => {
     expect(afterOwn([{ emoji: UP, count: 3, mine: false }], UP, true, 4)).toEqual([{ emoji: UP, count: 4, mine: true }]);
   });
 
+  it('take one of the server\'s own emoji as a key by its id, which goes back as it came, and leave out a kind not known', () => {
+    const keys = [
+      { key: { custom: 7 }, count: 2 },
+      { key: { emoji: UP }, count: 1 },
+      { key: { sticker: 'x' }, count: 3 } as never,
+      { key: { custom: 'party' }, count: 1 } as never,
+    ];
+    expect(summaryOf(keys, [0, 2])).toEqual([
+      { emoji: customKey(7), count: 2, mine: true },
+      { emoji: UP, count: 1, mine: false },
+    ]);
+    expect([wireKey(customKey(7)), wireKey(UP), customOf(customKey(7)), customOf(UP), customOf('custom 7x')]).toEqual([
+      { custom: 7 },
+      { emoji: UP },
+      7,
+      undefined,
+      undefined,
+    ]);
+    const lobby = changesByConv([{ target: { line: 3 }, action: 'summary', keys: [{ key: { custom: 7 }, count: 1 }], mine: [0] }]);
+    expect(lobby.get(LOBBY)).toEqual([[3, [{ emoji: customKey(7), count: 1, mine: true }]]]);
+  });
+
   it('hold this account to the server\'s caps on new keys alone', () => {
     const caps = { max_keys: 2, max_per_user: 1 };
     const full: Reaction[] = [
@@ -211,14 +236,25 @@ describe('a private message\'s reactions', () => {
     } as never;
     const desk = new ReactionDesk(conn, { store, seq: new Sequencer(), changed: () => {}, refused: () => expect.unreachable() });
     const im = { im: { login: 'bob', guid: GUID } };
-    const told = (action: 'add' | 'remove', emoji: string): ReactionChange => ({ target: im, action, key: { emoji }, from: { login: 'bob' } });
+    const told = (action: 'add' | 'remove', key: string | ReactionKey): ReactionChange => ({
+      target: im,
+      action,
+      key: typeof key === 'string' ? { emoji: key } : key,
+      from: { login: 'bob' },
+    });
 
     // Told before the message is: kept for it. A server's own emoji is
-    // not drawn.
-    const custom = { ...told('add', UP), key: { custom: 'party' } } as never;
-    await desk.changed([told('add', UP), told('add', HEART), told('remove', HEART), custom]);
+    // tallied as any key, and one of a kind this client does not know
+    // is not.
+    const unknown = told('add', { sticker: 'party' } as never);
+    await desk.changed([told('add', UP), told('add', HEART), told('remove', HEART), told('add', { custom: 7 }), unknown]);
     store.add(bob.id, bobsIm());
     const line = bob.lines[0]!;
+    expect(line.reactions).toEqual([
+      { emoji: UP, count: 1, mine: false },
+      { emoji: customKey(7), count: 1, mine: false },
+    ]);
+    await desk.changed([told('remove', { custom: 7 })]);
     expect(line.reactions).toEqual([{ emoji: UP, count: 1, mine: false }]);
 
     // Past the caps a line would be held to: nothing keeps an instant message's.
@@ -587,5 +623,40 @@ describe('the reaction desk, against a server', () => {
     expect(asked().slice(before + 2).map((r) => (r.params as { room?: number }).room ?? 0)).toEqual([room, 0, 0, 0, 0]);
     await a.seq.run(() => {});
     expect(held(a.store, roomLine!, publicId(room))).toEqual([{ emoji: UP, count: 1, mine: false }]);
+  });
+});
+
+describe('a server emoji reacted with, against a server', () => {
+  const ACCOUNTS = [
+    { login: 'alice', password: 'pw', nick: 'Alice' },
+    { login: 'bob', password: 'pw', nick: 'Bob' },
+  ];
+
+  it('goes by its id, reaches another reader, is refused once removed and is taken back all the same', async () => {
+    const server = new FakeServer({ accounts: ACCOUNTS });
+    const party = server.addEmoji('party');
+    const alice = new Connection(server.credentials({ login: 'alice', password: 'pw', reactions: true, replies: true, emoji: true }));
+    await alice.start();
+    const bob = new Connection(server.credentials({ login: 'bob', password: 'pw', reactions: true, replies: true }));
+    await bob.start();
+    const { id } = await bob.chat({ text: 'lunch?' });
+    const store = new Store();
+    const refused: string[] = [];
+    const desk = new ReactionDesk(alice, { store, seq: new Sequencer(), changed: () => {}, refused: (_l, _c, text) => void refused.push(text) });
+    store.mergeHistory((await alice.history()).lines.map(asLine), false, 'older');
+    const line = store.conversation(LOBBY)!.lines.find((l) => l.id === id)!;
+    const lobby = store.conversation(LOBBY)!;
+
+    await desk.toggle(line, lobby, customKey(party), true);
+    expect(line.reactions).toEqual([{ emoji: customKey(party), count: 1, mine: true }]);
+    expect(server.requests.filter((r) => r.req === 'react').at(-1)!.params).toMatchObject({ key: { custom: party } });
+    expect((await bob.history({ ids: [id!] })).lines[0]!.reactions).toEqual([{ key: { custom: party }, count: 1 }]);
+
+    server.removeEmoji(party);
+    await desk.toggle(line, lobby, customKey(party), false);
+    expect([line.reactions, refused]).toEqual([undefined, []]);
+    await desk.toggle(line, lobby, customKey(party), true);
+    expect(refused).toEqual(['That emoji is not on this server anymore.']);
+    expect(line.reactions).toBeUndefined();
   });
 });

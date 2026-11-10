@@ -3,7 +3,8 @@
  * tests of code built on `Connection`.
  *
  * It speaks the wire of hxd-ng's `docs/hotline-ng.md`, with the rooms of
- * its `docs/chat-rooms.md` §7, in this package's own types, so a fake a
+ * its `docs/chat-rooms.md` §7 and the emoji of its `docs/server-emoji.md`
+ * §8, in this package's own types, so a fake a
  * consumer builds on it moves when the protocol the library speaks does.
  * It models what those documents promise rather than how any one server
  * keeps them: there are no privileges, rate limits or grace timer, and
@@ -17,10 +18,15 @@
  */
 
 import type { Credentials, SocketLike } from './connection.js';
+import { EMOJI_REFS_MAX } from './emoji.js';
 import { bytesToBase64url } from './identity.js';
 import type {
   ChatOk,
   ChatParams,
+  EmojiConfig,
+  EmojiEntry,
+  EmojiListOk,
+  EmojiRef,
   EventFrame,
   EventName,
   Events,
@@ -107,9 +113,11 @@ export interface FakeServerOptions {
   caps?: string[];
   /** The `reactions` block's caps; hxd-ng's defaults by default. */
   reactionCaps?: { max_keys: number; max_per_user: number };
+  /** How many entries a page of `emoji_list` holds; hxd-ng's by default. */
+  emojiPage?: number;
 }
 
-const CAPS = ['history', 'inbox', 'rooms', 'chat_guid', 'replies', 'reactions', 'identity'];
+const CAPS = ['history', 'inbox', 'rooms', 'chat_guid', 'replies', 'reactions', 'emoji', 'identity'];
 const GUID = /^(?:[0-9a-f]{32}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i;
 const MAX_JOINED = 32;
 /** hxd-ng's bounds on `history`'s `ids` (§7.3): how many one names, and
@@ -142,6 +150,8 @@ interface Session {
   replies: boolean;
   /** Was it granted `reactions` (§7.3), so reacts and is sent them? */
   reactions: boolean;
+  /** Was it granted `emoji`, so sends and is sent references? */
+  emoji: boolean;
   ended: boolean;
 }
 
@@ -307,6 +317,10 @@ export class FakeServer {
   /** The last cursor each mailbox issued: each numbers its own mail. */
   private readonly cursors = new Map<string, number>();
   private serial = 0;
+  /** The emoji catalog, by id, and the revision its last change spent. */
+  private readonly catalog = new Map<number, EmojiEntry>();
+  private emojiRevision = 0;
+  private readonly emojiPage: number;
 
   constructor(opts: FakeServerOptions = {}) {
     this.name = opts.name ?? 'Fake';
@@ -316,6 +330,7 @@ export class FakeServer {
     this.grace = opts.grace ?? 300;
     this.caps = new Set(opts.caps ?? CAPS);
     this.reactionCaps = opts.reactionCaps ?? { max_keys: 20, max_per_user: 5 };
+    this.emojiPage = opts.emojiPage ?? 200;
     for (const r of opts.rooms ?? []) this.addRoom(r);
   }
 
@@ -451,6 +466,34 @@ export class FakeServer {
       }
     }
     this.unsent.clear();
+  }
+
+  /** Add an emoji to the catalog under `name`, answering its id. Each
+   *  change to the catalog is served at once, and told to every session
+   *  granted `emoji` as `emoji_changed`, as if each were followed by the
+   *  reload that applies it on hxd-ng. */
+  addEmoji(name: string, opts: { animated?: boolean; width?: number; height?: number } = {}): number {
+    const id = Math.max(0, ...this.catalog.keys()) + 1;
+    this.editEmoji({
+      id,
+      revision: 0,
+      name,
+      hash: id.toString(16).padStart(64, '0'),
+      width: opts.width ?? 32,
+      height: opts.height ?? 32,
+      ...(opts.animated ? { animated: true as const } : {}),
+    });
+    return id;
+  }
+
+  renameEmoji(id: number, name: string): void {
+    this.editEmoji({ ...this.catalog.get(id)!, name });
+  }
+
+  /** Remove one, keeping its id and last name. */
+  removeEmoji(id: number): void {
+    const { name } = this.catalog.get(id)!;
+    this.editEmoji({ id, revision: 0, name, removed: true });
   }
 
   /** A line of public chat from `uid`, which must be in `room` if one
@@ -594,6 +637,8 @@ export class FakeServer {
         return this.history(s, p as HistoryParams, id);
       case 'react':
         return this.react(s, p);
+      case 'emoji_list':
+        return this.emojiList(s, p);
       case 'msg':
         return this.sendMsg(s, p as MsgParams);
       case 'inbox':
@@ -640,6 +685,7 @@ export class FakeServer {
     s.detachable = !!proved || !!account?.password;
     s.replies = p.replies === true && this.targets().length > 0;
     s.reactions = p.reactions === true && this.reacting();
+    s.emoji = p.emoji === true && this.caps.has('emoji');
     s.socket = sock;
     sock.session = s;
     this.join(s);
@@ -651,10 +697,11 @@ export class FakeServer {
         server: { name: this.name, subject: this.subject },
         users: this.roster(),
         detach: s.detachable ? { grace: this.grace } : null,
-        caps: [...this.caps].filter((c) => (c !== 'replies' || s.replies) && (c !== 'reactions' || s.reactions)),
+        caps: [...this.caps].filter((c) => (c !== 'replies' || s.replies) && (c !== 'reactions' || s.reactions) && (c !== 'emoji' || s.emoji)),
         seq: 0,
         ...(s.replies ? { replies: { targets: this.targets() } } : {}),
         ...(s.reactions ? { reactions: { targets: ['line' as const], ...this.reactionCaps } } : {}),
+        ...(s.emoji ? { emoji: this.emojiBlock() } : {}),
         ...(this.caps.has('history') ? { history: { max_lines: 10_000, max_days: 30 } } : {}),
         ...(this.caps.has('inbox') ? { inbox: this.counts(s) } : {}),
         ...(this.caps.has('rooms')
@@ -718,6 +765,7 @@ export class FakeServer {
     const guid = this.caps.has('chat_guid') ? this.guid(p.guid) : undefined;
     // Its form before the room, and its room after, as hxd-ng checks them.
     const re = this.replyOf(s, p.re, p.signed, ['line', 'signed']);
+    const emoji = this.refsOf(s, p.emoji);
     if (room) this.member(s, room);
     this.sameRoom(re, room);
     // A guid is its account's where one person is behind it, else the
@@ -725,17 +773,25 @@ export class FakeServer {
     const key = guid && `${this.durable(s) ?? `s:${s.id}`}|${room}|${guid}`;
     const prior = key ? this.guids.get(key) : undefined;
     if (prior !== undefined) return this.lineId(prior);
-    const id = this.relay(s, room, p.text, p.style ?? 'normal', guid && p.guid, re);
+    const id = this.relay(s, room, p.text, p.style ?? 'normal', guid && p.guid, re, emoji);
     if (key) this.guids.set(key, id);
     return this.lineId(id);
   }
 
-  private relay(s: Session, room: number, text: string, style: 'normal' | 'action', guid?: string, re?: ReplyTarget): number {
+  private relay(
+    s: Session,
+    room: number,
+    text: string,
+    style: 'normal' | 'action',
+    guid?: string,
+    re?: ReplyTarget,
+    emoji?: EmojiRef[],
+  ): number {
     const id = ++this.nextLine;
     const at = now();
     // Without `history` nothing is kept, and a line has no id.
     if (this.caps.has('history')) {
-      this.kept.get(room)!.push({ id, at, from: { nick: s.user.nick, icon: s.user.icon }, text, style, ...(re ? { re } : {}) });
+      this.kept.get(room)!.push({ id, at, from: { nick: s.user.nick, icon: s.user.icon }, text, style, ...(re ? { re } : {}), ...(emoji ? { emoji } : {}) });
     }
     const data: Events['chat'] = {
       from: { uid: s.uid, nick: s.user.nick },
@@ -747,7 +803,7 @@ export class FakeServer {
     };
     const hearers = room ? [...this.room(room).members].map((uid) => this.live(uid)) : this.everyone();
     for (const h of hearers) {
-      this.emit(h, 'chat', { ...data, ...(h === s && guid ? { guid } : {}), ...(h.replies && re ? { re } : {}) });
+      this.emit(h, 'chat', { ...data, ...(h === s && guid ? { guid } : {}), ...(h.replies && re ? { re } : {}), ...this.refsFor(h, emoji) });
     }
     return id;
   }
@@ -794,8 +850,8 @@ export class FakeServer {
   /** A kept line as `s` is sent it: its `re` only if it said
    *  `replies`, and its reactions only if it said `reactions`. */
   private lineFor(s: Session, line: HistoryLine): HistoryLine {
-    const { re, ...rest } = line;
-    const shown = s.replies && re ? { ...rest, re } : rest;
+    const { re, emoji, ...rest } = line;
+    const shown = { ...rest, ...(s.replies && re ? { re } : {}), ...this.refsFor(s, emoji) };
     if (!s.reactions) return shown;
     const { keys, mine } = this.summary(s, line.id);
     return { ...shown, ...(keys.length ? { reactions: keys } : {}), ...(mine.length ? { reactions_mine: mine } : {}) };
@@ -813,10 +869,14 @@ export class FakeServer {
       t && typeof t === 'object' && isU64(t.line) && isU64(room) && Object.keys(t).length === ('room' in t ? 2 : 1) ? { line: t.line, room } : null;
     if (p.clear === true) throw refuse('access_denied', 'You may not clear reactions.');
     const k = p.key as Record<string, unknown> | undefined;
-    const emoji = k && typeof k === 'object' && Object.keys(k).length === 1 && typeof k.emoji === 'string' ? k.emoji : '';
-    const sized = emoji !== '' && new TextEncoder().encode(emoji).length <= 64 && !/[\s\uFE0E]/u.test(emoji);
+    const one = !!k && typeof k === 'object' && Object.keys(k).length === 1;
+    const custom = one && s.emoji && isU64(k.custom) && k.custom < 2 ** 32 ? k.custom : undefined;
+    // A server emoji is kept under a name no emoji can have.
+    const emoji = custom !== undefined ? `custom ${custom}` : one && typeof k.emoji === 'string' ? k.emoji : '';
+    const sized = custom !== undefined || (emoji !== '' && new TextEncoder().encode(emoji).length <= 64 && !/[\s\uFE0E]/u.test(emoji));
     if (!target || !sized || p.reason !== undefined) throw refuse('bad_request', 'Malformed react.');
     if (!s.account) throw refuse('access_denied', 'You may not react to that.');
+    if (custom !== undefined && p.remove !== true && !this.liveEmoji(custom)) throw refuse('no_such_emoji', 'No such emoji.');
     const line = this.kept.get(target.room)?.find((l) => l.id === target.line);
     if (!line || line.deleted || (target.room && !this.rooms.get(target.room)?.members.has(s.uid))) {
       throw refuse('no_such_target', 'No such line.');
@@ -843,7 +903,10 @@ export class FakeServer {
   private summary(s: Session, id: number): { keys: ReactionCount[]; mine: number[] } {
     const keys = [...(this.reacted.get(id) ?? [])];
     return {
-      keys: keys.map(([emoji, holders]) => ({ key: { emoji }, count: holders.size })),
+      keys: keys.map(([emoji, holders]) => ({
+        key: emoji.startsWith('custom ') ? { custom: Number(emoji.slice('custom '.length)) } : { emoji },
+        count: holders.size,
+      })),
       mine: keys.flatMap(([, holders], i) => (s.account && holders.has(s.account.login) ? [i] : [])),
     };
   }
@@ -854,11 +917,72 @@ export class FakeServer {
     return this.caps.has('reactions') && this.caps.has('history');
   }
 
+  private emojiBlock(): EmojiConfig {
+    return { revision: this.emojiRevision, max_count: 200, max_bytes: 16384, max_dimension: 128, manage: false };
+  }
+
+  private editEmoji(entry: EmojiEntry): void {
+    const revision = ++this.emojiRevision;
+    this.catalog.set(entry.id, { ...entry, revision });
+    for (const x of this.everyone()) if (x.emoji) this.emit(x, 'emoji_changed', { revision });
+  }
+
+  private liveEmoji(id: number): Exclude<EmojiEntry, { removed: true }> | undefined {
+    const e = this.catalog.get(id);
+    return e && !('removed' in e) ? e : undefined;
+  }
+
+  /** server-emoji.md §4's listing: what changed since a revision this
+   *  server can answer from, else everything; nothing is ever forgotten
+   *  here, so a revision ahead of the catalog's is the only one it
+   *  answers whole. */
+  private emojiList(s: Session, p: Record<string, unknown>): EmojiListOk {
+    if (!s.emoji) throw refuse('not_available', 'This server has no emoji for this session.');
+    const from = p.revision;
+    const after = p.after ?? 0;
+    if ((from !== undefined && !isU64(from)) || !isU64(after)) throw refuse('bad_request', 'Malformed emoji_list.');
+    const delta = from !== undefined && from <= this.emojiRevision;
+    const changed = [...this.catalog.values()]
+      .filter((e) => e.id > after && (!delta || e.revision > from))
+      .sort((a, b) => a.id - b.id);
+    const page = changed.slice(0, this.emojiPage);
+    return {
+      revision: this.emojiRevision,
+      ...(page.length ? { emoji: page } : {}),
+      ...(delta ? { delta: true as const } : {}),
+      ...(changed.length > page.length ? { has_more: true as const } : {}),
+    };
+  }
+
+  /** A request's `emoji`, kept as hxd-ng keeps them: of the first sent,
+   *  those naming a live entry by its name now, each id once. A session
+   *  not granted `emoji` has them ignored. */
+  private refsOf(s: Session, refs: unknown): EmojiRef[] | undefined {
+    if (refs == null || !s.emoji) return undefined;
+    if (!Array.isArray(refs)) throw refuse('bad_request', '`emoji` is a list.');
+    const read = refs.slice(0, EMOJI_REFS_MAX) as unknown[];
+    const kept: EmojiRef[] = [];
+    for (const r of read) {
+      const o = r as Record<string, unknown> | null;
+      if (typeof o !== 'object' || o === null || typeof o.name !== 'string' || !Number.isInteger(o.id)) {
+        throw refuse('bad_request', 'A reference is a name and an id.');
+      }
+      const id = o.id as number;
+      if (this.liveEmoji(id)?.name === o.name && !kept.some((k) => k.id === id)) kept.push({ name: o.name, id });
+    }
+    return kept.length ? kept : undefined;
+  }
+
+  private refsFor(s: Session, emoji: EmojiRef[] | undefined): { emoji?: EmojiRef[] } {
+    return s.emoji && emoji ? { emoji } : {};
+  }
+
   private sendMsg(s: Session, p: MsgParams): MsgOk {
     if ((p.to === undefined) === (p.to_login === undefined)) throw refuse('bad_request', 'Name exactly one of to and to_login.');
     if (!p.text) throw refuse('bad_request', 'No text.');
     const guid = this.guid(p.guid);
     const re = this.replyOf(s, p.re, p.signed, ['pm', 'im', 'signed']);
+    const emoji = this.refsOf(s, p.emoji);
     let targets: Session[];
     let box: string | null;
     if (p.to !== undefined) {
@@ -880,7 +1004,7 @@ export class FakeServer {
     // and to nobody when there is no session to hold it.
     if (!box || !sender) {
       if (!targets.length) throw refuse('no_such_user', 'No such user.');
-      for (const x of targets) this.emit(x, 'msg', { from, text: p.text, at, queued: false, ...this.reFor(x, re) });
+      for (const x of targets) this.emit(x, 'msg', { from, text: p.text, at, queued: false, ...this.reFor(x, re), ...this.refsFor(x, emoji) });
       return { queued: false };
     }
     const attached = targets.filter((x) => x.socket || x.scripted);
@@ -908,10 +1032,13 @@ export class FakeServer {
       fromUid: s.uid,
       pending: !attached.length,
       ...(re ? { re } : {}),
+      ...(emoji ? { emoji } : {}),
     };
     this.stored.push(m);
     if (key) this.mailGuids.set(key, m);
-    for (const x of attached) this.emit(x, 'msg', { from, text: m.text, at, queued: false, id: m.id, ref: m.ref, ...this.reFor(x, re) });
+    for (const x of attached) {
+      this.emit(x, 'msg', { from, text: m.text, at, queued: false, id: m.id, ref: m.ref, ...this.reFor(x, re), ...this.refsFor(x, emoji) });
+    }
     return this.msgOk(m);
   }
 
@@ -930,6 +1057,7 @@ export class FakeServer {
       id: m.id,
       ref: m.ref,
       ...this.reFor(to, m.re),
+      ...this.refsFor(to, m.emoji),
     };
   }
 
@@ -952,7 +1080,7 @@ export class FakeServer {
       .filter((m) => before === undefined || m.id < before)
       .reverse()
       .slice(0, limit)
-      .map(({ id, ref, from, text, at, read, re }): StoredMessage => ({ id, ref, from, text, at, read, ...this.reFor(s, re) }));
+      .map(({ id, ref, from, text, at, read, re, emoji }): StoredMessage => ({ id, ref, from, text, at, read, ...this.reFor(s, re), ...this.refsFor(s, emoji) }));
     return { messages, ...this.counts(s) };
   }
 
@@ -1005,6 +1133,7 @@ export class FakeServer {
       aware: false,
       replies: false,
       reactions: false,
+      emoji: false,
       ended: false,
     };
   }

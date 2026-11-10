@@ -877,7 +877,7 @@ button.reaction:hover { background: var(--surface-2); }
 .deniable-switch, .compare-switch { padding-bottom: 0.45rem; font-size: 0.75rem; white-space: nowrap; }
 .deniable-switch[aria-pressed="true"], .rail-tag { color: var(--warn); }
 .rail-tag { margin-left: 0.3rem; font-size: 0.65rem; text-transform: uppercase; letter-spacing: 0.03em; }
-.attach {
+.attach, .emoji-insert {
   padding-bottom: 0.35rem;
   font-size: 1.1rem;
   line-height: 1;
@@ -1106,7 +1106,9 @@ dialog.picker header input { width: 9rem; }
 
 /* The reaction picker: the icon picker's frame, narrower, emoji cells. */
 dialog.emoji-picker { width: min(26rem, 100vw - 1.5rem); }
-dialog.emoji-picker header input { width: 11rem; min-width: 0; flex: 1; }
+dialog.emoji-picker header { flex-wrap: wrap; }
+dialog.emoji-picker header input { width: 11rem; min-width: 8rem; flex: 1; }
+.emoji-cell .emoji-pending { font-size: 0.6rem; overflow: hidden; }
 .emoji-status { margin: 0; padding: 0.4rem 1rem 0; font-size: 0.82rem; }
 .emoji-status:empty { display: none; }
 .emoji-grid {
@@ -1129,6 +1131,13 @@ dialog.emoji-picker header input { width: 11rem; min-width: 0; flex: 1; }
 }
 .emoji-cell:hover { background: var(--surface-2); }
 .emoji-cell.on { border-color: var(--accent); background: var(--accent-soft); }
+
+/* A server emoji in a line is a word of it: as tall as the text around
+   it, kept to its own proportions, and set on the baseline's level. */
+img.emoji { height: 1.4em; width: auto; vertical-align: -0.35em; }
+.emoji-cell img.emoji { height: 1.6rem; vertical-align: middle; }
+.reaction-emoji img.emoji { height: 1.15rem; }
+.emoji-pending { color: var(--muted); }
 
 /* --- debug drawer ----------------------------------------------------- */
 

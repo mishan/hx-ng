@@ -27,6 +27,13 @@ says how.
 
 ### Added
 
+- The news timeline (hxd-ng's `docs/news.md` §10.8, §10.9):
+  `newsTimeline({ before, after, limit })` answers `NewsTimelineOk`, the
+  threads started in every category the account follows and has not
+  muted, newest first, each a `NewsTimelineThread` that says whether
+  its category counts it `unread`. `newsSeenTimeline(from, upTo)` marks
+  a run of it seen, `from` 0 for a run that reached its end. A server
+  without the timeline refuses it `unknown_method`.
 - Reactions (hxd-ng's `docs/hotline-ng.md` §7.3): `Credentials.reactions`
   says `reactions` at login, and `Connection.reactions` is the login
   reply's `ReactionsConfig`, the kinds of target the server takes and

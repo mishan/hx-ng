@@ -99,6 +99,8 @@ type SessionOf<C extends Connection> = Pick<
   | 'newsMute'
   | 'newsSubs'
   | 'newsSeen'
+  | 'newsTimeline'
+  | 'newsSeenTimeline'
   | 'uploadNewsAttachment'
   | 'fetchNewsAttachment'
   | 'pushRegister'

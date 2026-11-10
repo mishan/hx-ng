@@ -18,7 +18,7 @@
 
 import { expect, test, type Browser, type Page } from '@playwright/test';
 
-import { buildHxdNg, hxdNgAvailable, loginNews, startServer, type RunningServer } from './hxd-ng';
+import { buildHxdNg, hxdNgAvailable, loginNews, openAccount, startServer, type RunningServer } from './hxd-ng';
 
 const NG_PORT = 5710;
 
@@ -39,8 +39,40 @@ create_news_bundles = true
 delete_news_bundles = true
 `;
 
-async function logIn(browser: Browser, server: RunningServer, login: string): Promise<Page> {
+/** `noTimeline` plays a server older than the timeline: the socket is
+ *  the real server's, but `news_timeline` is answered as it would not
+ *  know it. `slowTimeline` holds the server's answers to it back a
+ *  while, as a busy server would. `sent` collects the frames the page
+ *  sends. */
+async function logIn(
+  browser: Browser,
+  server: RunningServer,
+  login: string,
+  opts: { noTimeline?: boolean; slowTimeline?: boolean; sent?: Record<string, unknown>[] } = {},
+): Promise<Page> {
   const page = await (await browser.newContext()).newPage();
+  if (opts.noTimeline || opts.slowTimeline) {
+    await page.routeWebSocket(/\/ng/, (ws) => {
+      const real = ws.connectToServer();
+      const slow = new Set<number>();
+      ws.onMessage((m) => {
+        const frame = JSON.parse(String(m)) as { id?: number; req?: string };
+        if (frame.req !== 'news_timeline') return real.send(m);
+        if (opts.slowTimeline) {
+          slow.add(frame.id!);
+          return real.send(m);
+        }
+        ws.send(JSON.stringify({ reply: frame.id, error: { code: 'unknown_method', text: 'Unknown request.' } }));
+      });
+      real.onMessage((m) => {
+        const frame = JSON.parse(String(m)) as { reply?: number };
+        if (frame.reply !== undefined && slow.delete(frame.reply)) setTimeout(() => ws.send(m), 400);
+        else ws.send(m);
+      });
+    });
+  }
+  const sent = opts.sent;
+  if (sent) page.on('websocket', (ws) => ws.on('framesent', (f) => sent.push(JSON.parse(String(f.payload)))));
   // A distinct hostname makes this a custom-server deployment rather
   // than the dev proxy's default :5700, so its HTTP attachment route is
   // exercised directly (and through hxd-ng's CORS policy).
@@ -51,6 +83,18 @@ async function logIn(browser: Browser, server: RunningServer, login: string): Pr
   await page.getByRole('button', { name: 'Connect', exact: true }).click();
   await expect(page.locator('.app')).toBeVisible();
   return page;
+}
+
+/** Does the server answer the timeline? Only `unknown_method` says no:
+ *  any other refusal is a failure, not a server too old to test. */
+async function hasTimeline(session: { ask: (req: string) => Promise<unknown> }): Promise<boolean> {
+  return session.ask('news_timeline').then(
+    () => true,
+    (e: Error) => {
+      if (/unknown_method/.test(e.message)) return false;
+      throw e;
+    },
+  );
 }
 
 async function openNews(page: Page): Promise<void> {
@@ -83,6 +127,8 @@ max_depth = 4
 chat_lines = 0
 spam_points = 0
 ng_requests = 0
+# The timeline test starts more threads than a page holds.
+news_posts = 0
 `,
       accounts: {
         editor: account('Editor', EDITOR),
@@ -257,6 +303,229 @@ ng_requests = 0
     await expect(row).toBeVisible();
     await row.click();
     await expect(reader.locator('.news-article')).toHaveCount(2);
+  });
+
+  test('the timeline merges what is followed, keeps itself current, and marks seen only what was shown', async ({
+    browser,
+  }, testInfo) => {
+    // The reader's other device: where it follows, and where the test
+    // asks what the server holds, one session for the whole of it.
+    const reader = await openAccount(server, 'reader', 'pw');
+    const editor = await openAccount(server, 'editor', 'pw');
+    try {
+      /** The reader's timeline threads the server holds unread, by subject. */
+      const unread = async () => {
+        const out: string[] = [];
+        let before: number | undefined;
+        for (;;) {
+          const ok = (await reader.ask('news_timeline', before === undefined ? { limit: 200 } : { before, limit: 200 })) as {
+            threads: { article: { id: number; subject: string }; unread: boolean }[];
+            has_more: boolean;
+          };
+          out.push(...ok.threads.filter((t) => t.unread).map((t) => t.article.subject));
+          if (!ok.has_more) return out;
+          before = ok.threads.at(-1)!.article.id;
+        }
+      };
+      test.skip(!(await hasTimeline(reader)), 'this hxd-ng predates the news timeline');
+
+      // The page logs in first, so the follows below are made where it
+      // hears nothing of them: on another device, as far as it knows.
+      const sent: Record<string, unknown>[] = [];
+      const page = await logIn(browser, server, 'reader', { sent });
+      const seenSent = () => sent.filter((f) => f.req === 'news_seen').map((f) => f.params as Record<string, unknown>);
+      const category = async (name: string) =>
+        ((await editor.ask('news_node_create', { kind: 'category', name })) as { node: { id: number } }).node.id;
+      const [north, south, elsewhere] = [await category('North'), await category('South'), await category('Elsewhere')];
+      await reader.ask('news_subscribe', { category: north });
+      await reader.ask('news_subscribe', { category: south });
+      // More than a page, across both followed categories and one that is not.
+      const threads: { id: number; subject: string }[] = [];
+      for (let i = 1; i <= 72; i++) {
+        const [category, name] = i % 4 === 0 ? [elsewhere, 'Elsewhere'] : i % 2 ? [north, 'North'] : [south, 'South'];
+        const subject = `${name} ${i}`;
+        const ok = (await editor.ask('news_post', { category, subject, body: `Thread ${i}.` })) as { id: number };
+        threads.push({ id: ok.id, subject });
+      }
+      const followed = threads.filter((t) => !t.subject.startsWith('Elsewhere')).reverse();
+      const subjects = followed.map((t) => t.subject);
+      expect(await unread()).toEqual(subjects);
+
+      // --- opened, it is newest first across both, a page at a time ---------
+      // Short, so a page of threads is several screens of them.
+      await page.setViewportSize({ width: 1000, height: 500 });
+      await openNews(page);
+      await page.locator('.news-timeline').click();
+      const rows = page.locator('.news .news-thread');
+      await expect(rows).toHaveCount(50);
+      await expect(rows.locator('.news-thread-subject')).toHaveText(subjects.slice(0, 50));
+      await expect(rows.locator('.news-thread-category')).toHaveText(subjects.slice(0, 50).map((t) => t.split(' ')[0]!));
+      await expect(rows.locator('.news-new')).toHaveCount(50);
+
+      // The screenful shown is claimed, from its oldest thread to its
+      // newest. Every category has an unread thread below it, so the
+      // server moves no cursor past one never shown, and nothing is seen.
+      await expect.poll(() => seenSent().length).toBe(1);
+      const [first] = seenSent();
+      expect(first).toMatchObject({ timeline: true, up_to: followed[0]!.id });
+      expect(first!.from).toBeLessThan(followed[0]!.id);
+      expect(first!.from).toBeGreaterThan(followed[49]!.id);
+      await page.waitForTimeout(300);
+      expect(await unread()).toEqual(subjects);
+
+      // A row only peeking in at the foot has not been shown: scrolled so
+      // the next one shows a fifth of itself, the run claimed stops above it.
+      const peeking = await page.locator('.news-body').evaluate((pane) => {
+        const foot = pane.getBoundingClientRect().bottom;
+        const rows = [...pane.querySelectorAll('.news-thread')];
+        const next = rows.find((r) => r.getBoundingClientRect().top >= foot)!;
+        const r = next.getBoundingClientRect();
+        pane.scrollTop += r.top + r.height * 0.2 - foot;
+        return Number(next.getAttribute('data-root'));
+      });
+      // Rows are watched afresh on every draw, and the draw after this
+      // claim's answer reports the peeking one as on screen at all.
+      await expect.poll(() => seenSent().length).toBeGreaterThanOrEqual(2);
+      await page.waitForTimeout(1000);
+      expect(seenSent().map((f) => f.from as number).filter((from) => from <= peeking)).toEqual([]);
+
+      // --- the rest paged in, and a jump to the bottom ------------------------
+      await page.getByRole('button', { name: 'Older threads' }).click();
+      await expect(rows).toHaveCount(followed.length);
+      await expect(page.getByRole('button', { name: 'Older threads' })).toHaveCount(0);
+      await rows.last().scrollIntoViewIfNeeded();
+      // The end of the timeline is claimed from 0, and is seen; the middle,
+      // skipped, is not, nor the top above it.
+      await expect.poll(() => seenSent().at(-1)?.from).toBe(0);
+      await expect.poll(async () => (await unread()).includes(subjects.at(-1)!)).toBe(false);
+      const skipped = await unread();
+      expect(skipped).toContain(subjects[0]);
+      expect(skipped).toContain(subjects[25]);
+
+      // --- scrolled back up through it, the whole timeline is seen -----------
+      for (let i = 0; i < 60 && !(await rows.first().isVisible() && (await page.locator('.news-body').evaluate((el) => el.scrollTop)) === 0); i++) {
+        await page.mouse.move(200, 400);
+        await page.mouse.wheel(0, -200);
+        await page.waitForTimeout(100);
+      }
+      await expect.poll(unread).toEqual([]);
+      expect(seenSent().at(-1)).toEqual({ timeline: true, from: 0, up_to: followed[0]!.id });
+
+      // --- live: a new thread lands on top, a reply in its own row -----------
+      await editor.ask('news_post', { category: elsewhere, subject: 'Elsewhere late', body: 'Not followed.' });
+      await editor.ask('news_post', { category: north, subject: 'North late', body: 'Just now.' });
+      await editor.ask('news_post', {
+        category: subjects[3]!.startsWith('North') ? north : south,
+        parent: followed[3]!.id,
+        subject: `Re: ${subjects[3]}`,
+        body: 'An answer.',
+      });
+      await expect(rows).toHaveCount(followed.length + 1);
+      await expect(rows.first().locator('.news-thread-subject')).toHaveText('North late');
+      await expect(rows.first().locator('.news-new')).toBeVisible();
+      await expect(rows.nth(4)).toContainText(subjects[3]!);
+      await expect(rows.nth(4)).toContainText('1 reply');
+      await expect(page.locator('.news .news-thread', { hasText: 'Elsewhere' })).toHaveCount(0);
+      // Shown on top, it is seen too.
+      await expect.poll(unread).toEqual([]);
+      await page.screenshot({ path: testInfo.outputPath('news-timeline.png') });
+
+      // --- and a row opens its thread, in its own category -------------------
+      await rows.nth(4).click();
+      await expect(page.locator('.news-article')).toHaveCount(2);
+      await expect(page.locator('.crumb', { hasText: new RegExp(`^${subjects[3]!.split(' ')[0]}$`) })).toBeVisible();
+
+      // --- deletions, and what changed while the view was away ---------------
+      const subjectRow = (subject: string) => rows.locator('.news-thread-subject', { hasText: new RegExp(`^${subject}$`) });
+      await page.locator('.crumb', { hasText: /^News$/ }).click();
+      await page.locator('.news-timeline').click();
+      // Opened afresh, a page again.
+      await expect(rows).toHaveCount(50);
+      // A starter with no replies leaves; one with a live reply stays, a
+      // tombstone, where it was.
+      await editor.ask('news_delete', { id: followed[5]!.id });
+      await editor.ask('news_delete', { id: followed[3]!.id });
+      await expect(rows).toHaveCount(49);
+      await expect(subjectRow(subjects[5]!)).toHaveCount(0);
+      await expect(rows.nth(4).locator('.news-thread-subject')).toHaveText('Deleted article');
+      // Away in chat while a thread is started and another deleted: it is
+      // all there on coming back.
+      await page.locator('.rail-item', { hasText: 'Lobby' }).click();
+      await expect(page.locator('.news')).toBeHidden();
+      await editor.ask('news_post', { category: south, subject: 'South while away', body: 'Missed it.' });
+      await editor.ask('news_delete', { id: followed[6]!.id });
+      await openNews(page);
+      await expect(rows.first().locator('.news-thread-subject')).toHaveText('South while away');
+      await expect(subjectRow(subjects[6]!)).toHaveCount(0);
+      // Reread as deep as it was paged, the new thread on top.
+      await expect(rows).toHaveCount(49);
+      // A followed category deleted takes its threads with it.
+      await editor.ask('news_node_delete', { id: south });
+      await expect(rows.locator('.news-thread-category', { hasText: 'North' })).not.toHaveCount(0);
+      await expect(rows.locator('.news-thread-category', { hasText: 'South' })).toHaveCount(0);
+    } finally {
+      await Promise.all([reader.close(), editor.close()]);
+    }
+  });
+
+  test('an empty timeline says why, asking again what is followed, and a server without it has it hidden', async ({
+    browser,
+  }) => {
+    const probe = await openAccount(server, 'editor', 'pw');
+    const supported = await hasTimeline(probe).finally(() => probe.close());
+    test.skip(!supported, 'this hxd-ng predates the news timeline');
+    const page = await logIn(browser, server, 'editor', { slowTimeline: true });
+    await openNews(page);
+    await page.locator('.news-timeline').click();
+    // The editor follows no category in this file: an empty timeline,
+    // said as such rather than as a server that has none.
+    await expect(page.locator('.news-empty')).toHaveText(/^You follow no categories yet\./);
+    // Followed from another device, which tells this page nothing: the
+    // timeline asks again when it is opened.
+    const other = await openAccount(server, 'editor', 'pw');
+    let quiet: number;
+    try {
+      quiet = ((await other.ask('news_node_create', { kind: 'category', name: 'Quiet' })) as { node: { id: number } }).node.id;
+      await other.ask('news_subscribe', { category: quiet });
+    } finally {
+      await other.close();
+    }
+    await page.locator('.crumb', { hasText: 'News' }).click();
+    await page.locator('.news-timeline').click();
+    await expect(page.locator('.news-empty')).toHaveText('Nothing has been started in the categories you follow yet.');
+    // Threads started into it as it stands empty, the second while the
+    // first is still being read in, and a reply after.
+    const poster = await openAccount(server, 'editor', 'pw');
+    try {
+      const first = (await poster.ask('news_post', { category: quiet, subject: 'Quiet one', body: '1' })) as { id: number };
+      await page.waitForTimeout(300);
+      await poster.ask('news_post', { category: quiet, subject: 'Quiet two', body: '2' });
+      await expect(page.locator('.news .news-thread-subject')).toHaveText(['Quiet two', 'Quiet one']);
+      await poster.ask('news_post', { category: quiet, parent: first.id, subject: 'Re: Quiet one', body: 'r' });
+      await expect(page.locator('.news .news-thread').nth(1)).toContainText('1 reply');
+      // Opened again, and a thread started and a starter deleted while its
+      // first page is still out: both are there once it lands, the
+      // deleted one a tombstone for its live reply.
+      await page.locator('.crumb', { hasText: /^News$/ }).click();
+      await page.locator('.news-timeline').click();
+      await poster.ask('news_post', { category: quiet, subject: 'Quiet three', body: '3' });
+      await poster.ask('news_delete', { id: first.id });
+      await expect(page.locator('.news .news-thread-subject')).toHaveText(['Quiet three', 'Quiet two', 'Deleted article']);
+      await poster.ask('news_post', { category: quiet, subject: 'Quiet four', body: '4' });
+      await expect(page.locator('.news .news-thread-subject')).toHaveText(['Quiet four', 'Quiet three', 'Quiet two', 'Deleted article']);
+    } finally {
+      await poster.close();
+    }
+
+    // An older server, played by this one with the timeline refused: the
+    // rest of the session is the real server's.
+    const older = await logIn(browser, server, 'editor', { noTimeline: true });
+    await openNews(older);
+    await older.locator('.news-timeline').click();
+    await expect(older.locator('.news-notice')).toHaveText('This server keeps no timeline.');
+    await expect(older.locator('.news-timeline')).toHaveCount(0);
+    await expect(older.locator('.news-following')).toBeVisible();
+    await expect(older.locator('.crumb.current')).toHaveText('News');
   });
 
   test('markdown is drawn in chat and in an article, and sent as typed', async ({ browser }) => {

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import type { Events, NewsArticle, NewsConfig, NewsNode, NewsSub } from '@hotline-ng/client';
+import { WireFailure, type Events, type NewsArticle, type NewsConfig, type NewsNode, type NewsSub, type NewsTimelineThread } from '@hotline-ng/client';
 
 import {
   byteLength,
@@ -23,7 +23,11 @@ import {
   notifyText,
   replySubject,
   scopeKey,
+  readSpan,
+  spanHull,
   staleProblem,
+  Timeline,
+  timelineMissing,
   trailTo,
 } from '../src/news';
 
@@ -491,5 +495,263 @@ describe('following', () => {
     expect(notifyText(notice({ reason: 'reference', excerpt: '' }))).toBe('Bob cited your article in “Re: The derivative and the u16”');
     expect(notifyText(notice({ scope: 'category', target: 7, subject: 'New', excerpt: '' }))).toBe('Bob started “New”');
     expect(notifyText(notice({ from: { nick: '' }, excerpt: '' }))).toMatch(/^Someone posted in/);
+  });
+});
+
+const row = (id: number, over: Partial<NewsTimelineThread> & { category?: number; deleted?: boolean } = {}): NewsTimelineThread => {
+  const { category = 1, deleted = false, ...rest } = over;
+  return {
+    article: article({ id, root: id, category, deleted }),
+    replies: 0,
+    last_at: id,
+    last_id: id,
+    unread: false,
+    ...rest,
+  };
+};
+
+const ids = (t: Timeline): number[] => t.threads.map((r) => r.article.id);
+
+const posted = (over: Partial<Events['news_posted']>): Events['news_posted'] => ({
+  id: 40,
+  category: 1,
+  root: 40,
+  parent: null,
+  subject: 's',
+  from: { nick: 'Bob' },
+  at: 1,
+  attachments: 0,
+  ...over,
+});
+
+describe('the timeline', () => {
+  it('pages older threads in below the ones it holds, never one twice', () => {
+    const t = new Timeline();
+    t.load({ threads: [row(30), row(20)], has_more: true });
+    expect(t.older).toBe(true);
+    t.addOlder({ threads: [row(20), row(10)], has_more: false });
+    expect(ids(t)).toEqual([30, 20, 10]);
+    expect(t.older).toBe(false);
+  });
+
+  it('pages on below a page whose every thread was left out', () => {
+    const t = new Timeline();
+    t.load({ threads: [row(30), row(20)], has_more: true }, () => false);
+    expect(ids(t)).toEqual([]);
+    expect(t.bottom).toBe(20);
+    t.addOlder({ threads: [row(10)], has_more: false });
+    expect(ids(t)).toEqual([10]);
+    expect(t.bottom).toBe(10);
+  });
+
+  it('rereads a span by after pages up from its bottom, as many as it takes', async () => {
+    // The server's: ids above `after` and below `before`, the nearest
+    // `limit` of them, newest first.
+    const all = [70, 60, 50, 40, 30, 20, 10].map((id) => row(id));
+    const asked: { after: number; before?: number; limit: number }[] = [];
+    const fetch = async (p: { after: number; before?: number; limit: number }) => {
+      asked.push(p);
+      const inside = all.filter((r) => r.article.id > p.after && (p.before === undefined || r.article.id < p.before));
+      const page = inside.slice(-p.limit);
+      return { threads: page, has_more: inside.length > p.limit };
+    };
+    expect((await readSpan(fetch, { after: 15 }, 2)).map((r) => r.article.id)).toEqual([30, 20, 50, 40, 70, 60]);
+    expect(asked.map((p) => p.after)).toEqual([15, 30, 50]);
+    asked.length = 0;
+    expect((await readSpan(fetch, { after: 15, before: 45 }, 200)).map((r) => r.article.id)).toEqual([40, 30, 20]);
+    expect(asked).toEqual([{ after: 15, before: 45, limit: 200 }]);
+    // A server that says there is more and moves no further is not
+    // asked forever.
+    const stuck = async () => ({ threads: [row(20)], has_more: true });
+    expect(await readSpan(stuck, { after: 20 }, 2)).toHaveLength(1);
+  });
+
+  it('takes what a reread found in place of what it held across the span', () => {
+    const cases: { name: string; span: { after: number; before?: number }; rows: NewsTimelineThread[]; want: number[] }[] = [
+      { name: 'new threads at the top', span: { after: 30 }, rows: [row(50), row(40)], want: [50, 40, 30, 20, 10] },
+      { name: 'one thread changed', span: { after: 19, before: 21 }, rows: [row(20, { replies: 3 })], want: [30, 20, 10] },
+      { name: 'one thread gone', span: { after: 19, before: 21 }, rows: [], want: [30, 10] },
+      { name: 'everything, newest included', span: { after: 9 }, rows: [row(40), row(30)], want: [40, 30] },
+    ];
+    for (const c of cases) {
+      const t = new Timeline();
+      t.load({ threads: [row(30), row(20), row(10)], has_more: true });
+      t.replace(c.span, c.rows);
+      expect(ids(t), c.name).toEqual(c.want);
+      expect(t.older, c.name).toBe(true);
+    }
+    const t = new Timeline();
+    t.load({ threads: [row(30), row(20), row(10)], has_more: false });
+    t.replace({ after: 19, before: 21 }, [row(20, { replies: 3 })]);
+    expect(t.threads[1]!.replies).toBe(3);
+  });
+
+  it('sends each live event to the span of it that is held, or nowhere', () => {
+    // 20's starter is a tombstone kept for a live reply, so a reply
+    // deleted in its category may be the last thing keeping it listed.
+    const held = () => {
+      const t = new Timeline();
+      t.load({ threads: [row(30), row(20, { category: 2, deleted: true }), row(10)], has_more: true });
+      return t;
+    };
+    const follows = (c: number) => c === 1 || c === 2;
+    const cases: [string, (t: Timeline) => unknown, unknown][] = [
+      ['a thread started in a followed category', (t) => t.posted(posted({ id: 40 }), follows), { after: 30 }],
+      ['a thread started where nothing is followed', (t) => t.posted(posted({ id: 40, category: 3 }), follows), null],
+      ['a reply in a held thread', (t) => t.posted(posted({ id: 41, root: 20, parent: 20, category: 2 }), follows), { after: 19, before: 21 }],
+      ['a reply in a thread not held', (t) => t.posted(posted({ id: 41, root: 5, parent: 5 }), follows), null],
+      ['a held starter rewritten', (t) => t.edited({ id: 30, category: 1 }), { after: 29, before: 31 }],
+      ['a reply rewritten', (t) => t.edited({ id: 31, category: 1 }), null],
+      ['a held starter deleted', (t) => t.deleted({ id: 10, category: 1 }), { after: 9, before: 11 }],
+      ['a reply deleted beside a tombstoned starter', (t) => t.deleted({ id: 25, category: 2 }), { after: 9 }],
+      ['a reply deleted where every starter lives', (t) => t.deleted({ id: 25, category: 1 }), null],
+      ['a purge of a reply and a starter', (t) => t.purged({ articles: [{ id: 33, category: 1 }, { id: 30, category: 1 }] }), { after: 29, before: 31 }],
+      ['a purge of two starters', (t) => t.purged({ articles: [{ id: 30, category: 1 }, { id: 10, category: 1 }] }), { after: 9, before: 31 }],
+      ['a purge of nothing held', (t) => t.purged({ articles: [{ id: 33, category: 1 }] }), null],
+      ['a category or bundle deleted', (t) => t.nodeDeleted(), { after: 9 }],
+      ['a new thread notified by a category', (t) => t.notified(notice({ scope: 'category', target: 4, category: 4 }), true), { after: 30 }],
+      // Followed where the list does not yet say so: its older threads
+      // may sit among those held.
+      ['a new thread notified by a category followed elsewhere', (t) => t.notified(notice({ scope: 'category', target: 4, category: 4 }), false), { after: 9 }],
+      ['a reply notified by a thread', (t) => t.notified(notice(), true), null],
+      ['a reply notified by a thread followed elsewhere', (t) => t.notified(notice(), false), null],
+    ];
+    for (const [name, touch, want] of cases) expect(touch(held()), name).toEqual(want);
+  });
+
+  it('reloads when something arrives for a timeline holding nothing', () => {
+    const t = new Timeline();
+    t.load({ threads: [], has_more: false });
+    expect(t.posted(posted({}), () => true)).toBe('reload');
+    expect(t.notified(notice({ scope: 'category' }), true)).toBe('reload');
+    expect(t.notified(notice({ scope: 'category' }), false)).toBe('reload');
+    expect(t.posted(posted({ parent: 5, root: 5 }), () => true)).toBeNull();
+    expect(t.deleted({ id: 5, category: 1 })).toBeNull();
+    expect(t.nodeDeleted()).toBeNull();
+  });
+
+  it('rereads one span covering every event of a burst', () => {
+    expect(spanHull(null, { after: 19, before: 21 })).toEqual({ after: 19, before: 21 });
+    expect(spanHull({ after: 19, before: 21 }, { after: 29, before: 31 })).toEqual({ after: 19, before: 31 });
+    expect(spanHull({ after: 19, before: 21 }, { after: 30 })).toEqual({ after: 19 });
+    expect(spanHull({ after: 30 }, 'reload')).toBe('reload');
+    expect(spanHull('reload', null)).toBe('reload');
+  });
+
+  it('claims the unbroken run shown, from its oldest starter to its newest, once', () => {
+    const t = new Timeline();
+    t.load({ threads: [row(50, { unread: true }), row(40), row(30, { unread: true }), row(20), row(10)], has_more: true });
+    for (const id of [50, 40, 30]) t.saw(id);
+    expect(t.claimSeen()).toEqual([{ from: 30, upTo: 50 }]);
+    expect(t.claimSeen()).toEqual([]);
+    // Nothing a run inside it could move that it did not.
+    t.saw(20);
+    t.saw(10);
+    expect(t.claimSeen()).toEqual([{ from: 10, upTo: 50 }]);
+  });
+
+  it('claims down to the end of the timeline as from 0, and to its oldest starter short of it', () => {
+    for (const older of [false, true]) {
+      const t = new Timeline();
+      t.load({ threads: [row(30), row(20, { unread: true }), row(10)], has_more: older });
+      for (const id of [30, 20, 10]) t.saw(id);
+      expect(t.claimSeen(), String(older)).toEqual([{ from: older ? 10 : 0, upTo: 30 }]);
+    }
+  });
+
+  it('claims each run apart, never across a thread not shown, and none with nothing unread', () => {
+    const t = new Timeline();
+    t.load({
+      threads: [row(60), row(50, { unread: true }), row(40, { unread: true }), row(30, { unread: true }), row(20), row(10)],
+      has_more: false,
+    });
+    for (const id of [60, 50, 30, 20]) t.saw(id);
+    expect(t.claimSeen()).toEqual([
+      { from: 50, upTo: 60 },
+      { from: 20, upTo: 30 },
+    ]);
+    const read = new Timeline();
+    read.load({ threads: [row(20), row(10)], has_more: false });
+    read.saw(20);
+    read.saw(10);
+    expect(read.claimSeen()).toEqual([]);
+  });
+
+  it('claims a run again once a thread joins it, read or not, to free what the server held back', () => {
+    // The server keeps a category's cursor below an unread thread older
+    // than `from`, so the top's claim may have moved nothing. Once the
+    // gap is shown, the run joining them is claimed, though the thread
+    // that joined them was read already.
+    const t = new Timeline();
+    t.load({ threads: [row(30, { unread: true }), row(20), row(10, { unread: true })], has_more: false });
+    t.saw(30);
+    expect(t.claimSeen()).toEqual([{ from: 30, upTo: 30 }]);
+    t.saw(10);
+    expect(t.claimSeen()).toEqual([{ from: 0, upTo: 10 }]);
+    t.saw(20);
+    expect(t.claimSeen()).toEqual([{ from: 0, upTo: 30 }]);
+  });
+
+  it('claims a run again once it grows above what was claimed', () => {
+    const t = new Timeline();
+    t.load({ threads: [row(30, { unread: true }), row(20, { unread: true })], has_more: true });
+    t.saw(20);
+    expect(t.claimSeen()).toEqual([{ from: 20, upTo: 20 }]);
+    t.replace({ after: 30 }, [row(40, { unread: true })]);
+    t.saw(30);
+    expect(t.claimSeen()).toEqual([{ from: 20, upTo: 30 }]);
+    t.saw(40);
+    expect(t.claimSeen()).toEqual([{ from: 20, upTo: 40 }]);
+  });
+
+  it('claims a run again once a reread brings an unread thread inside it', () => {
+    // A category followed elsewhere since: its thread was never in the run
+    // the claim covered.
+    const t = new Timeline();
+    t.load({ threads: [row(30, { unread: true }), row(10)], has_more: false });
+    t.saw(30);
+    t.saw(10);
+    expect(t.claimSeen()).toEqual([{ from: 0, upTo: 30 }]);
+    t.replace({ after: 9 }, [row(30), row(15, { unread: true }), row(10)]);
+    t.saw(15);
+    expect(t.claimSeen()).toEqual([{ from: 0, upTo: 30 }]);
+  });
+
+  it('gives a failed claim back, to be claimed again', () => {
+    const t = new Timeline();
+    t.load({ threads: [row(20, { unread: true })], has_more: false });
+    t.saw(20);
+    const [run] = t.claimSeen();
+    t.unclaim(run!);
+    expect(t.claimSeen()).toEqual([run]);
+  });
+
+  it('keeps a thread drawn as new for the visit after it is seen', () => {
+    const t = new Timeline();
+    t.load({ threads: [row(20, { unread: true }), row(10)], has_more: false });
+    t.saw(20);
+    t.claimSeen();
+    t.replace({ after: 20 }, [row(30, { unread: true }), row(25)]);
+    expect([30, 25, 20, 10].map((id) => t.isNew(id))).toEqual([true, false, true, false]);
+  });
+
+  it('is hidden on a server that does not know it, and only then', () => {
+    const failure = (code: string) => new WireFailure({ code, text: '' });
+    expect(timelineMissing(failure('unknown_method'))).toBe(true);
+    for (const e of [failure('not_available'), failure('no_mailbox'), failure('access_denied'), new Error('closed')]) {
+      expect(timelineMissing(e)).toBe(false);
+    }
+  });
+
+  it('counts only the unmuted categories followed toward it', () => {
+    const f = new Following();
+    f.load([
+      sub({ unread: 4 }),
+      sub({ scope: 'category', target: 7, unread: 2 }),
+      sub({ scope: 'category', target: 8, category: 8, unread: 3, muted: true }),
+    ]);
+    expect([7, 8, 398].map((c) => f.followsCategory(c))).toEqual([true, false, false]);
+    expect(f.timelineUnread()).toBe(2);
+    expect(new Following().timelineUnread()).toBe(0);
   });
 });

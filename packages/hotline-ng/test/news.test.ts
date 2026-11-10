@@ -287,6 +287,54 @@ describe('the news requests', () => {
     expect(server.sent('news_seen')[0]?.params).toEqual({ thread: 7, up_to: 9 });
   });
 
+  it('send the timeline frames the wire specifies', async () => {
+    const conn = new Connection(CREDS);
+    await conn.start();
+    const thread = {
+      article: {
+        id: 9,
+        category: 2,
+        parent: null,
+        root: 9,
+        depth: 0,
+        from: { nick: 'bob', login: 'bob' },
+        subject: 's',
+        body: 'b',
+        mime: 'text/plain',
+        at: 1,
+        deleted: false,
+        attachments: [],
+        refs: [],
+        referenced_by: 0,
+      },
+      replies: 0,
+      last_at: 1,
+      last_id: 9,
+      unread: true,
+    };
+    server.on('news_timeline', () => ({ ok: { threads: [thread], has_more: true } }));
+    server.on('news_seen', () => ({ ok: { unread: 2 } }));
+
+    expect(await conn.newsTimeline()).toEqual({ threads: [thread], has_more: true });
+    await conn.newsTimeline({ before: 9, limit: 10 });
+    await conn.newsTimeline({ after: 4, before: 12, limit: 200 });
+    expect(await conn.newsSeenTimeline(0, 9)).toEqual({ unread: 2 });
+
+    expect(server.sent('news_timeline').map((f) => f.params)).toEqual([
+      {},
+      { before: 9, limit: 10 },
+      { after: 4, before: 12, limit: 200 },
+    ]);
+    expect(server.sent('news_seen')[0]?.params).toEqual({ timeline: true, from: 0, up_to: 9 });
+  });
+
+  it('reject a timeline an older server does not know, so a caller can hide it', async () => {
+    const conn = new Connection(CREDS);
+    await conn.start();
+    server.on('news_timeline', () => ({ error: { code: 'unknown_method', text: 'Unknown request.' } }));
+    await expect(conn.newsTimeline()).rejects.toMatchObject({ wire: { code: 'unknown_method' } });
+  });
+
   it('name a scope the way a request takes it', () => {
     expect(newsScopeOf({ scope: 'thread', target: 398 })).toEqual({ thread: 398 });
     expect(newsScopeOf({ scope: 'category', target: 7 })).toEqual({ category: 7 });

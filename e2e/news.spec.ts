@@ -410,7 +410,9 @@ news_posts = 0
       await page.getByRole('button', { name: 'Older threads' }).click();
       await expect(rows).toHaveCount(followed.length);
       await expect(page.getByRole('button', { name: 'Older threads' })).toHaveCount(0);
-      await rows.last().scrollIntoViewIfNeeded();
+      // The pane, not a row: rows are redrawn whenever counts change, and
+      // a row handed over may be gone by the time it is scrolled to.
+      await page.locator('.news-body').evaluate((el) => (el.scrollTop = el.scrollHeight));
       // The end of the timeline is claimed from 0, and is seen; the middle,
       // skipped, is not, nor the top above it.
       await expect.poll(() => seenSent().at(-1)?.from).toBe(0);

@@ -47,13 +47,15 @@ test.describe('a moderator and a person of two devices', () => {
   }
 
   /** The device picked from Pam's menu, up to its confirmation, once
-   *  the list shows what `shown` waits for. */
+   *  the list shows it and what `shown` waits for, opened again until it
+   *  does. */
   async function pick(page: Page, label: RegExp, shown: (list: Locator) => Promise<void> = async () => {}): Promise<void> {
     const list = page.getByRole('dialog', { name: "Pam's devices" });
     await expect(async () => {
       if (await list.isVisible()) await list.getByRole('button', { name: 'Cancel' }).click();
       await page.getByRole('button', { name: 'More for Pam' }).click();
       await page.getByRole('button', { name: 'Disconnect one device…' }).click();
+      await expect(list.getByRole('button', { name: label })).toBeVisible({ timeout: 1000 });
       await shown(list);
     }).toPass({ timeout: 10_000 });
     await list.getByRole('button', { name: label }).click();
@@ -120,6 +122,18 @@ test.describe('a moderator and a person of two devices', () => {
       await desk.conn.logout();
       await phone.conn.logout();
     }
+  });
+
+  test('is told the devices have gone when the person left while its menu was open', async ({ page }) => {
+    await logIn(page);
+    const desk = await device('Desk');
+    const phone = await device('Phone');
+    await page.getByRole('button', { name: 'More for Pam' }).click();
+    await desk.conn.logout();
+    await phone.conn.logout();
+    await expect(pamOnRoster(page)).toHaveCount(0);
+    await page.getByRole('button', { name: 'Disconnect one device…' }).click();
+    await expect(page.getByText('That device has already gone.').first()).toBeVisible();
   });
 
   test('is told a device that went while it was asked about has gone', async ({ page }) => {

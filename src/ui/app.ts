@@ -3376,8 +3376,10 @@ export class App {
    *  ban, purge or reason goes with one device. */
   private async kickDevice(uid: number): Promise<void> {
     const conn = this.conn;
+    if (!conn) return;
+    // The person may have left while the menu was open.
     const row = this.store.user(uid);
-    if (!conn || !row?.devices?.length) return;
+    if (!row?.devices?.length) return this.say('That device has already gone.');
     const device = await choose(
       `${row.nick}'s devices`,
       row.devices.map((d) => [String(d.device), deviceChoice(d), true] as [string, string, boolean]),

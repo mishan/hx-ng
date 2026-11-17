@@ -168,6 +168,16 @@ export class VoiceSession {
    *  the server is free to start trickling the moment it has offered. */
   private earlyIce: (RTCIceCandidateInit | null)[] = [];
   private resubscribeTimer: ReturnType<typeof setTimeout> | null = null;
+  /** A `voice_status` since the join has listed this session. A join
+   *  while the server still had this session in voice (a `leave` whose
+   *  refusal was swallowed) takes it out first, and the status saying so
+   *  follows the join's reply; until one lists it, a status without it
+   *  is that. */
+  private heardIn = false;
+  /** Bumped by `teardown`, so work begun before one ends quietly after
+   *  it, neither reporting the refusals of a session that is gone nor
+   *  touching the one that replaced it. */
+  private generation = 0;
 
   /** The room. The public chat is 0, and voice is one room at a time. */
   cid = 0;
@@ -193,6 +203,11 @@ export class VoiceSession {
     conn.on('voice_ice', (d) => this.addIce(d.candidate ?? null));
     conn.on('voice_status', (d) => {
       this.participants = d.participants;
+      if (this.joined && d.cid === this.cid) {
+        const self = this.conn.self?.uid;
+        if (d.participants.some((p) => p.uid === self)) this.heardIn = true;
+        else if (this.heardIn) return this.movedOut();
+      }
       this.hooks.onRoom();
     });
     conn.on('video_status', (d) => {
@@ -245,17 +260,26 @@ export class VoiceSession {
   async join(): Promise<void> {
     const blocked = captureBlockedReason();
     if (blocked) throw new Error(blocked);
-    this.mic = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const generation = this.generation;
+    const mic = await navigator.mediaDevices.getUserMedia({ audio: true });
+    if (this.generation !== generation) {
+      for (const t of mic.getTracks()) t.stop();
+      return;
+    }
+    this.mic = mic;
     this.pc = this.newPeerConnection();
-    for (const t of this.mic.getTracks()) this.pc.addTrack(t, this.mic);
+    for (const t of mic.getTracks()) this.pc.addTrack(t, mic);
 
+    this.heardIn = false;
     let ok: VoiceJoinOk;
     try {
       ok = await this.conn.request<VoiceJoinOk>('voice_join', { cid: this.cid });
     } catch (e) {
+      if (this.generation !== generation) return;
       this.teardown();
       throw e;
     }
+    if (this.generation !== generation) return;
     this.codec = ok.codec;
     this.participants = ok.participants;
     this.joined = true;
@@ -264,7 +288,12 @@ export class VoiceSession {
     await this.negotiate(ok.sdp);
     // Clients SHOULD join muted, and the server enforces it; say so
     // rather than letting the two disagree.
-    await this.setMuted(true);
+    try {
+      if (this.generation === generation) await this.setMuted(true);
+    } catch (e) {
+      if (this.generation === generation) throw e;
+    }
+    if (this.generation !== generation) return;
     this.hooks.onLog(`joined voice (${ok.codec})`);
     this.hooks.onRoom();
     this.hooks.onControls();
@@ -276,7 +305,9 @@ export class VoiceSession {
   }
 
   async setMuted(muted: boolean): Promise<void> {
+    const generation = this.generation;
     await this.conn.request('voice_mute', { cid: this.cid, muted });
+    if (this.generation !== generation) return;
     this.muted = muted;
     // Both sides, on purpose: replacing the microphone with silence
     // keeps RTP flowing at its normal rate, which keeps the NAT path
@@ -285,7 +316,20 @@ export class VoiceSession {
     this.hooks.onControls();
   }
 
+  /**
+   * The server took this session out of voice without being asked: its
+   * person joined on another device, which takes its place (hxd-ng's
+   * `docs/hotline-ng.md` §7.6), or the media layer gave up on it. No
+   * `voice_leave`: this session is already out, so one could only be
+   * refused.
+   */
+  private movedOut(): void {
+    this.teardown();
+    this.hooks.onLog('voice ended here: another of your devices took it over, or the server ended it');
+  }
+
   teardown(): void {
+    this.generation++;
     if (this.resubscribeTimer !== null) clearTimeout(this.resubscribeTimer);
     this.resubscribeTimer = null;
     this.pc?.close();
@@ -339,19 +383,21 @@ export class VoiceSession {
   /** Queue an offer for answering. Returns when *this* offer has been
    *  answered, so a caller that has one in hand can await it. */
   private negotiate(sdp: string): Promise<void> {
-    const next = this.turn.then(() => this.answerOffer(sdp));
+    const generation = this.generation;
+    const next = this.turn.then(() => this.answerOffer(sdp, generation));
     // The queue must survive a failed negotiation, or one bad offer ends
     // every renegotiation for the rest of the call.
     this.turn = next.catch(() => {});
     return next.catch((e: unknown) => {
+      if (this.generation !== generation) return;
       this.fail(e);
       throw e instanceof Error ? e : new Error(String(e));
     });
   }
 
-  private async answerOffer(sdp: string): Promise<void> {
+  private async answerOffer(sdp: string, generation: number): Promise<void> {
     const pc = this.pc;
-    if (!pc) return;
+    if (!pc || this.generation !== generation) return;
     await pc.setRemoteDescription({ type: 'offer', sdp });
     await this.flushIce();
     // Attach capture tracks *before* creating the answer: the answer's
@@ -364,6 +410,7 @@ export class VoiceSession {
     await pc.setLocalDescription(answer);
     const local = pc.localDescription?.sdp ?? answer.sdp ?? '';
     this.checkSendSsrc(local);
+    if (this.generation !== generation) return;
     await this.conn.request('voice_answer', { cid: this.cid, sdp: local });
     // Only now is `currentDirection` the negotiated one, which is what
     // says whether a section is actually delivering anything.

@@ -34,9 +34,9 @@ describe('the device label setting', () => {
   it('is the user agent\'s until one is set, and then that server\'s alone', () => {
     const store = memory();
     expect(deviceLabelFor('wss://a', UA, store)).toBe('Firefox on Linux');
-    expect(writeDeviceLabel('wss://a', 'Desk', store)).toBe(true);
+    expect(writeDeviceLabel('wss://a', 'Desk', store)).toBe('saved');
     expect(deviceLabelFor('wss://a', UA, store)).toBe('Desk');
-    expect(writeDeviceLabel('wss://a', ' Desk', store), 'refused, the one before kept').toBe(false);
+    expect(writeDeviceLabel('wss://a', ' Desk', store), 'refused, the one before kept').toBe('invalid');
     expect(deviceLabelFor('wss://a', UA, store)).toBe('Desk');
     expect(deviceLabelFor('wss://b', UA, store)).toBe('Firefox on Linux');
     writeDeviceLabel('wss://a', '', store);
@@ -52,7 +52,11 @@ describe('the device label setting', () => {
         throw new Error('SecurityError');
       },
     };
-    expect(() => writeDeviceLabel('wss://a', 'Desk', broken)).not.toThrow();
+    expect(writeDeviceLabel('wss://a', 'Desk', broken)).toBe('unstored');
+    const readOnly = { getItem: () => null, setItem: broken.setItem };
+    expect(writeDeviceLabel('wss://a', 'Desk', readOnly), 'one read but not written').toBe('unstored');
+    expect(writeDeviceLabel('wss://a', '', readOnly), 'nor cleared').toBe('unstored');
+    expect(writeDeviceLabel('wss://a', 'Desk', null)).toBe('unstored');
     expect(deviceLabelFor('wss://a', UA, broken)).toBe('Firefox on Linux');
     expect(deviceLabelFor('wss://a', UA, { getItem: () => '{"wss://a": 5}', setItem: () => {} })).toBe('Firefox on Linux');
     expect(deviceLabelFor('wss://a', UA, { getItem: () => 'not json', setItem: () => {} })).toBe('Firefox on Linux');

@@ -12,6 +12,9 @@ import { buildHxdNg, hxdNgAvailable, startServer, type RunningServer } from './h
 
 const NG_PORT = 5866;
 const PAM = 'name = "Pam"\npassword = "pw"\n[access]\nread_chat = true\nsend_chat = true\n[extra]\npersonal = true\n';
+/** A person whose sessions may not detach, so a lost connection logs in
+ *  afresh, as a new device. */
+const KIT = 'name = "Kit"\npassword = "pw"\n[access]\nread_chat = true\nsend_chat = true\n[extra]\npersonal = true\ncan_detach = false\n';
 const ENDED = 'This session was ended from one of your devices.';
 
 test.describe('a person of two devices', () => {
@@ -20,13 +23,13 @@ test.describe('a person of two devices', () => {
   let server: RunningServer;
   test.beforeAll(async () => {
     buildHxdNg();
-    server = await startServer(NG_PORT, { server: 'coalesce = true', accounts: { pam: PAM } });
+    server = await startServer(NG_PORT, { server: 'coalesce = true', accounts: { pam: PAM, kit: KIT } });
   });
   test.afterAll(() => server?.stop());
 
-  async function logIn(page: Page): Promise<void> {
+  async function logIn(page: Page, login = 'pam'): Promise<void> {
     await page.goto(`/?server=${encodeURIComponent(server.wsUrl)}`);
-    await page.getByLabel('Account').fill('pam');
+    await page.getByLabel('Account').fill(login);
     await page.getByLabel('Password').fill('pw');
     await page.getByRole('button', { name: 'Connect', exact: true }).click();
     await expect(page.locator('.app')).toBeVisible();
@@ -51,10 +54,10 @@ test.describe('a person of two devices', () => {
   }
 
   /** The person's other device, and every row it is told of it. */
-  async function otherDevice(): Promise<{ conn: Connection; rows: User[] }> {
+  async function otherDevice(login = 'pam'): Promise<{ conn: Connection; rows: User[] }> {
     const rows: User[] = [];
     const conn = new Connection(
-      { url: server.wsUrl, login: 'pam', password: 'pw', nick: 'Pam', icon: 0, persons: true, deviceLabel: 'Node' },
+      { url: server.wsUrl, login, password: 'pw', nick: 'Pam', icon: 0, persons: true, deviceLabel: 'Node' },
       { onSnapshot: (ok) => rows.push(...ok.users.filter((u) => u.uid === ok.self.uid)) },
     );
     conn.on('user_changed', (d) => rows.push(d.user));
@@ -117,6 +120,42 @@ test.describe('a person of two devices', () => {
       await logOut(desk);
       await desk.context().close();
       await phone.context().close();
+    }
+  });
+
+  test('an open list follows a fresh login that made this a new device, and still asks before ending it', async ({ page }) => {
+    let away = false;
+    const live: WebSocketRoute[] = [];
+    await page.routeWebSocket(new RegExp(`:${NG_PORT}/ng`), (ws) => {
+      if (away) return void ws.close();
+      live.push(ws.connectToServer());
+    });
+    await logIn(page, 'kit');
+    const other = await otherDevice('kit');
+    try {
+      await page.locator('button.identity').click();
+      const devices = page.getByRole('region', { name: 'Your devices' });
+      await expect(devices.locator('li')).toHaveCount(2);
+      // The page's session ends with its connection, and the other device
+      // leaves while it is away: it comes back by a fresh login, whose
+      // roster is all it hears of either.
+      away = true;
+      for (const s of live) await s.close();
+      await expect.poll(() => other.rows.at(-1)?.devices?.length).toBe(1);
+      await other.conn.logout();
+      away = false;
+      await expect(page.locator('.pill')).toHaveClass(/online/, { timeout: 20_000 });
+
+      await expect(devices.locator('li')).toHaveCount(1);
+      await expect(devices.locator('li.mine')).toHaveCount(1);
+      await devices.getByRole('button', { name: /^End this device/ }).click();
+      const confirm = page.getByRole('dialog', { name: 'End this device?' });
+      await expect(confirm).toBeVisible();
+      await confirm.getByRole('button', { name: 'Cancel' }).click();
+      await expect(page.locator('.pill')).toHaveClass(/online/);
+    } finally {
+      await other.conn.logout().catch(() => {});
+      await logOut(page);
     }
   });
 

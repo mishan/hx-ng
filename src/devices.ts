@@ -81,23 +81,28 @@ export function deviceLabelSet(server: string, store: LabelStore | null = local(
   return typeof set === 'string' ? set : '';
 }
 
+/** What became of a label set: kept for the next login; `invalid`, one
+ *  the server would drop (`validLabel`), with the one before kept; or
+ *  `unstored`, storage that would not keep it, so the next login says
+ *  what it would have said before. */
+export type LabelWrite = 'saved' | 'invalid' | 'unstored';
+
 /** Set this device's label on `server`, or with an empty one go back to
- *  the user agent's; false, keeping the one before, for one the server
- *  would drop (`validLabel`). Storage that cannot be written keeps
- *  nothing. */
-export function writeDeviceLabel(server: string, label: string, store: LabelStore | null = local()): boolean {
+ *  the user agent's. */
+export function writeDeviceLabel(server: string, label: string, store: LabelStore | null = local()): LabelWrite {
   const all = labels(store);
   if (label) {
     const valid = validLabel(label);
-    if (!valid) return false;
+    if (!valid) return 'invalid';
     all[server] = valid;
   } else delete all[server];
+  if (!store) return 'unstored';
   try {
-    store?.setItem(LABELS_KEY, JSON.stringify(all));
+    store.setItem(LABELS_KEY, JSON.stringify(all));
   } catch {
-    /* storage disabled: the user agent's label it is */
+    return 'unstored';
   }
-  return true;
+  return 'saved';
 }
 
 /** The server's facts about a device, in words, to show beside its

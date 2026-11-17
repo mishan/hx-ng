@@ -9,6 +9,7 @@
  * platform's.
  */
 
+import type { LabelWrite } from '../devices';
 import type { PmSigning } from '../signing';
 import { h } from './dom';
 
@@ -36,8 +37,7 @@ export interface Settings {
    *  or '' for none, and the user agent's it goes by then; null where
    *  that connection shows no devices. */
   deviceLabel: { set: string; otherwise: string } | null;
-  /** False where the server would drop it, and the one before is kept. */
-  setDeviceLabel(label: string): boolean;
+  setDeviceLabel(label: string): LabelWrite;
   openDebug(): void;
 }
 
@@ -53,13 +53,17 @@ const THEMES: [Theme, string][] = [
   ['dark', 'Dark'],
 ];
 
-function deviceLabelField(label: { set: string; otherwise: string }, set: (label: string) => boolean): HTMLElement {
+const LABEL_WRITE: Record<LabelWrite, string> = {
+  saved: '',
+  invalid: 'Up to 32 characters, with no space at either end and no invisible or control characters. The last one that fit is kept.',
+  unstored: 'This browser would not keep it, so the next login goes by the name it had before.',
+};
+
+function deviceLabelField(label: { set: string; otherwise: string }, set: (label: string) => LabelWrite): HTMLElement {
   const input = h('input', { type: 'text', value: label.set, placeholder: label.otherwise, spellcheck: false });
   // As it is typed, so Escape or Done with the field still focused keep it.
   input.oninput = () => {
-    input.setCustomValidity(
-      set(input.value) ? '' : 'Up to 32 characters, with no space at either end and no invisible or control characters. The last one that fit is kept.',
-    );
+    input.setCustomValidity(LABEL_WRITE[set(input.value)]);
     input.reportValidity();
   };
   return h(

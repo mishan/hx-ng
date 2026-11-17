@@ -194,7 +194,7 @@ function devicesSection(
     const facts = h('span', { class: 'device-facts muted', id: `device-facts-${d.device}` });
     const end = h('button', { class: 'ghost', type: 'button' }, 'End');
     end.setAttribute('aria-describedby', facts.id);
-    const li = h('li', { class: `device${d.mine ? ' mine' : ''}` }, name, facts, end);
+    const li = h('li', { class: 'device' }, name, facts, end);
     const kept: Row = { li, name, facts, end, row: d };
     end.onclick = () => void ending(kept);
     rows.set(d.device, kept);
@@ -203,6 +203,7 @@ function devicesSection(
   };
   const show = (r: Row, d: DeviceRow) => {
     r.row = d;
+    r.li.classList.toggle('mine', d.mine);
     r.name.replaceChildren(named(d), ...(d.mine ? [h('span', { class: 'muted' }, ' (this device)')] : []));
     r.facts.textContent = d.facts.join(' \u00b7 ');
     r.end.ariaLabel = d.mine ? `End this device (${named(d)})` : `End ${named(d)}`;

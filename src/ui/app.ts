@@ -922,6 +922,10 @@ export class App {
         this.store.self = self;
         this.store.server = server;
         this.store.replaceRoster(users);
+        // A device that came or went while this one was away is told by
+        // this roster alone.
+        const own = this.store.user(self.uid);
+        if (own) this.ownDevicesWatch?.(own);
         if (rooms) {
           this.store.setRooms(rooms.list);
           const joined = new Set(rooms.joined.map((r) => r.id));
@@ -4766,13 +4770,14 @@ export class App {
   private ownDevices(conn: Session, failed: (e: unknown) => Error): DevicesChoice | undefined {
     const row = this.store.self ? this.store.user(this.store.self.uid) : undefined;
     if (!(conn instanceof Connection) || conn.device === null || !row?.devices) return undefined;
-    const mine = conn.device;
+    // `conn.device` as it is each time: a fresh login after a failed
+    // resume makes this a new device on the same connection.
     const rows = (devices: DeviceEntry[]): DeviceRow[] =>
       devices.map((d) => ({
         device: d.device,
         label: d.label,
         facts: deviceFacts(d, (since) => new Date(since * 1000).toLocaleString()),
-        mine: d.device === mine,
+        mine: d.device === conn.device,
       }));
     return {
       list: rows(row.devices),
@@ -4784,9 +4789,11 @@ export class App {
         };
       },
       end: async (device) => {
+        // Read before ending it, which as a logout clears `conn.device`.
+        const mine = device === conn.device;
         // Ending this one logs out here, so it is asked first; another
         // is one click, as a mistake there costs a login on that one.
-        if (device === mine) {
+        if (mine) {
           const yes = await ask({
             title: 'End this device?',
             body: 'This logs this browser out of the server. Your other devices stay.',
@@ -4804,7 +4811,7 @@ export class App {
           throw failed(e);
         }
         // This one's is a logout, as `/logout` is.
-        if (device === mine) location.reload();
+        if (mine) location.reload();
         return true;
       },
     };

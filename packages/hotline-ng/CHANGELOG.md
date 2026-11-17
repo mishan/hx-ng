@@ -30,6 +30,20 @@ says how.
 
 ### Added
 
+- Persons (hxd-ng's `docs/hotline-ng.md` §7.6): `Credentials.persons`
+  says `persons` at login and `Credentials.deviceLabel` says
+  `device_label`; `CAP_PERSONS`. `Connection.device` is this session's
+  device id from the login or resume reply's `self.device`, saved with
+  the session. A row the session may see the devices of carries
+  `devices`, each a `DeviceEntry`. `deviceEnd(device)` ends one device
+  of this session's person, and its own as a logout; `KickParams.device`
+  kicks one device of another's. Both are refused without asking where
+  `persons` was not granted, since a server without it kicks the whole
+  person. The `ended` event and close end the session with `onEnded`,
+  as do a resume refused `ended` or `kicked`, which, unlike
+  `session_expired`, is never followed by a fresh login: a reload's
+  `start()` rejects instead. `ENDED`, `KICKED`, and `no_such_device` in
+  the codes.
 - Server emoji (hxd-ng's `docs/server-emoji.md` §8): `Credentials.emoji`
   says `emoji` at login, and `Connection.emoji` is the login reply's
   `EmojiConfig`, the catalog's revision and its limits, saved with the

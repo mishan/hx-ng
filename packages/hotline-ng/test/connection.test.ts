@@ -357,6 +357,135 @@ describe('resume', () => {
   });
 });
 
+describe('persons', () => {
+  const ENDED = 'This session was ended from one of your devices.';
+  const personsOk = () => loginOk({ caps: ['persons'], self: { ...me(1, 'Alice'), device: 7 } });
+  const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  it('says persons and the device label at login only when asked', async () => {
+    await connect();
+    await new Connection({ ...CREDS, login: 'bob', persons: true, deviceLabel: 'Firefox on Android' }).start();
+    const [plain, asked] = server.sent('login').map((f) => f.params);
+    expect(plain).not.toHaveProperty('persons');
+    expect(plain).not.toHaveProperty('device_label');
+    expect(asked).toMatchObject({ persons: true, device_label: 'Firefox on Android' });
+  });
+
+  it('keeps its device id from the login across a reload', async () => {
+    server.on('login', () => ({ ok: personsOk() }));
+    expect((await connect()).device).toBe(7);
+    server.on('resume', () => ({ ok: { replay: 0, self: user(1, 'Alice') } }));
+    server.on('sync', () => ({ ok: { server: { name: 'Test', subject: 'hi' }, users: [], seq: 0 } }));
+    const reloaded = new Connection(CREDS);
+    await reloaded.start({ resumeOnly: true });
+    expect(reloaded.device).toBe(7);
+  });
+
+  it.each(['ended', ''])('ends at the ended event and a close saying %j, and tries nothing more', async (reason) => {
+    server.on('login', () => ({ ok: personsOk() }));
+    let ended: string | null = null;
+    const conn = await connect({ onEnded: (r) => (ended = r) });
+    server.on('resume', () => ({ ok: { replay: 0, self: user(1, 'Alice') } }));
+    server.event('ended');
+    await settle();
+    server.socket!.close(reason);
+    await wait(700);
+    expect(ended).toBe(ENDED);
+    expect(conn.state).toBe('offline');
+    expect(conn.device).toBeNull();
+    expect(server.sent('resume')).toHaveLength(0);
+    expect(server.sent('login')).toHaveLength(1);
+    expect(hasSavedSession(CREDS.url)).toBe(false);
+  });
+
+  it.each([
+    ['ended', ENDED],
+    ['kicked', 'You were disconnected by an administrator.'],
+  ])('takes a resume refused %s as the end, and logs in no more', async (code, said) => {
+    let ended: string | null = null;
+    const conn = await connect({ onEnded: (r) => (ended = r) });
+    server.on('resume', () => ({ error: { code, text: 'gone' } }));
+    conn.drop();
+    await wait(1200);
+    expect(server.sent('resume')).toHaveLength(1);
+    expect(server.sent('login')).toHaveLength(1);
+    expect(ended).toBe(said);
+    expect(conn.state).toBe('offline');
+    expect(hasSavedSession(CREDS.url)).toBe(false);
+  });
+
+  it('refuses a reload into a session that was ended, rather than logging in over it', async () => {
+    await connect();
+    server.on('resume', () => ({ error: { code: 'ended', text: 'gone' } }));
+    const reloaded = new Connection(CREDS);
+    await expect(reloaded.start()).rejects.toThrow(ENDED);
+    expect(server.sent('login')).toHaveLength(1);
+    expect(hasSavedSession(CREDS.url)).toBe(false);
+    // The user's own start, after that, is a fresh login.
+    await reloaded.start();
+    expect(server.sent('resume')).toHaveLength(1);
+    expect(server.sent('login')).toHaveLength(2);
+  });
+
+  it('forgets an ended session once started again, so a later drop resumes', async () => {
+    server.on('login', () => ({ ok: personsOk() }));
+    const conn = await connect();
+    server.event('ended');
+    await settle();
+    server.socket!.close('ended');
+    await settle();
+    await conn.start();
+    server.on('resume', () => ({ ok: { replay: 0, self: user(1, 'Alice') } }));
+    server.socket!.close('');
+    await wait(700);
+    expect(server.sent('resume')).toHaveLength(1);
+    expect(conn.state).toBe('online');
+  });
+
+  it('takes its device id from a fresh login after the saved session expired', async () => {
+    server.on('login', () => ({ ok: personsOk() }));
+    await connect();
+    server.on('resume', () => ({ error: { code: 'session_expired', text: 'gone' } }));
+    server.on('login', () => ({ ok: loginOk() }));
+    const reloaded = new Connection(CREDS);
+    await reloaded.start();
+    expect(server.sent('login')).toHaveLength(2);
+    expect(reloaded.device).toBeNull();
+  });
+
+  it('ends another device and stays, and ends its own as a logout', async () => {
+    server.on('login', () => ({ ok: personsOk() }));
+    // `logout` costs nothing, where a `device_end` refused as a kick
+    // would leave this device's session behind it.
+    server.on('device_end', (p) => (p.device === 7 ? { error: { code: 'rate_limited', text: 'slow down' } } : { ok: {} }));
+    server.on('logout', () => ({ ok: {} }));
+    const conn = await connect();
+    await conn.deviceEnd(9);
+    expect(conn.state).toBe('online');
+    await conn.deviceEnd(7);
+    await wait(700);
+    expect(server.sent('device_end').map((f) => f.params)).toEqual([{ device: 9 }]);
+    expect(server.sent('logout')).toHaveLength(1);
+    expect(conn.state).toBe('offline');
+    expect(server.sent('resume')).toHaveLength(0);
+    expect(server.sent('login')).toHaveLength(1);
+    expect(hasSavedSession(CREDS.url)).toBe(false);
+  });
+
+  it('kicks by device only with persons, since a server without it kicks the whole person', async () => {
+    server.on('kick', () => ({ ok: {} }));
+    const plain = await connect();
+    await expect(plain.deviceEnd(7)).rejects.toThrow();
+    await expect(plain.kick({ uid: 2, device: 5 })).rejects.toThrow();
+    expect(server.sent('device_end')).toHaveLength(0);
+    expect(server.sent('kick')).toHaveLength(0);
+
+    server.on('login', () => ({ ok: personsOk() }));
+    await (await connect()).kick({ uid: 2, device: 5 });
+    expect(server.sent('kick').map((f) => f.params)).toEqual([{ uid: 2, device: 5 }]);
+  });
+});
+
 describe('resync recovery', () => {
   /** A server whose outbox overflowed: resume is refused, sync succeeds,
    *  and the store still holds the mail that was in the gap. */

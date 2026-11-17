@@ -1086,6 +1086,21 @@ dialog.picker h2 { margin: 0; font-size: 1rem; }
 dialog.picker footer button.primary { margin-top: 0; }
 dialog.picker header input { width: 9rem; }
 
+/* A person's devices, under the icons: a list short enough to need no
+   scroll of its own. */
+dialog.picker .devices { border-top: 1px solid var(--line); padding: 0.5rem 1rem; }
+dialog.picker .devices h3 { margin: 0 0 0.25rem; font-size: 0.9rem; }
+dialog.picker .devices ul { list-style: none; margin: 0; padding: 0; }
+dialog.picker .device {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  column-gap: 0.6rem;
+  align-items: center;
+  padding: 0.3rem 0;
+}
+dialog.picker .device-facts { grid-column: 1; font-size: 0.85rem; overflow-wrap: anywhere; }
+dialog.picker .device button { grid-column: 2; grid-row: 1 / span 2; }
+
 .icon-grid {
   flex: 1;
   overflow-y: auto;

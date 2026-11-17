@@ -66,6 +66,7 @@ import {
   type Room,
   type RoomPartReason,
   type User,
+  type DeviceEntry,
   type VideoKind,
 } from '@hotline-ng/client';
 
@@ -100,12 +101,12 @@ import { DebugPanel } from './debug';
 import { badge, clock, fill, h } from './dom';
 import { FilesView } from './files';
 import { icon } from './icons';
-import { type AvatarChoice, pickIcon } from './iconpicker';
+import { type AvatarChoice, type DeviceRow, type DevicesChoice, pickIcon } from './iconpicker';
 import { IdentityPanel } from './identity';
 import { installButton } from './install';
 import { takeScanFragment, type Scanned } from '../identity/scan';
 import { friendshipBooks, getActiveDevice, getDevice, newsGuids, peers, sealedReplay, type StoredDevice } from '../identity/storage';
-import { deviceLabelFrom } from '../devices';
+import { deviceFacts, deviceLabelFor, deviceLabelFrom, deviceLabelSet, writeDeviceLabel } from '../devices';
 import {
   CertProblem,
   PeerMemory,
@@ -427,6 +428,8 @@ export class App {
    *  with the fingerprint they were asked for under, until that uid's
    *  session changes or a message to them fails. */
   private certs = new Map<number, { fingerprint: string; devices: SealDevice[] }>();
+  /** The me dialog's devices list, kept to this person's row while open. */
+  private ownDevicesWatch: ((row: User) => void) | null = null;
   /** The persons asked their devices, and those that have none to seal to. */
   private probes = new PersonProbes();
   /** The uids whose rows said `sealed` this connection, and under which
@@ -1098,7 +1101,7 @@ export class App {
               reactions: true,
               emoji: true,
               persons: true,
-              deviceLabel: deviceLabelFrom(navigator.userAgent),
+              deviceLabel: deviceLabelFor(d.url, navigator.userAgent),
               sessionStore: this.sessionStore,
               ...(signs ? { signs, sealed: true } : {}),
               ...(d.identity ? { friendships: true } : {}),
@@ -1314,7 +1317,10 @@ export class App {
         const pm = this.store.pmWith({ uid: d.user.uid });
         if (pm) pm.title = d.user.nick;
       }
-      if (d.user.uid === this.store.self?.uid) this.store.self = d.user;
+      if (d.user.uid === this.store.self?.uid) {
+        this.store.self = d.user;
+        this.ownDevicesWatch?.(d.user);
+      }
       this.renderRoster();
       this.renderRail();
       this.renderMe();
@@ -4693,6 +4699,11 @@ export class App {
         this.signNews = on;
         writeSigning('news', on);
       },
+      deviceLabel:
+        this.url && this.conn instanceof Connection && this.conn.hasCap(CAP_PERSONS)
+          ? { set: deviceLabelSet(this.url), otherwise: deviceLabelFrom(navigator.userAgent) ?? '' }
+          : null,
+      setDeviceLabel: (label) => writeDeviceLabel(this.url, label),
       openDebug: () => this.debug.toggle(true),
     });
   }
@@ -4736,7 +4747,7 @@ export class App {
           },
         }
       : undefined;
-    const picked = await pickIcon(me.icon, avatar, me.nick);
+    const picked = await pickIcon(me.icon, avatar, me.nick, this.ownDevices(conn, failed));
     if (picked === null) return;
     const change = {
       ...(picked.icon !== me.icon && { icon: picked.icon }),
@@ -4748,6 +4759,55 @@ export class App {
     } catch (e) {
       this.say(e instanceof WireFailure ? errorText(e.wire) : String(e));
     }
+  }
+
+  /** This person's devices for the me dialog, from its roster row, which
+   *  `user_changed` and `sync` keep current; none without `persons`. */
+  private ownDevices(conn: Session, failed: (e: unknown) => Error): DevicesChoice | undefined {
+    const row = this.store.self ? this.store.user(this.store.self.uid) : undefined;
+    if (!(conn instanceof Connection) || conn.device === null || !row?.devices) return undefined;
+    const mine = conn.device;
+    const rows = (devices: DeviceEntry[]): DeviceRow[] =>
+      devices.map((d) => ({
+        device: d.device,
+        label: d.label,
+        facts: deviceFacts(d, (since) => new Date(since * 1000).toLocaleString()),
+        mine: d.device === mine,
+      }));
+    return {
+      list: rows(row.devices),
+      watch: (changed) => {
+        const watcher = (u: User) => changed(rows(u.devices ?? []));
+        this.ownDevicesWatch = watcher;
+        return () => {
+          if (this.ownDevicesWatch === watcher) this.ownDevicesWatch = null;
+        };
+      },
+      end: async (device) => {
+        // Ending this one logs out here, so it is asked first; another
+        // is one click, as a mistake there costs a login on that one.
+        if (device === mine) {
+          const yes = await ask({
+            title: 'End this device?',
+            body: 'This logs this browser out of the server. Your other devices stay.',
+            fields: [],
+            ok: 'End and log out',
+            danger: true,
+          });
+          if (yes === null) return false;
+        }
+        try {
+          await conn.deviceEnd(device);
+        } catch (e) {
+          // Gone already, and its row with it.
+          if (e instanceof WireFailure && e.wire.code === 'no_such_device') return true;
+          throw failed(e);
+        }
+        // This one's is a logout, as `/logout` is.
+        if (device === mine) location.reload();
+        return true;
+      },
+    };
   }
 
   private autoGrow(): void {

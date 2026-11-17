@@ -32,6 +32,12 @@ export interface Settings {
   setSignPms(choice: PmSigning): void;
   signNews: boolean;
   setSignNews(on: boolean): void;
+  /** This device's label on the server it is connected to, the one set
+   *  or '' for none, and the user agent's it goes by then; null where
+   *  that connection shows no devices. */
+  deviceLabel: { set: string; otherwise: string } | null;
+  /** False where the server would drop it, and the one before is kept. */
+  setDeviceLabel(label: string): boolean;
   openDebug(): void;
 }
 
@@ -46,6 +52,37 @@ const THEMES: [Theme, string][] = [
   ['light', 'Light'],
   ['dark', 'Dark'],
 ];
+
+function deviceLabelField(label: { set: string; otherwise: string }, set: (label: string) => boolean): HTMLElement {
+  const input = h('input', { type: 'text', value: label.set, placeholder: label.otherwise, spellcheck: false });
+  // As it is typed, so Escape or Done with the field still focused keep it.
+  input.oninput = () => {
+    input.setCustomValidity(
+      set(input.value) ? '' : 'Up to 32 characters, with no space at either end and no invisible or control characters. The last one that fit is kept.',
+    );
+    input.reportValidity();
+  };
+  return h(
+    'fieldset',
+    {},
+    h('legend', {}, 'This device'),
+    h(
+      'label',
+      { class: 'setting-toggle' },
+      h(
+        'span',
+        {},
+        h('span', { class: 'setting-label' }, 'Device name'),
+        h(
+          'span',
+          { class: 'setting-detail' },
+          'What your other devices, and moderators, are shown this one as on this server, beside what the server knows of it. Empty uses the browser\'s name. Takes effect the next time you log in (not on a reload).',
+        ),
+      ),
+      input,
+    ),
+  );
+}
 
 export function openSettings(s: Settings): void {
   const themes = THEMES.map(([value, label]) => {
@@ -138,6 +175,7 @@ export function openSettings(s: Settings): void {
           (on) => s.setSignNews(on),
         ),
       ),
+      s.deviceLabel ? deviceLabelField(s.deviceLabel, (label) => s.setDeviceLabel(label)) : null,
       h(
         'fieldset',
         {},

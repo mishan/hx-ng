@@ -62,21 +62,101 @@ test.describe('a person of two devices', () => {
     return { conn, rows };
   }
 
+  /** Log the page out with `/logout`, where it still has a session;
+   *  never a reason for a case to fail. */
+  async function logOut(page: Page): Promise<void> {
+    await page.keyboard.press('Escape').catch(() => {});
+    await page.locator('.composer-input').fill('/logout', { timeout: 2000 }).catch(() => {});
+    await page.locator('.composer-input').press('Enter', { timeout: 2000 }).catch(() => {});
+  }
+
+  /** The page's own device: the newest but `other`, the person's devices
+   *  being listed as they joined. */
+  const pageDevice = (conn: Connection) => conn.self!.devices!.filter((d) => d.device !== conn.device).at(-1)!;
+
+  test('each device lists the person\'s devices by label as they come, marks itself, and ends another', async ({ browser }) => {
+    const desk = await (await browser.newContext()).newPage();
+    const phone = await (await browser.newContext()).newPage();
+    try {
+      await logIn(desk);
+      await logIn(phone);
+      // The name the phone goes by, set here and sent at its next login.
+      await phone.getByRole('button', { name: 'Settings' }).click();
+      // Kept as it is typed, with nothing to save.
+      await phone.getByLabel('Device name').fill('Phone');
+      await phone.getByLabel('Device name').press('Escape');
+      await logOut(phone);
+      await expect(phone.getByLabel('Account')).toBeVisible();
+
+      await desk.locator('button.identity').click();
+      const devices = desk.getByRole('region', { name: 'Your devices' });
+      await expect(devices.locator('li')).toHaveCount(1);
+      // A device joining while the dialog is open is listed there.
+      await logIn(phone);
+      const opened = sockets(phone);
+      await expect(devices.locator('li')).toHaveCount(2);
+      const mine = devices.locator('li.mine');
+      await expect(mine).toContainText('(this device)');
+      await expect(mine).toContainText('password');
+      await expect(mine.getByRole('button', { name: /^End this device \(.+ on .+\)$/ })).toBeVisible();
+      await expect(devices.locator('li', { hasText: 'Phone' })).not.toContainText('(this device)');
+
+      // Another device is one click.
+      await devices.getByRole('button', { name: 'End Phone', exact: true }).click();
+      await expect(devices.locator('li')).toHaveCount(1);
+      await expect(desk.getByRole('dialog', { name: 'End this device?' })).toHaveCount(0);
+      await expect(desk.getByRole('dialog', { name: 'Name and icon' }).getByRole('status')).toHaveText('Ended Phone');
+      await expect(devices.getByRole('heading', { name: 'Your devices' })).toBeFocused();
+      await expect(phone.getByText(ENDED).first()).toBeVisible();
+      await staysOut(phone, opened);
+
+      await desk.keyboard.press('Escape');
+      await desk.locator('button.identity').click();
+      await expect(devices.locator('li')).toHaveCount(1);
+    } finally {
+      await logOut(desk);
+      await desk.context().close();
+      await phone.context().close();
+    }
+  });
+
+  test('ending this device through the dialog is asked first, then logs it out for good', async ({ page }) => {
+    const opened = sockets(page);
+    await logIn(page);
+    try {
+      await page.locator('button.identity').click();
+      const own = page.getByRole('region', { name: 'Your devices' }).getByRole('button', { name: /^End this device/ });
+      const confirm = page.getByRole('dialog', { name: 'End this device?' });
+      await own.click();
+      await confirm.getByRole('button', { name: 'Cancel' }).click();
+      await expect(confirm).toHaveCount(0);
+      await expect(page.locator('.pill')).toHaveClass(/online/);
+
+      await own.click();
+      await confirm.getByRole('button', { name: 'End and log out' }).click();
+      await expect(page.getByLabel('Account')).toBeVisible();
+      const after = opened();
+      await page.waitForTimeout(3000);
+      expect(opened(), 'no socket opened once ended').toBe(after);
+    } finally {
+      await logOut(page);
+    }
+  });
+
   test('a device ended by another of its person says so, and logs in no more', async ({ page }) => {
     const opened = sockets(page);
     await logIn(page);
     const { conn, rows } = await otherDevice();
     try {
-      const [mine, theirs] = conn.self!.devices!;
-      expect(theirs!.device).toBe(conn.device);
-      expect(mine!.label, 'the page names itself by its browser').toMatch(/ on /);
+      const mine = pageDevice(conn);
+      expect(mine.label, 'the page names itself by its browser').toMatch(/ on /);
 
       const before = opened();
-      await conn.deviceEnd(mine!.device);
+      await conn.deviceEnd(mine.device);
       await expect(page.getByText(ENDED).first()).toBeVisible();
-      await expect.poll(() => rows.at(-1)?.devices?.length).toBe(1);
+      await expect.poll(() => rows.at(-1)?.devices?.some((d) => d.device === mine.device)).toBe(false);
       await staysOut(page, opened, before);
-      expect(rows.at(-1)?.devices?.map((d) => d.device)).toEqual([conn.device]);
+      expect(rows.at(-1)?.devices?.map((d) => d.device)).not.toContain(mine.device);
     } finally {
       await conn.logout();
     }
@@ -98,16 +178,17 @@ test.describe('a person of two devices', () => {
     await logIn(page);
     const { conn, rows } = await otherDevice();
     try {
-      const pageDevice = conn.self!.devices![0]!.device;
+      const { device } = pageDevice(conn);
       away = true;
       for (const s of live) await s.close();
-      await expect.poll(() => rows.at(-1)?.devices?.find((d) => d.device === pageDevice)?.status).toBe('detached');
-      await conn.deviceEnd(pageDevice);
-      await expect.poll(() => rows.at(-1)?.devices?.length).toBe(1);
+      await expect.poll(() => rows.at(-1)?.devices?.find((d) => d.device === device)?.status).toBe('detached');
+      await conn.deviceEnd(device);
+      await expect.poll(() => rows.at(-1)?.devices?.some((d) => d.device === device)).toBe(false);
       away = false;
       await expect(page.getByText(ENDED).first()).toBeVisible({ timeout: 20_000 });
+      const before = rows.length;
       await staysOut(page, opened);
-      expect(rows.at(-1)?.devices?.map((d) => d.device)).toEqual([conn.device]);
+      expect(rows.slice(before).flatMap((r) => r.devices ?? []).some((d) => d.device !== conn.device), 'nothing joined the person again').toBe(false);
     } finally {
       await conn.logout();
     }

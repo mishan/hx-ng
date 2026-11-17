@@ -118,6 +118,31 @@ export interface User {
    *  `roles` capability; absent when none. Drawn with
    *  `Connection.roles`' list. */
   roles?: string[];
+  /** A person's devices in the order they joined its row, to a session
+   *  granted `persons` that may see them (§7.6): its own person's, or
+   *  every other person's to one with the kick bit. */
+  devices?: DeviceEntry[];
+}
+
+/** One device under a person's row (§7.6). Every field but `label` is
+ *  the server's own fact about it; `label` is what its client calls it,
+ *  a hint to show beside those facts and never decide anything by. */
+export interface DeviceEntry {
+  /** Opaque, and never a uid. */
+  device: number;
+  wire: 'ng' | 'classic';
+  /** It proved the person's identity with its device key, rather than
+   *  logging in with the account's password. */
+  proved: boolean;
+  transport: Transport;
+  status: Status;
+  /** When it logged in, Unix seconds, kept across resumes. */
+  since: number;
+  /** To a viewer with the kick bit alone. */
+  login?: string;
+  addr?: string;
+  label?: string;
+  identity?: { sealed?: true; signs?: true };
 }
 
 export interface RemoteServer {
@@ -176,6 +201,11 @@ export interface SelfUser extends User {
    *  their gates. Present only when true; the resume reply's `self` does
    *  not say, so `Connection.manageRooms` is what to read. */
   manage_rooms?: true;
+  /** This session's device id, to a session granted `persons` (§7.6);
+   *  `Connection.device` keeps it, since a `user_changed` of the row
+   *  does not carry it. Its own entry in `devices` is the one with this
+   *  id, and holds its own status where the row's is the person's. */
+  device?: number;
 }
 
 /** The `from` object on chat, msg and broadcast events: a uid and the
@@ -320,6 +350,12 @@ export interface LoginParams {
   /** This client knows the server's own emoji (hxd-ng's
    *  `docs/server-emoji.md` §8), so is sent their references. */
   emoji?: true;
+  /** This client can show a person's devices (§7.6), and handles
+   *  `devices` on its rows, `roster_stale` and `ended`. */
+  persons?: true;
+  /** What to call this device in the device entries of those who may
+   *  see them; dropped by the server if it does not pass §7.6's rules. */
+  device_label?: string;
 }
 
 export interface VideoLimits {
@@ -1938,6 +1974,9 @@ export interface KickParams {
   ban?: number;
   purge?: number;
   reason?: string;
+  /** With `persons` alone: end this one device of the row (§7.6), with
+   *  neither `ban` nor `purge`. */
+  device?: number;
 }
 
 /** What a moderation act was. */
@@ -2245,6 +2284,10 @@ export interface Events {
   };
   broadcast: { from: Sender; text: string };
   kicked: Record<string, never>;
+  /** With `persons`: one of this person's devices, this one or another,
+   *  ended this session. The close that follows says `ended`, and the
+   *  session is over: neither resumed nor logged in again on its own. */
+  ended: Record<string, never>;
   /** An administrator changed the account this session is logged in as;
    *  this is what it may do now. `Connection.accounts` is already
    *  updated when a handler hears it. */
@@ -2433,6 +2476,9 @@ export const CAP_REACTIONS = 'reactions';
 /** Listed only in reply to a login that asked for it, where the server
  *  keeps an emoji catalog. */
 export const CAP_EMOJI = 'emoji';
+/** Listed only in reply to a login that asked for it, where the server
+ *  groups a person's sessions into one row (§7.6). */
+export const CAP_PERSONS = 'persons';
 
 /**
  * `resync_required` is not a failure: the session is still alive and the
@@ -2441,6 +2487,13 @@ export const CAP_EMOJI = 'emoji';
  */
 export const RESYNC_REQUIRED = 'resync_required';
 export const SESSION_EXPIRED = 'session_expired';
+/** A resume of a session ended from one of its person's devices
+ *  (§7.6), and the close and the event that end one: terminal, unlike
+ *  `session_expired`, after which a client may log in again. */
+export const ENDED = 'ended';
+/** A resume of a session that was kicked or banned, which is as final
+ *  as the `kicked` close. */
+export const KICKED = 'kicked';
 /** "Slow down", never "there is nothing more" — a loop that pages on
  *  the client's behalf has to tell the two apart. */
 export const RATE_LIMITED = 'rate_limited';
@@ -2475,10 +2528,12 @@ export type RetryClass = 'soon' | 'later' | 'never';
  * `soon` is load, or capacity others hold for the moment. `later` is
  * time passing, other people acting in the ordinary course (reading
  * their mail, a linked server coming back), or the session: `flooding`,
- * `not_logged_in`, `session_expired`, `too_many_connections`,
- * `not_authorized` and `encryption_required` concern the session or its
- * connection, not the request, and the work may pass after logging in
- * again. Whether to wait for that is the caller's decision. `never`
+ * `not_logged_in`, `session_expired`, `ended`, `kicked`,
+ * `too_many_connections`, `not_authorized` and `encryption_required`
+ * concern the session or its connection, not the request, and the work
+ * may pass after logging in again. Whether to wait for that is the
+ * caller's decision, except that after `ended` or `kicked` a login again
+ * is the user's own, never automatic. `never`
  * covers the rest, including what passes only once the caller has done
  * something else first (left a room, emptied a bundle) or someone has
  * decided differently about it (a grant, a block), which a retry loop
@@ -2512,6 +2567,10 @@ const RETRY = {
   server_busy: 'soon',
   too_many_connections: 'later',
   session_expired: 'later',
+  // A resume of a session ended from one of its person's devices, or
+  // kicked or banned: never to be logged in again on the client's own.
+  ended: 'later',
+  kicked: 'later',
   // Not a failure: the next step is `sync`, not the same `resume`.
   resync_required: 'never',
   not_available: 'never',
@@ -2531,6 +2590,8 @@ const RETRY = {
   // holds, no such account, or one that takes no offline mail, which
   // private-messages.md §11 makes one answer.
   no_such_user: 'never',
+  // Not a live device of that row, or one this session may not end (§7.6).
+  no_such_device: 'never',
   no_inbox: 'never',
   mailbox_full: 'later',
   quota_exceeded: 'later',

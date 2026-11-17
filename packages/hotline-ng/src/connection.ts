@@ -28,11 +28,14 @@ import {
 } from './files.js';
 import {
   CAP_FRIENDSHIPS,
+  CAP_PERSONS,
+  ENDED,
   isEvent,
   isReply,
   ERROR_TEXT,
   errorText,
   FLOODING,
+  KICKED,
   RATE_LIMITED,
   RESYNC_REQUIRED,
   TOO_MANY_CONNECTIONS,
@@ -265,6 +268,13 @@ export interface Credentials {
    *  and may react with one. A resume keeps what the login was granted,
    *  which `Connection.emoji` says. */
   emoji?: boolean;
+  /** Say `persons` at login: this client shows a person's devices
+   *  (§7.6), and is granted it where the server groups persons. */
+  persons?: boolean;
+  /** Said at login as `device_label`, what this device is called in
+   *  the device entries of those who may see them, with or without
+   *  `persons`. A resume keeps it. */
+  deviceLabel?: string;
   /** Opens each socket in place of the global `WebSocket`: for a
    *  runtime without one, or a test's fake server
    *  (`@hotline-ng/client/testing`). */
@@ -337,6 +347,7 @@ interface Saved {
   replies?: RepliesConfig | null;
   reactions?: ReactionsConfig | null;
   emoji?: EmojiConfig | null;
+  device?: number | null;
   /** The session speaks the friend family: its login said so, or it
    *  has sent one of the family's requests. */
   speaks?: boolean;
@@ -355,6 +366,9 @@ const SAVED_KEY = 'hxd-ng.session';
 /** A resume-only connection's session is gone, and with no password to
  *  log in again with, so is the connection. */
 class SessionGone extends Error {}
+
+const ENDED_TEXT = 'This session was ended from one of your devices.';
+const KICKED_TEXT = 'You were disconnected by an administrator.';
 
 /** `WebSocket.OPEN`, without needing a global `WebSocket` to read it from. */
 const OPEN = 1;
@@ -486,8 +500,9 @@ export interface ConnectionHooks {
    *  that they are applied before its roster is read (§7.5). A failure
    *  is traced, and the roster asked all the same. */
   beforeFriends?: () => Promise<void>;
-  /** The session is gone for good — kicked, logged out, banned, or the
-   *  grace window lapsed. No further reconnection will be attempted. */
+  /** The session is gone for good — kicked, logged out, banned, ended
+   *  from one of its person's devices, or the grace window lapsed. No
+   *  further reconnection will be attempted. */
   onEnded?: (reason: string) => void;
 }
 
@@ -518,6 +533,8 @@ export class Connection {
   private attaching = false;
   /** Answered `flooding`: the `kicked` close that follows is for that. */
   private flooded = false;
+  /** Sent `ended`: whatever the close that follows says, it is the end. */
+  private ended = false;
 
   state: ConnState = 'offline';
   /** The last seq we have actually processed. Resume's `last_seq`. */
@@ -593,6 +610,10 @@ export class Connection {
    *  to, from the login reply or the saved session. `null` means it was
    *  not granted `emoji`: send no references, and offer no picker. */
   emoji: EmojiConfig | null = null;
+  /** This session's device id, from the login or resume reply's `self`
+   *  or the saved session, where it was granted `persons` (§7.6).
+   *  `null` means it has none: there is no entry of its own to read. */
+  device: number | null = null;
   /** This session speaks the friend family, so is sent its events. */
   private speaks = false;
   /** Round-trip time of the last explicit `ping`, in milliseconds. */
@@ -633,6 +654,7 @@ export class Connection {
   async start(opts: { resumeOnly?: boolean } = {}): Promise<void> {
     this.closing = false;
     this.flooded = false;
+    this.ended = false;
     const raw = readRaw(this.creds.sessionStore);
     const saved = parseSaved(raw);
     // A login named is the account asked for, and another's session is
@@ -662,6 +684,7 @@ export class Connection {
       this.replies = saved.replies ?? null;
       this.reactions = saved.reactions ?? null;
       this.emoji = saved.emoji ?? null;
+      this.device = saved.device ?? null;
       this.speaks = saved.speaks ?? false;
     } else if (opts.resumeOnly) {
       throw new Error('no session to resume');
@@ -676,6 +699,16 @@ export class Connection {
       this.cancelRetry();
       throw e;
     }
+  }
+
+  /** End one device of this session's person (§7.6), which for this
+   *  device is a logout, and sent as one: it costs nothing, where a
+   *  `device_end` refused as a kick would leave the session behind. Only
+   *  a session granted `persons` may. */
+  async deviceEnd(device: number): Promise<void> {
+    if (!this.hasCap(CAP_PERSONS)) throw new Error('This session was not granted persons.');
+    if (device === this.device) return this.logout();
+    await this.request('device_end', { device });
   }
 
   /** End the session now, with no grace window. */
@@ -791,6 +824,8 @@ export class Connection {
     if (this.creds.replies) params.replies = true;
     if (this.creds.reactions) params.reactions = true;
     if (this.creds.emoji) params.emoji = true;
+    if (this.creds.persons) params.persons = true;
+    if (this.creds.deviceLabel) params.device_label = this.creds.deviceLabel;
 
     const ok = await this.request<LoginOk>('login', params);
     this.signing = ok.signs ?? null;
@@ -821,6 +856,7 @@ export class Connection {
     this.replies = ok.replies ?? null;
     this.reactions = ok.reactions ?? null;
     this.emoji = ok.emoji ?? null;
+    this.device = ok.self.device ?? null;
     // Only a session that may detach is worth remembering: without the
     // permission a resume can only ever answer session_expired, and
     // storing a token we know is useless just invites a confusing
@@ -851,6 +887,7 @@ export class Connection {
         ...(this.sealed ? { sealed: true } : {}),
       });
       this.self = ok.self;
+      this.device = ok.self.device ?? this.device;
       this.signing = ok.signs ?? null;
       this.sealing = ok.sealed === true;
       this.retry = 0;
@@ -872,6 +909,16 @@ export class Connection {
       // The session is left as it was (§6.2): keep it, and resume later
       // on a fresh socket rather than logging in over it.
       if (e.wire.code === RATE_LIMITED || e.wire.code === TOO_MANY_CONNECTIONS) throw e;
+      // Ended from one of its person's devices, or kicked or banned:
+      // the server's word that this session is not to come back, which
+      // a fresh login would undo.
+      if (e.wire.code === ENDED || e.wire.code === KICKED) {
+        this.session = null;
+        this.token = null;
+        this.seq = 0;
+        this.forget();
+        throw new SessionGone(e.wire.code === ENDED ? ENDED_TEXT : KICKED_TEXT);
+      }
       if (e.wire.code !== RESYNC_REQUIRED) {
         // session_expired and friends: the session is gone, and a fresh
         // login is what is left.
@@ -1105,9 +1152,9 @@ export class Connection {
     // `replaced` is another device taking the session over — last device
     // wins is the mobile-friendly answer, and this one lost.
     const reason = e.reason || '';
+    if (reason === ENDED || this.ended) return this.end(ENDED_TEXT);
     if (reason === 'replaced') return this.end('This session was taken over by another connection.');
-    if (reason === 'kicked')
-      return this.end(this.flooded ? ERROR_TEXT[FLOODING]! : 'You were disconnected by an administrator.');
+    if (reason === 'kicked') return this.end(this.flooded ? ERROR_TEXT[FLOODING]! : KICKED_TEXT);
     if (reason === 'logout') return this.end('Logged out.');
 
     if (this.grace === null && this.session) {
@@ -1128,6 +1175,7 @@ export class Connection {
     this.forget();
     this.session = null;
     this.token = null;
+    this.device = null;
     this.setState('offline', reason);
     this.hooks.onEnded?.(reason);
   }
@@ -1958,6 +2006,11 @@ export class Connection {
 
   /** Disconnect someone, and optionally ban them and purge their output. */
   kick(params: KickParams): Promise<Record<string, never>> {
+    // A server that did not grant `persons` may ignore `device` and
+    // kick the whole person.
+    if (params.device !== undefined && !this.hasCap(CAP_PERSONS)) {
+      return Promise.reject(new Error('This session was not granted persons, so cannot kick one device.'));
+    }
     return this.request('kick', params);
   }
 
@@ -2181,6 +2234,7 @@ export class Connection {
       const { room, uid } = frame.data as Events['room_member_parted'];
       if (uid === this.self?.uid) this.roomHistoryIds.delete(room);
     }
+    if (frame.ev === ENDED) this.ended = true;
     if (frame.ev === 'account_changed') this.adoptAccess(frame.data as SelfAccess);
     if (frame.ev === 'roles_changed') {
       this.roles = { ...this.roles, list: (frame.data as Events['roles_changed']).list };
@@ -2232,6 +2286,7 @@ export class Connection {
       replies: this.replies,
       reactions: this.reactions,
       emoji: this.emoji,
+      device: this.device,
       speaks: this.speaks,
       writer: this.writer,
       login: this.self?.identity?.account ?? this.creds.login,

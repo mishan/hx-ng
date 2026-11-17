@@ -81,6 +81,8 @@ const status = (...uids: number[]): { cid: number; participants: VoiceParticipan
 
 let server: FakeServer;
 let mic: FakeTrack;
+/** Where a test holds the next capture from coming back. */
+let captured: Promise<void>;
 let logged: string[];
 let errors: string[];
 
@@ -95,9 +97,16 @@ beforeEach(() => {
   server.on('voice_mute', () => ({ ok: {} }));
   server.on('voice_leave', () => ({ ok: {} }));
   Object.assign(globalThis.window, { isSecureContext: true });
-  mic = new FakeTrack();
+  captured = Promise.resolve();
   vi.stubGlobal('navigator', {
-    mediaDevices: { getUserMedia: () => Promise.resolve(new FakeStream([mic])) },
+    mediaDevices: {
+      // A microphone of its own each time, as a browser hands out.
+      getUserMedia: async () => {
+        await captured;
+        mic = new FakeTrack();
+        return new FakeStream([mic]);
+      },
+    },
   });
   vi.stubGlobal('RTCPeerConnection', FakePeerConnection);
   FakePeerConnection.made = [];
@@ -131,13 +140,17 @@ async function joined(): Promise<VoiceSession> {
 
 /** A reply the test sends when it chooses, as the server answering after
  *  the move it has just made. */
-function held(): { reply: Promise<Reply>; refuse: () => void } {
-  let refuse = (): void => {};
-  const reply = new Promise<Reply>((resolve) => {
-    refuse = () => resolve({ error: { code: 'not_in_voice', text: 'You are not in voice.' } });
-  });
-  return { reply, refuse };
+function held(): { reply: Promise<Reply>; refuse: () => void; answer: (ok: unknown) => void } {
+  let resolve: (r: Reply) => void = () => {};
+  const reply = new Promise<Reply>((r) => (resolve = r));
+  return {
+    reply,
+    refuse: () => resolve({ error: { code: 'not_in_voice', text: 'You are not in voice.' } }),
+    answer: (ok) => resolve({ ok }),
+  };
 }
+
+const JOIN_OK = { sdp: 'v=0', codec: 'opus', participants: [{ uid: BOB, muted: false }] };
 
 describe('a voice_status without this session', () => {
   it('after one with it, is the person moved to another device: media torn down, no leave sent', async () => {
@@ -250,5 +263,81 @@ describe('a voice_status without this session', () => {
     server.event('voice_status', { cid: 7, participants: [] });
     await settle();
     expect(voice.joined).toBe(true);
+  });
+});
+
+describe('work begun before a teardown', () => {
+  it('a capture that comes back after it is stopped and joins nothing', async () => {
+    const voice = await session();
+    let give = (): void => {};
+    captured = new Promise((resolve) => (give = resolve));
+    const join = voice.join();
+    await settle();
+    voice.teardown();
+    give();
+    await expect(join).resolves.toBeUndefined();
+    expect(mic.stopped).toBe(true);
+    expect(server.sent('voice_join')).toEqual([]);
+    expect(voice.joined).toBe(false);
+  });
+
+  it('a join answered after it is not joined', async () => {
+    const voice = await session();
+    const reply = held();
+    server.on('voice_join', () => reply.reply);
+    const join = voice.join();
+    await settle();
+    voice.teardown();
+    reply.answer(JOIN_OK);
+    await expect(join).resolves.toBeUndefined();
+    expect(voice.joined).toBe(false);
+    expect(server.sent('voice_answer')).toEqual([]);
+  });
+
+  it('a join refused after it leaves the join that replaced it alone', async () => {
+    const voice = await session();
+    const first = held();
+    server.on('voice_join', () => first.reply);
+    const stale = voice.join();
+    await settle();
+    voice.teardown();
+    server.on('voice_join', () => ({ ok: JOIN_OK }));
+    await voice.join();
+    first.refuse();
+    await expect(stale).resolves.toBeUndefined();
+    expect(voice.joined).toBe(true);
+    expect(mic.stopped).toBe(false);
+  });
+
+  it('a mute answered after it leaves the session that replaced it as it was', async () => {
+    const voice = await joined();
+    const reply = held();
+    server.on('voice_mute', () => reply.reply);
+    const unmute = voice.setMuted(false);
+    await settle();
+    voice.teardown();
+    server.on('voice_mute', () => ({ ok: {} }));
+    await voice.join();
+    reply.answer({});
+    await unmute;
+    expect(voice.muted).toBe(true);
+    expect(mic.enabled).toBe(false);
+  });
+
+  it('an offer queued before it is never answered on the connection after it', async () => {
+    const voice = await joined();
+    let take = (): void => {};
+    FakePeerConnection.offered = new Promise((resolve) => (take = resolve));
+    server.event('voice_offer', { cid: 0, sdp: 'v=0 in flight' });
+    server.event('voice_offer', { cid: 0, sdp: 'v=0 queued' });
+    await settle();
+    FakePeerConnection.offered = Promise.resolve();
+    voice.teardown();
+    await voice.join();
+    take();
+    await settle();
+    expect(FakePeerConnection.made[1]?.remoteDescription).toEqual({ type: 'offer', sdp: 'v=0' });
+    expect(server.sent('voice_answer')).toHaveLength(2);
+    expect(errors).toEqual([]);
   });
 });

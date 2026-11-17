@@ -175,7 +175,8 @@ export class VoiceSession {
    *  is that. */
   private heardIn = false;
   /** Bumped by `teardown`, so work begun before one ends quietly after
-   *  it rather than reporting the refusals of a session that is gone. */
+   *  it, neither reporting the refusals of a session that is gone nor
+   *  touching the one that replaced it. */
   private generation = 0;
 
   /** The room. The public chat is 0, and voice is one room at a time. */
@@ -259,19 +260,26 @@ export class VoiceSession {
   async join(): Promise<void> {
     const blocked = captureBlockedReason();
     if (blocked) throw new Error(blocked);
-    this.mic = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const generation = this.generation;
+    const mic = await navigator.mediaDevices.getUserMedia({ audio: true });
+    if (this.generation !== generation) {
+      for (const t of mic.getTracks()) t.stop();
+      return;
+    }
+    this.mic = mic;
     this.pc = this.newPeerConnection();
-    for (const t of this.mic.getTracks()) this.pc.addTrack(t, this.mic);
+    for (const t of mic.getTracks()) this.pc.addTrack(t, mic);
 
     this.heardIn = false;
-    const generation = this.generation;
     let ok: VoiceJoinOk;
     try {
       ok = await this.conn.request<VoiceJoinOk>('voice_join', { cid: this.cid });
     } catch (e) {
+      if (this.generation !== generation) return;
       this.teardown();
       throw e;
     }
+    if (this.generation !== generation) return;
     this.codec = ok.codec;
     this.participants = ok.participants;
     this.joined = true;
@@ -297,7 +305,9 @@ export class VoiceSession {
   }
 
   async setMuted(muted: boolean): Promise<void> {
+    const generation = this.generation;
     await this.conn.request('voice_mute', { cid: this.cid, muted });
+    if (this.generation !== generation) return;
     this.muted = muted;
     // Both sides, on purpose: replacing the microphone with silence
     // keeps RTP flowing at its normal rate, which keeps the NAT path
@@ -374,7 +384,7 @@ export class VoiceSession {
    *  answered, so a caller that has one in hand can await it. */
   private negotiate(sdp: string): Promise<void> {
     const generation = this.generation;
-    const next = this.turn.then(() => this.answerOffer(sdp));
+    const next = this.turn.then(() => this.answerOffer(sdp, generation));
     // The queue must survive a failed negotiation, or one bad offer ends
     // every renegotiation for the rest of the call.
     this.turn = next.catch(() => {});
@@ -385,10 +395,9 @@ export class VoiceSession {
     });
   }
 
-  private async answerOffer(sdp: string): Promise<void> {
+  private async answerOffer(sdp: string, generation: number): Promise<void> {
     const pc = this.pc;
-    if (!pc) return;
-    const generation = this.generation;
+    if (!pc || this.generation !== generation) return;
     await pc.setRemoteDescription({ type: 'offer', sdp });
     await this.flushIce();
     // Attach capture tracks *before* creating the answer: the answer's

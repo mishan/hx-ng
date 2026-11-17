@@ -183,6 +183,14 @@ says how.
   `AccountEditParams` takes `roles` and `grant`, `deny`, `raw_grant`,
   `raw_deny` in place of `access`.
 
+### Fixed
+
+- A joined `VoiceSession` sent a `voice_status` of its room without its
+  own row, once one since the join has listed it, is out of voice: its
+  person moved to another device (hxd-ng's `docs/hotline-ng.md` §7.6)
+  or the server ended it. It tears down its media, sends no
+  `voice_leave`, and says so through `onLog`.
+
 ## 0.2.0
 
 ### Changed

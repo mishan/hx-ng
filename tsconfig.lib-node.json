@@ -1,8 +1,10 @@
 {
   // The library's Node subpath and its test: Node's types, with DOM for
   // the library modules they import, which are written against
-  // WebCrypto's and fetch's DOM typings. Not `tsconfig.node.json`,
-  // whose e2e specs would read DOM as the page's.
+  // WebCrypto's and fetch's DOM typings, and the one e2e spec that runs
+  // a library `Connection` in Node beside its page. Not
+  // `tsconfig.node.json`, whose other e2e specs would read DOM as the
+  // page's.
   "extends": "./tsconfig.node.json",
   "compilerOptions": {
     "lib": [
@@ -12,6 +14,8 @@
   },
   "include": [
     "packages/hotline-ng/src/node.ts",
-    "packages/hotline-ng/test/node.test.ts"
-  ]
+    "packages/hotline-ng/test/node.test.ts",
+    "e2e/persons.spec.ts"
+  ],
+  "exclude": []
 }

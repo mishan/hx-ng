@@ -135,6 +135,8 @@ async function waitForPort(url: string, timeoutMs: number): Promise<void> {
 }
 
 export interface ServerOptions {
+  /** Lines for `[server]`, after its bind and name: `coalesce = true`. */
+  server?: string;
   /** The config sections after `[server]`, `[paths]` and `[ng]`. Absent,
    *  the server is the guest-only identity one described below. */
   sections?: string;
@@ -169,6 +171,7 @@ export async function startServer(ngPort: number, opts: ServerOptions = {}): Pro
 [server]
 bind = "127.0.0.1:${ngPort - 100}"
 name = "hx-ng e2e"
+${opts.server ?? ''}
 
 [paths]
 accounts = "accounts"

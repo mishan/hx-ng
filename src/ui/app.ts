@@ -30,8 +30,7 @@ import {
   CAP_ROOMS,
   CAP_SIGNED,
   BAD_SIGNATURE,
-  CERT_CHANGED,
-  NOT_SEALED,
+  CAP_PERSONS,
   SIGNED_SKEW_SECONDS,
   base64urlToBytes,
   canonicalText,
@@ -40,6 +39,8 @@ import {
   signMsgRequest,
   signNewsPost,
   sealMsgRequest,
+  sealBoxes,
+  deviceCertBytes,
   isFingerprint,
   mediaBlockedReason,
   type BlockParams,
@@ -52,6 +53,8 @@ import {
   type HistoryOk,
   type Media,
   type MsgOk,
+  type BoxesMsgParams,
+  type SealedMsgParams,
   type MsgParams,
   type SignedMsgRequest,
   type NewsNode,
@@ -102,8 +105,11 @@ import { IdentityPanel } from './identity';
 import { installButton } from './install';
 import { takeScanFragment, type Scanned } from '../identity/scan';
 import { friendshipBooks, getActiveDevice, getDevice, newsGuids, peers, sealedReplay, type StoredDevice } from '../identity/storage';
+import { deviceLabelFrom } from '../devices';
 import {
+  CertProblem,
   PeerMemory,
+  PersonProbes,
   adoption,
   chooseDeniable,
   conversationIdentity,
@@ -111,8 +117,13 @@ import {
   lineFingerprint,
   neverSealedFallback,
   neverSeals,
+  probeRow,
+  probesPerson,
   rememberIdentity,
+  sealingAfterSnapshot,
   sealTarget,
+  sealToDevices,
+  type SealDevice,
   sealedBefore,
   sighting,
   signedTo,
@@ -412,10 +423,12 @@ export class App {
   /** This device's keys and certificate, for a session that may sign
    *  and seal. */
   private signer: { key: CryptoKey; enc: CryptoKey; cert: Uint8Array } | null = null;
-  /** Each roster session's certificate as `device_cert` gave it, with
-   *  the fingerprint it was asked for under, until that uid's session
-   *  changes or the server says its key has. */
-  private certs = new Map<number, { fingerprint: string; cert: Uint8Array }>();
+  /** Each roster row's devices to seal to as `device_cert` gave them,
+   *  with the fingerprint they were asked for under, until that uid's
+   *  session changes or a message to them fails. */
+  private certs = new Map<number, { fingerprint: string; devices: SealDevice[] }>();
+  /** The persons asked their devices, and those that have none to seal to. */
+  private probes = new PersonProbes();
   /** The uids whose rows said `sealed` this connection, and under which
    *  fingerprint: a message to one that goes in the clear is asked about
    *  first (§8), even once the row says nothing of an identity. */
@@ -911,9 +924,8 @@ export class App {
           const joined = new Set(rooms.joined.map((r) => r.id));
           for (const c of this.store.rooms()) c.joined = joined.has(roomOf(c));
         }
-        if (!stale) this.certs.clear();
-        this.sealedRows.clear();
-        for (const u of users) this.noteSealed(u);
+        this.probes.clear();
+        sealingAfterSnapshot({ sealedRows: this.sealedRows, certs: this.certs }, users, stale === true);
         // The block a login or a sync carries, as it stands now.
         this.friends.onBlock();
         this.panes?.available('friends', this.conn?.messaging?.takes_part === true);
@@ -1055,6 +1067,7 @@ export class App {
     this.articles = new ArticleReader(this.pinned, newsGuids);
     this.messages = new MessageReader(null, sealedReplay);
     this.certs.clear();
+    this.probes.clear();
     this.sealedRows.clear();
     this.cannotSealNoted.clear();
     this.clockWarned = false;
@@ -1084,6 +1097,8 @@ export class App {
               replies: true,
               reactions: true,
               emoji: true,
+              persons: true,
+              deviceLabel: deviceLabelFrom(navigator.userAgent),
               sessionStore: this.sessionStore,
               ...(signs ? { signs, sealed: true } : {}),
               ...(d.identity ? { friendships: true } : {}),
@@ -1282,6 +1297,7 @@ export class App {
     conn.on('user_joined', (d) => {
       this.store.put(d.user);
       this.certs.delete(d.user.uid);
+      this.probes.forget(d.user.uid);
       this.noteSealed(d.user);
       this.inOrder(() => this.push(LOBBY, { t: Date.now(), kind: 'notice', text: `${d.user.nick} joined.` }));
       this.renderRoster();
@@ -1290,6 +1306,7 @@ export class App {
     conn.on('user_changed', (d) => {
       const before = this.store.user(d.user.uid);
       this.store.put(d.user);
+      this.probes.forget(d.user.uid);
       this.noteSealed(d.user);
       if (before && before.nick !== d.user.nick) {
         const text = `${before.nick} is now known as ${d.user.nick}.`;
@@ -1312,6 +1329,7 @@ export class App {
     conn.on('user_parted', (d) => {
       const gone = this.store.remove(d.uid);
       this.certs.delete(d.uid);
+      this.probes.forget(d.uid);
       this.sealedRows.delete(d.uid);
       const text = `${gone?.nick ?? `uid ${d.uid}`} left.`;
       this.inOrder(() => this.push(LOBBY, { t: Date.now(), kind: 'notice', text }));
@@ -2013,7 +2031,8 @@ export class App {
       return { why: `it is longer than the ${SEALED_MSG_MAX_BYTES} bytes a sealed message may be` };
     }
     const { known, hint } = conversationIdentity(conv, this.peerMemory, this.keyUrl);
-    let target = sealTarget(conv, known, this.store.roster(), hint);
+    await this.probePerson(conn, conv);
+    let target = sealTarget(conv, known, this.store.roster(), hint, this.listedPersons(), this.store.self?.uid);
     if ('changed' in target) {
       await this.acceptIdentity(conv, target.changed, target.was, 'sealed');
       target = { uid: target.uid, fingerprint: target.changed };
@@ -2028,55 +2047,90 @@ export class App {
     const deniable = this.deniable(conv);
     const message = { id: crypto.getRandomValues(new Uint8Array(16)), cert: signer.cert, to: fingerprintFromString(to)!, text };
     const sent = Math.floor(Date.now() / 1000);
-    let resealed = false;
-    for (;;) {
-      try {
-        const { cert, held } = await this.recipientCert(conn, uid, to);
-        let req: { sealed: string; cert: string };
-        try {
-          req = await sealMsgRequest({ sign: signer.key, enc: signer.enc }, message, cert, deniable, sent);
-        } catch (e) {
-          this.certs.delete(uid);
-          // One held from before may have expired since: the server's
-          // word now is asked for.
-          if (held) continue;
-          return { why: `the certificate the server gave for them did not pass: ${this.problem(e)}` };
-        }
-        const ok = await conn.msg({ to: uid, ...req });
-        void rememberIdentity(conv, this.peerMemory, this.keyUrl, to, { login: conv.peer.login, nick: conv.title }, { sealed: true });
-        const signature: LineSignature = {
-          state: deniable ? 'deniable' : 'verified',
-          signer: this.proved,
-          to,
-          sent,
-          sentAtAnotherTime: false,
-          signatureExpected: false,
-        };
-        return { ok, signature, sealed: true };
-      } catch (e) {
-        if (!(e instanceof WireFailure)) throw e;
-        if (e.wire.code === CERT_CHANGED && !resealed) {
-          resealed = true;
-          this.certs.delete(uid);
-          continue;
-        }
-        if (e.wire.code === NOT_SEALED || e.wire.code === 'not_delivered') return { why: (e.wire.text || errorText(e.wire)).replace(/\.$/, '') };
-        throw new Error(`Not sent: ${e.wire.text || errorText(e.wire)}`);
-      }
-    }
+    const keys = { sign: signer.key, enc: signer.enc };
+    const held = this.certs.get(uid);
+    // Whatever went wrong, what was held for them is not to be trusted
+    // again until it works.
+    this.certs.delete(uid);
+    const result = await sealToDevices(
+      {
+        list: () => this.listDevices(conn, uid),
+        one: async (device) => {
+          const ok = await conn.deviceCert(uid, device);
+          if (!('cert' in ok)) throw new Error('The server listed devices for one device.');
+          return base64urlToBytes(ok.cert);
+        },
+        send: async (devices) => {
+          let req: SealedMsgParams | BoxesMsgParams;
+          try {
+            const [only] = devices;
+            req =
+              devices.length === 1 && only!.device === null
+                ? { to: uid, ...(await sealMsgRequest(keys, message, only!.cert, deniable, sent)) }
+                : { to: uid, boxes: await sealBoxes(keys, message, devices as { device: number; cert: Uint8Array }[], deniable, sent) };
+          } catch (e) {
+            throw new CertProblem(this.problem(e));
+          }
+          return conn.msg(req);
+        },
+      },
+      held?.fingerprint === to ? held.devices : null,
+    );
+    if ('why' in result) return result;
+    this.certs.set(uid, { fingerprint: to, devices: result.devices });
+    const { ok } = result;
+    if (ok.held_full?.length) this.heldFull(conv, uid, ok.held_full);
+    void rememberIdentity(conv, this.peerMemory, this.keyUrl, to, { login: conv.peer.login, nick: conv.title }, { sealed: true });
+    const signature: LineSignature = {
+      state: deniable ? 'deniable' : 'verified',
+      signer: this.proved,
+      to,
+      sent,
+      sentAtAnotherTime: false,
+      signatureExpected: false,
+    };
+    return { ok, signature, sealed: true };
   }
 
-  /** `uid`'s certificate as `device_cert` answers it, held while that
-   *  session is the one asked for; `held` when it was. */
-  private async recipientCert(conn: Connection, uid: number, fingerprint: string): Promise<{ cert: Uint8Array; held: boolean }> {
-    const held = this.certs.get(uid);
-    if (held?.fingerprint === fingerprint) return { cert: held.cert, held: true };
-    // Without `persons` a person is answered by its one device's cert.
+  /** `uid`'s devices to seal to as `device_cert` answers them: a session
+   *  alone's one certificate, or with `persons` a person's devices. */
+  private async listDevices(conn: Connection, uid: number): Promise<SealDevice[]> {
     const ok = await conn.deviceCert(uid);
-    if (!('cert' in ok)) throw new Error('The server listed devices to a session that did not ask for persons.');
-    const cert = base64urlToBytes(ok.cert);
-    this.certs.set(uid, { fingerprint, cert });
-    return { cert, held: false };
+    return 'cert' in ok ? [{ device: null, cert: base64urlToBytes(ok.cert) }] : deviceCertBytes(ok.devices);
+  }
+
+  /** Ask a person whose row cannot say so whether its devices can be
+   *  sealed to (`probesPerson`), on opening a conversation with it and
+   *  before a message to it. Throws where the server refused other than
+   *  to say they cannot be, so that no message goes in the clear for a
+   *  question it did not answer. */
+  private async probePerson(conn: Connection, conv: Conversation): Promise<void> {
+    if (!this.sealPms || this.signer === null) return;
+    const row = probeRow(conv, this.verifiedUnder(conv), this.store.roster());
+    const session = { persons: conn.hasCap(CAP_PERSONS), sealing: conn.sealing, self: this.store.self?.uid };
+    if (!probesPerson(session, row, this.listedPersons())) return;
+    const { uid, identity } = row!;
+    const fingerprint = identity!.fingerprint;
+    const devices = await this.probes.probe(uid, fingerprint, () => this.listDevices(conn, uid));
+    if (!devices || this.store.user(uid)?.identity?.fingerprint !== fingerprint) return;
+    this.certs.set(uid, { fingerprint, devices });
+    this.sealedRows.set(uid, fingerprint);
+    this.renderComposerHint();
+  }
+
+  /** The uids whose devices were listed, by the fingerprint each was
+   *  asked under, which `sealTarget` takes as able to be sealed to. */
+  private listedPersons(): Map<number, string> {
+    return new Map([...this.certs].map(([uid, c]) => [uid, c.fingerprint]));
+  }
+
+  /** `held_full`: devices of theirs that took no box, which will not see
+   *  this message (§4.14). */
+  private heldFull(conv: Conversation, uid: number, skipped: number[]): void {
+    const labels = skipped.map((d) => this.store.user(uid)?.devices?.find((e) => e.device === d)?.label).filter((l) => l !== undefined);
+    const which = labels.length === skipped.length ? `: ${labels.join(', ')}` : '';
+    const count = skipped.length === 1 ? 'One of their devices' : `${skipped.length} of their devices`;
+    this.push(conv.id, { t: Date.now(), kind: 'system', local: true, text: `${count} could take no more sealed messages for now and will not see this one${which}.` });
   }
 
   /** The identity this conversation's messages were verified under, or
@@ -2771,6 +2825,7 @@ export class App {
     else if (this.accountsOpen) this.showAccounts(false);
     else if (this.friendsOpen) this.showFriends(false);
     else this.seen(conv);
+    if (conv.kind === 'pm' && this.conn instanceof Connection) void this.probePerson(this.conn, conv).catch(() => {});
     this.noteTyping();
     this.renderRail();
     this.renderRoomBar();

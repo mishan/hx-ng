@@ -1,10 +1,14 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 
-import type { User } from '@hotline-ng/client';
+import { WireFailure, type MsgOk, type User, type WireError } from '@hotline-ng/client';
 
 import { peers } from '../src/identity/storage';
 import {
+  CertProblem,
+  OWN_PERSON,
   PeerMemory,
+  PersonProbes,
+  RESEALS,
   adoption,
   chooseDeniable,
   conversationIdentity,
@@ -12,13 +16,18 @@ import {
   lineFingerprint,
   neverSealedFallback,
   neverSeals,
+  probeRow,
+  probesPerson,
+  sealingAfterSnapshot,
   rememberIdentity,
+  sealToDevices,
   sealTarget,
   sealedBefore,
   sighting,
   signedTo,
   splitUtf8,
   type PeerConversation,
+  type SealDevice,
 } from '../src/sealing';
 import type { Line } from '../src/state';
 import { installFakeIndexedDB } from './fake-idb';
@@ -83,6 +92,229 @@ describe('sealTarget', () => {
       ],
     ];
     for (const [name, uid, known, roster, want, hint] of cases) expect(sealTarget(conv(uid), known, roster, hint ?? null), name).toEqual(want);
+  });
+
+  it('seals to a person whose devices were listed sealable under the identity its row shows, which its row alone cannot say', () => {
+    const person = [row(7, F, false)];
+    expect(sealTarget(conv(7), null, person, null, new Map([[7, F]]))).toEqual({ uid: 7, fingerprint: F });
+    expect(sealTarget(conv(7), F, person, null, new Map([[7, F]]))).toEqual({ uid: 7, fingerprint: F });
+    expect(sealTarget(conv(7), null, person, null, new Map([[7, G]]))).toEqual({ cannot: "Alice's session cannot open sealed messages" });
+    expect(sealTarget(conv(7), F, [row(7, G), row(9, F, false)], null, new Map([[9, F]]))).toEqual({ uid: 9, fingerprint: F });
+  });
+
+  it('seals to no row of its own person, wherever it comes from, so a reply there is asked about where a sealed line came', () => {
+    expect(sealTarget(conv(1), null, [row(1, F)], null, new Map(), 1)).toEqual({ cannot: OWN_PERSON });
+    expect(sealTarget(conv(7), F, [row(7, G), row(1, F)], null, new Map(), 1)).toEqual({ cannot: OWN_PERSON });
+    // Another of its devices sealed to it, so the clear one is asked about.
+    const sealedIn = { lines: [{ t: 0, kind: 'chat' as const, text: '', sealed: true as const }], peer: { uid: 1 } };
+    expect(sealedBefore(sealedIn, [null], new Map(), new PeerMemory(), SERVER)).toBe(true);
+  });
+});
+
+describe('probesPerson', () => {
+  it('asks a row its devices only with persons, sealing, and an identity its row does not already say can be sealed to, never its own', () => {
+    const on = { persons: true, sealing: true, self: 1 };
+    const cases: [string, typeof on, User | undefined, Map<number, string>, boolean][] = [
+      ['a row with an identity and no sealed', on, row(7, F, false), new Map(), true],
+      ['without persons', { ...on, persons: false }, row(7, F, false), new Map(), false],
+      ['a session that cannot seal', { ...on, sealing: false }, row(7, F, false), new Map(), false],
+      ['a row that says sealed', on, row(7, F), new Map(), false],
+      ['a row with no identity', on, row(7), new Map(), false],
+      ['nobody at the uid', on, undefined, new Map(), false],
+      ['its own person', on, row(1, F, false), new Map(), false],
+      ['listed already under that identity', on, row(7, F, false), new Map([[7, F]]), false],
+      ['listed under another', on, row(7, F, false), new Map([[7, G]]), true],
+    ];
+    for (const [name, session, r, held, want] of cases) expect(probesPerson(session, r, held), name).toBe(want);
+  });
+});
+
+describe('probeRow', () => {
+  it('asks the row holding the identity a conversation is under, wherever it is now, and the conversation\'s own with none known', () => {
+    const roster = [row(7, G, false), row(9, F, false)];
+    expect(probeRow(conv(7), F, roster)?.uid).toBe(9);
+    expect(probeRow(conv(9), F, roster)?.uid).toBe(9);
+    expect(probeRow(conv(7), null, roster)?.uid).toBe(7);
+    // Nobody holds it now: the conversation's row, which may offer the one it shows.
+    expect(probeRow(conv(7), 'H'.repeat(52), roster)?.uid).toBe(7);
+    expect(probeRow(conv(), null, roster)).toBeUndefined();
+  });
+});
+
+describe('sealingAfterSnapshot', () => {
+  it('keeps what this session saw sealed over a roster-only snapshot, and starts again for a fresh one', () => {
+    const fresh = () => ({ sealedRows: new Map([[3, G]]), certs: new Map([[3, { fingerprint: G, devices: [] }]]) });
+    const stale = fresh();
+    sealingAfterSnapshot(stale, [row(7, F)], true);
+    expect([...stale.sealedRows]).toEqual([
+      [3, G],
+      [7, F],
+    ]);
+    expect(stale.certs.size).toBe(1);
+    const again = fresh();
+    sealingAfterSnapshot(again, [row(7, F), row(8, F, false)], false);
+    expect([...again.sealedRows]).toEqual([[7, F]]);
+    expect(again.certs.size).toBe(0);
+  });
+});
+
+describe('PersonProbes', () => {
+  const devices: SealDevice[] = [{ device: 3, cert: new Uint8Array([3]) }];
+  const wire = (code: string) => new WireFailure({ code, text: `${code}.` });
+
+  it('asks once for probes made together, and not again for a person it cannot seal to until told, or a while', async () => {
+    let now = 0;
+    const probes = new PersonProbes(() => now, 1000);
+    let asked = 0;
+    const listing = async () => (asked++, devices);
+    const [a, b] = await Promise.all([probes.probe(7, F, listing), probes.probe(7, F, listing)]);
+    expect([a, b, asked]).toEqual([devices, devices, 1]);
+
+    const refusing = async () => {
+      asked++;
+      throw wire('not_sealed');
+    };
+    expect(await probes.probe(8, F, refusing)).toBeNull();
+    expect(await probes.probe(8, F, refusing)).toBeNull();
+    expect(asked).toBe(2);
+    expect(await probes.probe(8, G, refusing)).toBeNull();
+    expect(asked).toBe(3);
+    now = 1001;
+    await probes.probe(8, F, refusing);
+    expect(asked).toBe(4);
+    probes.forget(8);
+    await probes.probe(8, F, refusing);
+    expect(asked).toBe(5);
+  });
+
+  it('lets no probe begun before its row changed answer a later one, or keep a refusal for it', async () => {
+    for (const drop of [(p: PersonProbes) => p.forget(7), (p: PersonProbes) => p.clear()]) {
+      const probes = new PersonProbes();
+      const answers: ((v: SealDevice[] | Error) => void)[] = [];
+      let asked = 0;
+      const listing = () => {
+        asked++;
+        return new Promise<SealDevice[]>((resolve, reject) => answers.push((v) => (v instanceof Error ? reject(v) : resolve(v))));
+      };
+      const first = probes.probe(7, F, listing);
+      drop(probes);
+      const second = probes.probe(7, F, listing);
+      expect(asked, 'the second asks afresh').toBe(2);
+      // The first is answered late, a refusal it was told to forget.
+      answers[0]!(wire('not_sealed'));
+      answers[1]!(devices);
+      expect(await second).toEqual(devices);
+      await first.catch(() => {});
+      expect(await probes.probe(7, F, async () => (asked++, devices))).toEqual(devices);
+      expect(asked, 'the late refusal was not kept').toBe(3);
+    }
+  });
+
+  it('takes not_sealed and blocked for a person it cannot seal to, and refuses to send on anything else', async () => {
+    const probes = new PersonProbes();
+    expect(await probes.probe(7, F, async () => Promise.reject(wire('blocked')))).toBeNull();
+    await expect(probes.probe(8, F, async () => Promise.reject(wire('rate_limited')))).rejects.toThrow('Not sent: rate_limited');
+    let asked = 0;
+    await probes.probe(8, F, async () => (asked++, devices));
+    expect(asked).toBe(1);
+  });
+});
+
+describe('sealToDevices', () => {
+  const cert = (n: number) => new Uint8Array([n]);
+  const wire = (code: string, extra: Partial<WireError> = {}) => new WireFailure({ code, text: `${code}.`, ...extra });
+  const OK: MsgOk = { queued: false };
+
+  /** A server scripted by what each send answers, recording what was
+   *  asked and sent. */
+  function server(answers: (Error | MsgOk)[], listed: SealDevice[] = [{ device: 1, cert: cert(1) }]) {
+    const asked: string[] = [];
+    const sent: SealDevice[][] = [];
+    return {
+      asked,
+      sent,
+      wire: {
+        list: async () => (asked.push('list'), listed),
+        one: async (device: number) => (asked.push(`one ${device}`), cert(device + 100)),
+        send: async (devices: SealDevice[]) => {
+          sent.push(devices);
+          const a = answers.shift()!;
+          if (a instanceof Error) throw a;
+          return a;
+        },
+      },
+    };
+  }
+
+  it('seals to the devices held, or asks for them', async () => {
+    const held = server([OK]);
+    expect(await sealToDevices(held.wire, [{ device: 2, cert: cert(2) }])).toEqual({ ok: OK, devices: [{ device: 2, cert: cert(2) }] });
+    expect(held.asked).toEqual([]);
+    const asked = server([OK]);
+    expect(await sealToDevices(asked.wire, null)).toEqual({ ok: OK, devices: [{ device: 1, cert: cert(1) }] });
+    expect(asked.asked).toEqual(['list']);
+  });
+
+  it('seals again to the devices a devices_changed lists, and refetches the one a cert_changed names', async () => {
+    const s = server([wire('devices_changed', { devices: [{ device: 3, cert: 'Aw' }, { device: 4, cert: 'BA' }] }), wire('cert_changed', { device: 4 }), OK]);
+    const got = await sealToDevices(s.wire, [{ device: 2, cert: cert(2) }]);
+    expect(s.sent).toEqual([
+      [{ device: 2, cert: cert(2) }],
+      [{ device: 3, cert: cert(3) }, { device: 4, cert: cert(4) }],
+      [{ device: 3, cert: cert(3) }, { device: 4, cert: cert(104) }],
+    ]);
+    expect(s.asked).toEqual(['one 4']);
+    expect(got).toEqual({ ok: OK, devices: s.sent[2] });
+  });
+
+  it('asks the whole list again for a cert_changed that names no device, as a session alone answers', async () => {
+    const s = server([wire('cert_changed'), OK], [{ device: null, cert: cert(9) }]);
+    await sealToDevices(s.wire, [{ device: null, cert: cert(8) }]);
+    expect(s.asked).toEqual(['list']);
+    expect(s.sent[1]).toEqual([{ device: null, cert: cert(9) }]);
+  });
+
+  it('gives up after so many reseals, and never sends in the clear', async () => {
+    const s = server(Array.from({ length: RESEALS + 1 }, () => wire('devices_changed', { devices: [{ device: 3, cert: 'Aw' }] })));
+    await expect(sealToDevices(s.wire, null)).rejects.toThrow('Not sent: devices_changed');
+    expect(s.sent).toHaveLength(RESEALS + 1);
+  });
+
+  it('says why it cannot be sealed where the server says so, and fails anything else', async () => {
+    expect(await sealToDevices(server([wire('not_sealed')]).wire, null)).toEqual({ why: 'not_sealed' });
+    expect(await sealToDevices(server([wire('not_delivered')]).wire, null)).toEqual({ why: 'not_delivered' });
+    await expect(sealToDevices(server([wire('mailbox_full')]).wire, null)).rejects.toThrow('Not sent: mailbox_full');
+  });
+
+  it('asks the list again where the device a cert_changed names is gone, or was never held', async () => {
+    const gone = server([wire('cert_changed', { device: 2 }), OK], [{ device: 5, cert: cert(5) }]);
+    gone.wire.one = async () => Promise.reject(wire('no_such_device'));
+    await sealToDevices(gone.wire, [{ device: 2, cert: cert(2) }]);
+    expect(gone.sent[1]).toEqual([{ device: 5, cert: cert(5) }]);
+    const stray = server([wire('cert_changed', { device: 9 }), OK], [{ device: 5, cert: cert(5) }]);
+    await sealToDevices(stray.wire, [{ device: 2, cert: cert(2) }]);
+    expect(stray.asked).toEqual(['list']);
+  });
+
+  it('fails, never seals in the clear, where asking for devices fails, or the server lists more than a message carries', async () => {
+    const paced = server([wire('cert_changed', { device: 2 })]);
+    paced.wire.one = async () => Promise.reject(wire('rate_limited'));
+    await expect(sealToDevices(paced.wire, [{ device: 2, cert: cert(2) }])).rejects.toThrow('Not sent: rate_limited');
+    const gone = server([wire('devices_changed')]);
+    gone.wire.list = async () => Promise.reject(wire('not_sealed'));
+    expect(await sealToDevices(gone.wire, [{ device: 2, cert: cert(2) }])).toEqual({ why: 'not_sealed' });
+    const many = Array.from({ length: 12 }, (_, i) => ({ device: i + 1, cert: 'AQ' }));
+    const flood = server([wire('devices_changed', { devices: many })]);
+    await expect(sealToDevices(flood.wire, [{ device: 2, cert: cert(2) }])).rejects.toThrow('Not sent');
+    expect(flood.sent).toHaveLength(1);
+  });
+
+  it('asks again where a held certificate did not pass, and says why where an answer did not', async () => {
+    const held = server([new CertProblem('expired'), OK]);
+    expect(await sealToDevices(held.wire, [{ device: 2, cert: cert(2) }])).toMatchObject({ ok: OK });
+    expect(held.asked).toEqual(['list']);
+    const fresh = server([new CertProblem('expired')]);
+    expect(await sealToDevices(fresh.wire, null)).toEqual({ why: 'the certificate the server gave for them did not pass: expired' });
   });
 });
 

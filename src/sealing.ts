@@ -3,7 +3,17 @@
  * remembered by server and fingerprint across reloads, and the session a message to
  * it goes to, or why none can be. No DOM. */
 
-import type { User } from '@hotline-ng/client';
+import {
+  BOXES_MAX,
+  CERT_CHANGED,
+  DEVICES_CHANGED,
+  NOT_SEALED,
+  WireFailure,
+  deviceCertBytes,
+  errorText,
+  type MsgOk,
+  type User,
+} from '@hotline-ng/client';
 
 import { mergeMark, mergePeer, peerKey, type ContactMark, type PeerRecord } from './identity/storage';
 import type { Line } from './state';
@@ -330,30 +340,206 @@ export type SealTarget =
  *  under, at the uid the conversation names or any other holding it;
  *  with nothing known, to whoever the roster shows at that uid, asked
  *  about first where it is not `hint`, the one last seen under the
- *  conversation's nick, which never sends anywhere else. */
+ *  conversation's nick, which never sends anywhere else. A row can be
+ *  sealed to where it says `sealed`, or where `listed`, the uids whose
+ *  devices `device_cert` listed and under which fingerprint, has it:
+ *  a person's row says `sealed` only of exactly one device (§4.14). */
 export function sealTarget(
   conv: { title: string; peer: { uid?: number } },
   known: string | null,
   roster: readonly User[],
   hint: string | null = null,
+  listed: ReadonlyMap<number, string> = new Map(),
+  self?: number,
 ): SealTarget {
+  const target = sealTargetOf(conv, known, roster, hint, listed);
+  // Whose devices this client does not seal to yet, wherever it came from.
+  return 'uid' in target && target.uid === self ? { cannot: OWN_PERSON } : target;
+}
+
+function sealTargetOf(
+  conv: { title: string; peer: { uid?: number } },
+  known: string | null,
+  roster: readonly User[],
+  hint: string | null,
+  listed: ReadonlyMap<number, string>,
+): SealTarget {
+  const seals = (u: User) => u.identity?.sealed === true || (u.identity !== undefined && listed.get(u.uid) === u.identity.fingerprint);
   const uid = conv.peer.uid;
   const row = uid !== undefined ? roster.find((u) => u.uid === uid) : undefined;
   const shown = row?.identity?.fingerprint;
   if (known && shown !== known) {
     const elsewhere = roster.find((u) => u.identity?.fingerprint === known);
     if (elsewhere) {
-      return elsewhere.identity!.sealed
+      return seals(elsewhere)
         ? { uid: elsewhere.uid, fingerprint: known }
         : { cannot: `the session holding ${conv.title}'s identity cannot open sealed messages` };
     }
-    if (row && shown && row.identity!.sealed) return { changed: shown, uid: row.uid, was: known };
+    if (row && shown && seals(row)) return { changed: shown, uid: row.uid, was: known };
     if (row) return { cannot: `the server no longer shows ${conv.title} with the identity their messages here were verified under` };
   }
   if (!row) return { cannot: `${conv.title} is not here, and a sealed message is never stored` };
-  if (!row.identity?.sealed || !shown) return { cannot: `${conv.title}'s session cannot open sealed messages` };
+  if (!seals(row) || !shown) return { cannot: `${conv.title}'s session cannot open sealed messages` };
   if (!known && hint && hint !== shown) return { changed: shown, uid: row.uid, was: hint };
   return { uid: row.uid, fingerprint: shown };
+}
+
+/** Whether to ask `row` its devices, on opening a conversation with it:
+ *  with `persons`, a person's row says `sealed` only of exactly one
+ *  device, so one with an identity and no `sealed` may have more, which
+ *  only `device_cert` says, at its ration's cost. Never this session's
+ *  own person, which this client does not seal to, and not again under
+ *  an identity `listed` already holds. */
+export function probesPerson(
+  session: { persons: boolean; sealing: boolean; self: number | undefined },
+  row: User | undefined,
+  listed: ReadonlyMap<number, string>,
+): boolean {
+  if (!session.persons || !session.sealing || !row?.identity || row.identity.sealed) return false;
+  return row.uid !== session.self && listed.get(row.uid) !== row.identity.fingerprint;
+}
+
+/** One device to seal to: `device` null for the one certificate a
+ *  session alone, or a session without `persons`, is answered. */
+export interface SealDevice {
+  device: number | null;
+  cert: Uint8Array;
+}
+
+/** What `sealToDevices` asks of the wire. `send` seals to the devices
+ *  and sends, throwing `CertProblem` where a certificate did not pass
+ *  and the `WireFailure` a refused `msg` throws. */
+export interface SealingWire {
+  /** `device_cert {uid}`, as devices. */
+  list(): Promise<SealDevice[]>;
+  /** `device_cert {uid, device}`. */
+  one(device: number): Promise<Uint8Array>;
+  send(devices: SealDevice[]): Promise<MsgOk>;
+}
+
+/** A certificate the server gave that sealing refused. */
+export class CertProblem extends Error {}
+
+/** How many times a message is sealed again after `devices_changed` or
+ *  `cert_changed`: devices coming and going while it is sealed, and no
+ *  more, since each spends `device_cert`'s ration. */
+export const RESEALS = 3;
+
+/** A sealed message to `held`'s devices, or those `list` gives, sealed
+ *  again to what a `devices_changed` lists or with the device a
+ *  `cert_changed` names fetched afresh (§4.14), and the devices it went
+ *  to; or why it cannot be sealed, where the server says so. Never sent
+ *  in the clear: every other refusal, and one more reseal than
+ *  `RESEALS`, throws. */
+export async function sealToDevices(
+  wire: SealingWire,
+  held: SealDevice[] | null,
+): Promise<{ ok: MsgOk; devices: SealDevice[] } | { why: string }> {
+  let devices: SealDevice[];
+  try {
+    devices = held ?? (await wire.list());
+  } catch (e) {
+    return refused(e);
+  }
+  let fromHeld = held !== null;
+  for (let reseals = 0; ; reseals++) {
+    if (devices.length > BOXES_MAX) throw new Error(`Not sent: the server listed more devices than the ${BOXES_MAX} one message carries.`);
+    try {
+      return { ok: await wire.send(devices), devices };
+    } catch (e) {
+      if (e instanceof CertProblem) {
+        // One held from before may have expired since: the server's
+        // word now is asked for.
+        if (!fromHeld) return { why: `the certificate the server gave for them did not pass: ${e.message}` };
+      } else {
+        if (!(e instanceof WireFailure)) throw e;
+        if (e.wire.code !== DEVICES_CHANGED && e.wire.code !== CERT_CHANGED) return refused(e);
+        if (reseals >= RESEALS) throw new Error(`Not sent: ${e.wire.text || errorText(e.wire)}`);
+      }
+      try {
+        devices = await resealTo(wire, devices, e);
+      } catch (asking) {
+        return refused(asking);
+      }
+      fromHeld = false;
+    }
+  }
+}
+
+/** A refusal the wire answered: why where the server says they cannot
+ *  be sealed to, and otherwise nothing sent. */
+function refused(e: unknown): { why: string } {
+  if (!(e instanceof WireFailure)) throw e;
+  const said = e.wire.text || errorText(e.wire);
+  if (e.wire.code === NOT_SEALED || e.wire.code === 'not_delivered') return { why: said.replace(/\.$/, '') };
+  throw new Error(`Not sent: ${said}`);
+}
+
+/** The devices to seal to after `e`: a `devices_changed`'s list, the
+ *  device a `cert_changed` names fetched afresh where it is one of
+ *  `devices` and still there, or else the whole list again. */
+async function resealTo(wire: SealingWire, devices: SealDevice[], e: unknown): Promise<SealDevice[]> {
+  if (!(e instanceof WireFailure)) return wire.list();
+  const { code, devices: listed, device } = e.wire;
+  if (code === DEVICES_CHANGED) return listed ? deviceCertBytes(listed) : wire.list();
+  if (device === undefined || !devices.some((d) => d.device === device)) return wire.list();
+  try {
+    const cert = await wire.one(device);
+    return devices.map((d) => (d.device === device ? { device, cert } : d));
+  } catch (f) {
+    if (f instanceof WireFailure && (f.wire.code === 'no_such_device' || f.wire.code === NOT_SEALED)) return wire.list();
+    throw f;
+  }
+}
+
+/** Why a message to this session's own person is not sealed. */
+export const OWN_PERSON = 'this client does not seal to your own devices yet';
+
+/** How long a person `device_cert` said cannot be sealed to is not asked
+ *  again, its row unchanged. */
+export const NOT_SEALED_TTL_MS = 60_000;
+
+/** `device_cert` asked of persons (`probesPerson`): once for probes made
+ *  together, and not again for a person it answered `not_sealed` or
+ *  `blocked`, under the same fingerprint, until `forget` or a while. */
+export class PersonProbes {
+  private readonly going = new Map<string, Promise<SealDevice[] | null>>();
+  private readonly none = new Map<number, { fingerprint: string; until: number }>();
+
+  constructor(
+    private readonly now: () => number = Date.now,
+    private readonly ttl = NOT_SEALED_TTL_MS,
+  ) {}
+
+  /** The devices `list` gives, or null where the server says they
+   *  cannot be sealed to; any other refusal throws, so a message is
+   *  not sent rather than sent in the clear for it. */
+  probe(uid: number, fingerprint: string, list: () => Promise<SealDevice[]>): Promise<SealDevice[] | null> {
+    const none = this.none.get(uid);
+    if (none?.fingerprint === fingerprint && none.until > this.now()) return Promise.resolve(null);
+    const key = `${uid} ${fingerprint}`;
+    const going = this.going.get(key);
+    if (going) return going;
+    const asked = list()
+      .catch((e: unknown) => {
+        if (!(e instanceof WireFailure)) throw e;
+        if (e.wire.code !== NOT_SEALED && e.wire.code !== 'blocked') throw new Error(`Not sent: ${e.wire.text || errorText(e.wire)}`);
+        this.none.set(uid, { fingerprint, until: this.now() + this.ttl });
+        return null;
+      })
+      .finally(() => this.going.delete(key));
+    this.going.set(key, asked);
+    return asked;
+  }
+
+  /** `uid`'s row changed: ask it again. */
+  forget(uid: number): void {
+    this.none.delete(uid);
+  }
+
+  clear(): void {
+    this.none.clear();
+  }
 }
 
 /** `text` in pieces of at most `max` bytes of UTF-8, cut between

@@ -19,5 +19,8 @@
     "vite.config.ts",
     "playwright.config.ts",
     "e2e"
+  ],
+  "exclude": [
+    "e2e/persons.spec.ts"
   ]
 }

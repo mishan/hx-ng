@@ -35,6 +35,9 @@ import {
   type SealedOutcome,
 } from '../src/sealed';
 
+// From the package's entry, which is how a client reaches them.
+import { BOXES_MAX, deviceCertBytes, sealBoxes } from '../src/index';
+
 import vectors from './identity-vectors.json';
 
 const V: Record<string, any> = vectors;
@@ -271,6 +274,47 @@ describe('sealing and opening', () => {
     }
     const elsewhere = sealMsgRequest(w.dev, { cert: w.cert, to: fingerprintFromString(SIGNER)!, text: 'hi' }, recipient, false, SENT);
     await expect(elsewhere).rejects.toMatchObject({ kind: 'key-mismatch' });
+  });
+
+  it('seals one message to each device of a person, each box opening on its own device alone, in either form', async () => {
+    const w = await world();
+    // As `device_cert` lists them, base64url.
+    const listed = [
+      { device: 11, cert: bytesToBase64url(await certFor({ identity: V.keys.other, deviceEnc: w.readerEnc })) },
+      { device: 12, cert: bytesToBase64url(await certFor({ identity: V.keys.other, deviceEnc: await x25519PublicKey(w.stranger.enc) })) },
+    ];
+    for (const deniable of [false, true]) {
+      const boxes = await sealBoxes(w.dev, { cert: w.cert, to: w.pm.to, text: 'to both' }, deviceCertBytes(listed), deniable, SENT);
+      expect(boxes.map((b) => b.device)).toEqual([11, 12]);
+      const ids: string[] = [];
+      for (const [box, own, other] of [
+        [boxes[0]!, w.reader, w.stranger],
+        [boxes[1]!, w.stranger, w.reader],
+      ] as const) {
+        const bytes = base64urlToBytes(box.sealed);
+        const opened = await openSealed(bytes, own.enc, ctx(), new MemorySealedReplay());
+        const message = opened.state === 'verified' ? opened.message.message : opened.state === 'deniable' ? opened.message : null;
+        expect(opened.state).toBe(deniable ? 'deniable' : 'verified');
+        expect(message?.text).toBe('to both');
+        ids.push(bytesToHex(message!.id));
+        expect((await openSealed(bytes, other.enc, ctx(), new MemorySealedReplay())).state).toBe('unopened');
+      }
+      // One message, so each device keeps it once and a reply names it alike.
+      expect(ids[0]).toBe(ids[1]);
+    }
+  });
+
+  it('seals to no device twice, to none, to more than a message carries, or to a certificate of another identity', async () => {
+    const w = await world();
+    const mine = await certFor({ identity: V.keys.other, deviceEnc: w.readerEnc });
+    const pm = { cert: w.cert, to: w.pm.to, text: 'hi' };
+    await expect(sealBoxes(w.dev, pm, [{ device: 11, cert: mine }, { device: 11, cert: mine }], false, SENT)).rejects.toThrow('a device named twice');
+    await expect(sealBoxes(w.dev, pm, [], false, SENT)).rejects.toThrow('no device to seal to');
+    const many = Array.from({ length: BOXES_MAX + 1 }, (_, i) => ({ device: i + 1, cert: mine }));
+    await expect(sealBoxes(w.dev, pm, many, false, SENT)).rejects.toThrow(`more devices than the ${BOXES_MAX} one message carries`);
+    expect(await sealBoxes(w.dev, pm, many.slice(1), false, SENT)).toHaveLength(BOXES_MAX);
+    const stray = sealBoxes(w.dev, pm, [{ device: 11, cert: mine }, { device: 12, cert: await certFor() }], false, SENT);
+    await expect(stray).rejects.toMatchObject({ kind: 'key-mismatch' });
   });
 
   it('fills the largest box with the largest message, in either form', async () => {

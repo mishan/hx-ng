@@ -42,6 +42,11 @@ export interface WireError {
   retry_after?: number;
   /** When a `banned` login's ban lapses (Unix seconds); `null` for never. */
   expires_at?: number | null;
+  /** On `devices_changed`, the devices to seal to now, as `device_cert`
+   *  lists them. */
+  devices?: DeviceCertEntry[];
+  /** On a `cert_changed` to `boxes`, the device whose box it was. */
+  device?: number;
 }
 
 export type ServerFrame = ReplyFrame | EventFrame;
@@ -671,9 +676,31 @@ export interface SealedMsgParams {
   cert: string;
 }
 
+/** A `msg` to a person, from a session granted `persons` (hxd-ng's
+ *  `docs/e2e-messages.md` §4.14): `boxes` alone beside `to`, one for
+ *  each device it can be sealed to now (`sealBoxes`), or the whole
+ *  message is refused `devices_changed`. */
+export interface BoxesMsgParams {
+  to: number;
+  boxes: SealedBox[];
+}
+
+/** One device's box: `sealed` and `cert` as `SealedMsgParams` has them. */
+export interface SealedBox {
+  device: number;
+  sealed: string;
+  cert: string;
+}
+
 /** `device_cert`'s answer: the certificate the session proves now,
- *  base64url, for a client to check before it seals to it. */
-export interface DeviceCertOk {
+ *  base64url, for a client to check before it seals to it; or, to a
+ *  session granted `persons` asking of a person without naming a
+ *  device, one for each device it can be sealed to, even when that is
+ *  one (§4.14). */
+export type DeviceCertOk = { cert: string } | { devices: DeviceCertEntry[] };
+
+export interface DeviceCertEntry {
+  device: number;
   cert: string;
 }
 
@@ -748,6 +775,9 @@ export interface MsgOk {
    *  guid that names it: the one it was sent with, or the server's own. */
   im?: true;
   guid?: string;
+  /** A message to a person's devices: those whose box was skipped, being
+   *  unable to take it now, while the rest were delivered (§4.14). */
+  held_full?: number[];
 }
 
 export interface InboxCounts {
@@ -2253,8 +2283,10 @@ export interface Events {
    *  is when it was *sent*, not when it arrived, which is the whole
    *  difference for mail that waited. */
   msg: {
-    /** `fingerprint` is the server's word for a sealed message's sender. */
-    from: Sender & { fingerprint?: string };
+    /** `fingerprint` is the server's word for a sealed message's sender,
+     *  and `device`, to a session granted `persons`, the device of a
+     *  person that sealed it, for a reply sealed back by device. */
+    from: Sender & { fingerprint?: string; device?: number };
     text: string;
     at: number;
     queued: boolean;
@@ -2513,6 +2545,9 @@ export const NOT_SEALED = 'not_sealed';
 /** A sealed message's `cert` names a key the target no longer has:
  *  fetch its certificate and seal again, never in the clear. */
 export const CERT_CHANGED = 'cert_changed';
+/** `boxes` that are not one for each device the person can be sealed to
+ *  now: seal again to the error's `devices`, never in the clear. */
+export const DEVICES_CHANGED = 'devices_changed';
 
 /** When sending the same request again could succeed: `soon`, on a
  *  resend after a backoff; `later`, with the request unchanged, once
@@ -2602,6 +2637,7 @@ const RETRY = {
   unconfirmed: 'never',
   not_sealed: 'never',
   cert_changed: 'never',
+  devices_changed: 'never',
   bad_signature: 'never',
   // Instant messaging (§7.5). `request_full` passes once its recipient
   // answers, or its requests lapse.

@@ -1332,6 +1332,29 @@ describe('sealed', () => {
   });
 });
 
+describe('sealing to a person', () => {
+  it('asks a person\'s devices, or one device of it', async () => {
+    server.on('login', () => ({ ok: loginOk({ caps: ['persons'], sealed: true }) }));
+    server.on('device_cert', (p) => ({ ok: p.device !== undefined ? { cert: 'Yw' } : { devices: [{ device: 9, cert: 'Yw' }] } }));
+    const conn = await connect();
+    expect(await conn.deviceCert(3)).toEqual({ devices: [{ device: 9, cert: 'Yw' }] });
+    expect(await conn.deviceCert(3, 9)).toEqual({ cert: 'Yw' });
+    expect(server.sent('device_cert').map((f) => f.params)).toEqual([{ uid: 3 }, { uid: 3, device: 9 }]);
+  });
+
+  it('sends boxes as given, and hands back the devices a devices_changed lists', async () => {
+    server.on('login', () => ({ ok: loginOk({ caps: ['persons'], sealed: true }) }));
+    const devices = [{ device: 9, cert: 'Yw' }, { device: 10, cert: 'Zg' }];
+    server.on('msg', () => ({ error: { code: 'devices_changed', text: 'changed', devices } }));
+    const conn = await connect();
+    const boxes = [{ device: 9, sealed: 'AQ', cert: 'q2' }];
+    const refused = await conn.msg({ to: 3, boxes }).catch((e: unknown) => e);
+    expect(server.sent('msg')[0]?.params).toEqual({ to: 3, boxes });
+    expect(refused).toBeInstanceOf(WireFailure);
+    expect((refused as WireFailure).wire).toMatchObject({ code: 'devices_changed', devices });
+  });
+});
+
 describe('instant messaging', () => {
   const MESSAGING = { takes_part: true, max_roster: 500, max_message_bytes: 4096, request_messages: 5 };
   const BOB = { login: 'bob', state: 'accepted' as const, presence: 'online' as const };

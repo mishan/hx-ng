@@ -492,6 +492,31 @@ async function resealTo(wire: SealingWire, devices: SealDevice[], e: unknown): P
   }
 }
 
+/** The row to ask its devices for a conversation: the one holding the
+ *  identity it is under, wherever that is now, as `sealTarget` will seal
+ *  to it; or with none known, or nobody holding it, the conversation's
+ *  own. */
+export function probeRow(conv: { peer: { uid?: number } }, known: string | null, roster: readonly User[]): User | undefined {
+  const own = conv.peer.uid !== undefined ? roster.find((u) => u.uid === conv.peer.uid) : undefined;
+  if (!known || own?.identity?.fingerprint === known) return own;
+  return roster.find((u) => u.identity?.fingerprint === known) ?? own;
+}
+
+/** What a roster snapshot leaves of what this session knows of sealing:
+ *  over one of the roster alone (`stale`), all it knew, and over a fresh
+ *  session's, nothing; either way with the rows that say `sealed` now. */
+export function sealingAfterSnapshot(
+  state: { sealedRows: Map<number, string>; certs: Map<number, unknown> },
+  users: readonly User[],
+  stale: boolean,
+): void {
+  if (!stale) {
+    state.certs.clear();
+    state.sealedRows.clear();
+  }
+  for (const u of users) if (u.identity?.sealed) state.sealedRows.set(u.uid, u.identity.fingerprint);
+}
+
 /** Why a message to this session's own person is not sealed. */
 export const OWN_PERSON = 'this client does not seal to your own devices yet';
 
@@ -501,10 +526,15 @@ export const NOT_SEALED_TTL_MS = 60_000;
 
 /** `device_cert` asked of persons (`probesPerson`): once for probes made
  *  together, and not again for a person it answered `not_sealed` or
- *  `blocked`, under the same fingerprint, until `forget` or a while. */
+ *  `blocked`, under the same fingerprint, until `forget` or a while. A
+ *  probe begun before a `forget` of its uid, or a `clear`, answers only
+ *  its own callers, and keeps no refusal. */
 export class PersonProbes {
   private readonly going = new Map<string, Promise<SealDevice[] | null>>();
   private readonly none = new Map<number, { fingerprint: string; until: number }>();
+  /** Moved on by `clear`, and per uid by `forget`. */
+  private cleared = 0;
+  private readonly forgotten = new Map<number, number>();
 
   constructor(
     private readonly now: () => number = Date.now,
@@ -517,14 +547,16 @@ export class PersonProbes {
   probe(uid: number, fingerprint: string, list: () => Promise<SealDevice[]>): Promise<SealDevice[] | null> {
     const none = this.none.get(uid);
     if (none?.fingerprint === fingerprint && none.until > this.now()) return Promise.resolve(null);
-    const key = `${uid} ${fingerprint}`;
+    const generation = () => `${this.cleared} ${this.forgotten.get(uid) ?? 0}`;
+    const begun = generation();
+    const key = `${uid} ${fingerprint} ${begun}`;
     const going = this.going.get(key);
     if (going) return going;
     const asked = list()
       .catch((e: unknown) => {
         if (!(e instanceof WireFailure)) throw e;
         if (e.wire.code !== NOT_SEALED && e.wire.code !== 'blocked') throw new Error(`Not sent: ${e.wire.text || errorText(e.wire)}`);
-        this.none.set(uid, { fingerprint, until: this.now() + this.ttl });
+        if (generation() === begun) this.none.set(uid, { fingerprint, until: this.now() + this.ttl });
         return null;
       })
       .finally(() => this.going.delete(key));
@@ -535,10 +567,12 @@ export class PersonProbes {
   /** `uid`'s row changed: ask it again. */
   forget(uid: number): void {
     this.none.delete(uid);
+    this.forgotten.set(uid, (this.forgotten.get(uid) ?? 0) + 1);
   }
 
   clear(): void {
     this.none.clear();
+    this.cleared++;
   }
 }
 

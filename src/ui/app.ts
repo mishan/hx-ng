@@ -117,8 +117,10 @@ import {
   lineFingerprint,
   neverSealedFallback,
   neverSeals,
+  probeRow,
   probesPerson,
   rememberIdentity,
+  sealingAfterSnapshot,
   sealTarget,
   sealToDevices,
   type SealDevice,
@@ -922,10 +924,8 @@ export class App {
           const joined = new Set(rooms.joined.map((r) => r.id));
           for (const c of this.store.rooms()) c.joined = joined.has(roomOf(c));
         }
-        if (!stale) this.certs.clear();
         this.probes.clear();
-        this.sealedRows.clear();
-        for (const u of users) this.noteSealed(u);
+        sealingAfterSnapshot({ sealedRows: this.sealedRows, certs: this.certs }, users, stale === true);
         // The block a login or a sync carries, as it stands now.
         this.friends.onBlock();
         this.panes?.available('friends', this.conn?.messaging?.takes_part === true);
@@ -2105,8 +2105,8 @@ export class App {
    *  to say they cannot be, so that no message goes in the clear for a
    *  question it did not answer. */
   private async probePerson(conn: Connection, conv: Conversation): Promise<void> {
-    const row = conv.peer.uid !== undefined ? this.store.user(conv.peer.uid) : undefined;
     if (!this.sealPms || this.signer === null) return;
+    const row = probeRow(conv, this.verifiedUnder(conv), this.store.roster());
     const session = { persons: conn.hasCap(CAP_PERSONS), sealing: conn.sealing, self: this.store.self?.uid };
     if (!probesPerson(session, row, this.listedPersons())) return;
     const { uid, identity } = row!;

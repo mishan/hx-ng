@@ -41,11 +41,10 @@ test.describe('a person of two devices', () => {
     return () => opened;
   }
 
-  /** The page, ended, opens no socket again: its pill stays offline, and
-   *  the server is not asked again, for longer than a reconnect's first
-   *  backoffs. */
-  async function staysOut(page: Page, opened: () => number): Promise<void> {
-    const after = opened();
+  /** The page, ended, has opened no socket since `after`, by default
+   *  now, for longer than a reconnect's first backoffs, and its pill
+   *  stays offline. */
+  async function staysOut(page: Page, opened: () => number, after = opened()): Promise<void> {
     await page.waitForTimeout(3000);
     expect(opened(), 'no socket opened once ended').toBe(after);
     await expect(page.locator('.pill')).toHaveClass(/offline/);
@@ -72,10 +71,11 @@ test.describe('a person of two devices', () => {
       expect(theirs!.device).toBe(conn.device);
       expect(mine!.label, 'the page names itself by its browser').toMatch(/ on /);
 
+      const before = opened();
       await conn.deviceEnd(mine!.device);
       await expect(page.getByText(ENDED).first()).toBeVisible();
       await expect.poll(() => rows.at(-1)?.devices?.length).toBe(1);
-      await staysOut(page, opened);
+      await staysOut(page, opened, before);
       expect(rows.at(-1)?.devices?.map((d) => d.device)).toEqual([conn.device]);
     } finally {
       await conn.logout();

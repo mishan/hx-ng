@@ -16,7 +16,9 @@ import {
   lineFingerprint,
   neverSealedFallback,
   neverSeals,
+  probeRow,
   probesPerson,
+  sealingAfterSnapshot,
   rememberIdentity,
   sealToDevices,
   sealTarget,
@@ -127,6 +129,35 @@ describe('probesPerson', () => {
   });
 });
 
+describe('probeRow', () => {
+  it('asks the row holding the identity a conversation is under, wherever it is now, and the conversation\'s own with none known', () => {
+    const roster = [row(7, G, false), row(9, F, false)];
+    expect(probeRow(conv(7), F, roster)?.uid).toBe(9);
+    expect(probeRow(conv(9), F, roster)?.uid).toBe(9);
+    expect(probeRow(conv(7), null, roster)?.uid).toBe(7);
+    // Nobody holds it now: the conversation's row, which may offer the one it shows.
+    expect(probeRow(conv(7), 'H'.repeat(52), roster)?.uid).toBe(7);
+    expect(probeRow(conv(), null, roster)).toBeUndefined();
+  });
+});
+
+describe('sealingAfterSnapshot', () => {
+  it('keeps what this session saw sealed over a roster-only snapshot, and starts again for a fresh one', () => {
+    const fresh = () => ({ sealedRows: new Map([[3, G]]), certs: new Map([[3, { fingerprint: G, devices: [] }]]) });
+    const stale = fresh();
+    sealingAfterSnapshot(stale, [row(7, F)], true);
+    expect([...stale.sealedRows]).toEqual([
+      [3, G],
+      [7, F],
+    ]);
+    expect(stale.certs.size).toBe(1);
+    const again = fresh();
+    sealingAfterSnapshot(again, [row(7, F), row(8, F, false)], false);
+    expect([...again.sealedRows]).toEqual([[7, F]]);
+    expect(again.certs.size).toBe(0);
+  });
+});
+
 describe('PersonProbes', () => {
   const devices: SealDevice[] = [{ device: 3, cert: new Uint8Array([3]) }];
   const wire = (code: string) => new WireFailure({ code, text: `${code}.` });
@@ -154,6 +185,29 @@ describe('PersonProbes', () => {
     probes.forget(8);
     await probes.probe(8, F, refusing);
     expect(asked).toBe(5);
+  });
+
+  it('lets no probe begun before its row changed answer a later one, or keep a refusal for it', async () => {
+    for (const drop of [(p: PersonProbes) => p.forget(7), (p: PersonProbes) => p.clear()]) {
+      const probes = new PersonProbes();
+      const answers: ((v: SealDevice[] | Error) => void)[] = [];
+      let asked = 0;
+      const listing = () => {
+        asked++;
+        return new Promise<SealDevice[]>((resolve, reject) => answers.push((v) => (v instanceof Error ? reject(v) : resolve(v))));
+      };
+      const first = probes.probe(7, F, listing);
+      drop(probes);
+      const second = probes.probe(7, F, listing);
+      expect(asked, 'the second asks afresh').toBe(2);
+      // The first is answered late, a refusal it was told to forget.
+      answers[0]!(wire('not_sealed'));
+      answers[1]!(devices);
+      expect(await second).toEqual(devices);
+      await first.catch(() => {});
+      expect(await probes.probe(7, F, async () => (asked++, devices))).toEqual(devices);
+      expect(asked, 'the late refusal was not kept').toBe(3);
+    }
   });
 
   it('takes not_sealed and blocked for a person it cannot seal to, and refuses to send on anything else', async () => {

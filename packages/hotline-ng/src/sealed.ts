@@ -18,6 +18,7 @@ import { HpkeError, hpkeOpen, hpkeSeal, x25519PublicKey, type HpkeSender } from 
 import {
   DEVICE_CERT_DOMAIN,
   IdentityError,
+  base64urlToBytes,
   bytesToBase64url,
   decodeDeviceCert,
   fingerprintFromString,
@@ -35,6 +36,7 @@ import privateMessageMaps, {
   type SignedPrivateMessage,
   type SignedSender,
 } from './message.js';
+import type { DeviceCertEntry, SealedBox } from './protocol.js';
 
 const textEncoder = new TextEncoder();
 
@@ -155,6 +157,38 @@ export async function sealMsgRequest(
   const box = await sealMessageTo(full, sender, recipientCert, deniable, sent);
   const key = await sha256(decodeDeviceCert(recipientCert).deviceEnc);
   return { sealed: bytesToBase64url(box), cert: bytesToBase64url(key) };
+}
+
+/** The most boxes one message carries (§7): the server seals a person
+ *  to as many devices as one account may connect, never past this. */
+export const BOXES_MAX = 11;
+
+/** A `device_cert` answer's or a `devices_changed` refusal's `devices`,
+ *  their certificates as bytes, for `sealBoxes`. */
+export function deviceCertBytes(devices: readonly DeviceCertEntry[]): { device: number; cert: Uint8Array }[] {
+  return devices.map(({ device, cert }) => ({ device, cert: base64urlToBytes(cert) }));
+}
+
+/** `msg`'s `boxes` to a person (§4.14): one message, one id, sealed
+ *  to each of `devices` as `sealMsgRequest` seals, each certificate
+ *  checked to be of the identity `message.to` names. `devices` are the
+ *  ones `device_cert` or a `devices_changed` listed: the server chooses
+ *  how many, up to `BOXES_MAX`, and a list past it is refused. A retry
+ *  passes the same `id`, so each device keeps one. */
+export async function sealBoxes(
+  sender: DeviceKeys,
+  message: Omit<SignedPrivateMessage, 'id' | 'sent' | 'quote'> & { id?: Uint8Array },
+  devices: readonly { device: number; cert: Uint8Array }[],
+  deniable = false,
+  sent = Math.floor(Date.now() / 1000),
+): Promise<SealedBox[]> {
+  if (devices.length === 0) throw new Error('no device to seal to');
+  if (devices.length > BOXES_MAX) throw new Error(`more devices than the ${BOXES_MAX} one message carries`);
+  if (new Set(devices.map((d) => d.device)).size !== devices.length) throw new Error('a device named twice');
+  const id = message.id ?? crypto.getRandomValues(new Uint8Array(16));
+  return Promise.all(
+    devices.map(async ({ device, cert }) => ({ device, ...(await sealMsgRequest(sender, { ...message, id }, cert, deniable, sent)) })),
+  );
 }
 
 /** `sealMessage` with the ephemeral key derived from `ikm` (RFC 9180

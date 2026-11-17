@@ -2071,7 +2071,10 @@ export class App {
   private async recipientCert(conn: Connection, uid: number, fingerprint: string): Promise<{ cert: Uint8Array; held: boolean }> {
     const held = this.certs.get(uid);
     if (held?.fingerprint === fingerprint) return { cert: held.cert, held: true };
-    const cert = base64urlToBytes((await conn.deviceCert(uid)).cert);
+    // Without `persons` a person is answered by its one device's cert.
+    const ok = await conn.deviceCert(uid);
+    if (!('cert' in ok)) throw new Error('The server listed devices to a session that did not ask for persons.');
+    const cert = base64urlToBytes(ok.cert);
     this.certs.set(uid, { fingerprint, cert });
     return { cert, held: false };
   }

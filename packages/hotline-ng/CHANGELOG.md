@@ -7,6 +7,9 @@ says how.
 
 ### Changed
 
+- Breaking: `DeviceCertOk` is `{ cert }` or, to a session granted
+  `persons` asking of a person, `{ devices }`, so a caller reading
+  `ok.cert` checks it is there.
 - `onSnapshot` also fires when the server says `roster_stale`, with
   `stale: true`: only the roster is new, so a caller that resets more
   on a snapshot can skip it.
@@ -44,6 +47,15 @@ says how.
   `session_expired`, is never followed by a fresh login: a reload's
   `start()` rejects instead. `ENDED`, `KICKED`, and `no_such_device` in
   the codes.
+- Sealing to a person (hxd-ng's `docs/e2e-messages.md` §4.14):
+  `deviceCert(uid, device?)` asks a person's devices, or one of them;
+  `sealBoxes` seals one message to each listed device as a
+  `SealedBox`, at most `BOXES_MAX`, `deviceCertBytes` decoding the
+  listed certificates for it, and `msg` takes `BoxesMsgParams`. `MsgOk.held_full` names
+  the devices whose box was skipped, a `devices_changed` refusal
+  (`DEVICES_CHANGED`) carries `devices` to seal to again and a
+  `cert_changed` one the box's `device`, and a sealed `msg` event's
+  `from.device` is the device of a person that sealed it.
 - Server emoji (hxd-ng's `docs/server-emoji.md` §8): `Credentials.emoji`
   says `emoji` at login, and `Connection.emoji` is the login reply's
   `EmojiConfig`, the catalog's revision and its limits, saved with the

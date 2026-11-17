@@ -89,6 +89,7 @@ import {
   type ModerationLogParams,
   type MsgParams,
   type SealedMsgParams,
+  type BoxesMsgParams,
   type DeviceCertOk,
   type NewsArticle,
   type StagedNewsAttachment,
@@ -1270,15 +1271,16 @@ export class Connection {
    *  second one. The answer describes the message as it stands *now*, so
    *  a retry saying `queued: false` where the original said `true` is the
    *  message being delivered, not an error. */
-  msg(params: MsgParams | SealedMsgParams): Promise<MsgOk> {
+  msg(params: MsgParams | SealedMsgParams | BoxesMsgParams): Promise<MsgOk> {
     return this.request<MsgOk>('msg', params);
   }
 
   /** The certificate `uid`'s session proves now, to seal a message to
-   *  once it is checked (`sealMsgRequest` checks it). Only a session
+   *  once it is checked (`sealMsgRequest` checks it), or with `persons`
+   *  a person's devices', or with `device` that one's. Only a session
    *  that is itself `sealing` may ask, and the server rations it. */
-  deviceCert(uid: number): Promise<DeviceCertOk> {
-    return this.request<DeviceCertOk>('device_cert', { uid });
+  deviceCert(uid: number, device?: number): Promise<DeviceCertOk> {
+    return this.request<DeviceCertOk>('device_cert', device === undefined ? { uid } : { uid, device });
   }
 
   /** Say whether this session's user signs every lobby line

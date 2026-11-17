@@ -21,6 +21,7 @@
     "e2e"
   ],
   "exclude": [
-    "e2e/persons.spec.ts"
+    "e2e/persons.spec.ts",
+    "e2e/persons-moderation.spec.ts"
   ]
 }

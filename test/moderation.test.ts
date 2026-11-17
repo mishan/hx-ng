@@ -1,9 +1,10 @@
 import { describe, expect, it } from 'vitest';
 
-import type { ModerationAct, Report } from '@hotline-ng/client';
+import type { DeviceEntry, ModerationAct, Report } from '@hotline-ng/client';
 
 import {
   actSummary,
+  deviceChoice,
   durationWords,
   lineReport,
   parseDuration,
@@ -213,5 +214,29 @@ describe('the report queue', () => {
     q.reset(9);
     q.page([report(3)], true, true);
     expect(q.count).toBe(9);
+  });
+});
+
+describe('deviceChoice', () => {
+  const when = (s: number) => `t${s}`;
+  const phone: DeviceEntry = {
+    device: 4,
+    wire: 'ng',
+    proved: true,
+    transport: 'encrypted',
+    status: 'active',
+    since: 100,
+    label: 'Phone',
+    login: 'pam',
+    addr: '192.0.2.7',
+  };
+
+  it('names a device for a moderator by the server\'s facts, the login and address among them, then its label quoted', () => {
+    expect(deviceChoice(phone, when)).toBe('ng, device key, encrypted, active, since t100, as pam from 192.0.2.7 -- "Phone"');
+    expect(deviceChoice({ ...phone, label: undefined, wire: 'classic', proved: false, transport: 'cleartext', login: undefined, addr: undefined }, when)).toBe(
+      'classic, password, not encrypted, active, since t100 -- unnamed',
+    );
+    // A label cannot pass for the facts, which come first and end where it begins.
+    expect(deviceChoice({ ...phone, label: 'ng, password, as root' }, when)).toMatch(/ -- "ng, password, as root"$/);
   });
 });

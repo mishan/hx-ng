@@ -106,13 +106,22 @@ export function writeDeviceLabel(server: string, label: string, store: LabelStor
 }
 
 /** The server's facts about a device, in words, to show beside its
- *  label, which is only what its client calls it. */
-export function deviceFacts(d: DeviceEntry, when: (since: number) => string): string[] {
-  return [
+ *  label, which is only what its client calls it: among them, to a
+ *  viewer with the kick bit alone, the login it used and its address. */
+export function deviceFacts(d: DeviceEntry, when: (since: number) => string = deviceSince): string[] {
+  const facts = [
     d.wire,
     d.proved ? 'device key' : 'password',
     d.transport === 'encrypted' ? 'encrypted' : 'not encrypted',
     d.status,
     `since ${when(d.since)}`,
   ];
+  const from = [d.login !== undefined ? `as ${d.login}` : null, d.addr !== undefined ? `from ${d.addr}` : null].filter((f) => f !== null);
+  if (from.length) facts.push(from.join(' '));
+  return facts;
+}
+
+/** When a device logged in, as the reader's own clock and locale say. */
+export function deviceSince(since: number): string {
+  return new Date(since * 1000).toLocaleString();
 }

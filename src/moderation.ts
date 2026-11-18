@@ -4,6 +4,7 @@
 
 import {
   isFingerprint,
+  type DeviceEntry,
   type ModerationAct,
   type PersonRef,
   type Report,
@@ -13,7 +14,17 @@ import {
   type User,
 } from '@hotline-ng/client';
 
+import { deviceFacts } from './devices';
 import type { Conversation, Line } from './state';
+
+/** One device of another person, as a moderator picks it to disconnect:
+ *  the server's facts, among them the login it used and its address,
+ *  which a viewer with the kick bit alone is shown (hxd-ng's
+ *  `docs/hotline-ng.md` §7.6), and after them its label quoted, a hint
+ *  its client chose that must not pass for one of them. */
+export function deviceChoice(d: DeviceEntry, when?: (since: number) => string): string {
+  return `${deviceFacts(d, when).join(', ')} -- ${d.label !== undefined ? `"${d.label}"` : 'unnamed'}`;
+}
 
 /** Lengths a moderator picks from, in seconds, and what to call them.
  *  A select rather than a number box: nobody bans someone for 3,847

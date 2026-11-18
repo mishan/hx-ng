@@ -74,7 +74,7 @@ import { ClassicConnection, type ClassicHooks } from '../classic/connection';
 import { route } from '../classic/route';
 import { serverFromUrl, type AppConfig } from '../config';
 import { sessionStore } from '../install';
-import { durationWords, DURATIONS, lineReport, parseDuration, personRef } from '../moderation';
+import { deviceChoice, durationWords, DURATIONS, lineReport, parseDuration, personRef } from '../moderation';
 import { notifyText } from '../news';
 import {
   messageAddress,
@@ -3339,11 +3339,15 @@ export class App {
     const mayKick = !conn.classic && !u.system && (conn.moderator || this.store.self?.admin === true);
     const local = !conn.classic && !u.system && !u.remote;
     const fp = u.identity?.fingerprint && fingerprintFromString(u.identity.fingerprint) ? u.identity.fingerprint : null;
+    // Another person's devices, which only a viewer with the kick bit is
+    // shown; one's own person's are the me dialog's to end.
+    const devices = mayKick && u.devices?.length && u.uid !== this.store.self?.uid && conn instanceof Connection && conn.hasCap(CAP_PERSONS);
     const choice = await choose(u.nick, [
       ['message', 'Send a private message'],
       ...(fp ? [['compare', 'Compare fingerprint'] as ['compare', string]] : []),
       ...(local ? [['report', 'Report to the moderators…'] as ['report', string]] : []),
       ...(mayKick ? [['kick', 'Disconnect…', true] as ['kick', string, boolean]] : []),
+      ...(devices ? [['device', 'Disconnect one device…', true] as ['device', string, boolean]] : []),
       ...(local && conn.moderator ? [['purge', 'Purge recent output…', true] as ['purge', string, boolean]] : []),
     ]);
     try {
@@ -3353,6 +3357,7 @@ export class App {
       } else if (choice === 'compare') await this.openContacts({ fingerprint: fp!, nick: u.nick });
       else if (choice === 'report') await this.reportPerson(u.nick, { uid: u.uid });
       else if (choice === 'kick') await this.kick(u);
+      else if (choice === 'device') await this.kickDevice(u.uid);
       else if (choice === 'purge') await this.purge(u.nick, { uid: u.uid });
     } catch (e) {
       this.say(moderationProblem(e));
@@ -3363,6 +3368,52 @@ export class App {
     const reason = await this.reportReason(`Report ${name}`, 'The moderators are told who, and your reason is the whole of the evidence.');
     if (reason === null) return;
     await this.fileReport({ user: who, reason });
+  }
+
+  /** Disconnect one device of another person (§7.6), as the roster
+   *  shows its devices now: the rest stay and the room is told nothing,
+   *  but the last one here is the person, kicked with its notice. No
+   *  ban, purge or reason goes with one device. */
+  private async kickDevice(uid: number): Promise<void> {
+    const conn = this.conn;
+    if (!conn) return;
+    // The person may have left while the menu was open.
+    const row = this.store.user(uid);
+    if (!row?.devices?.length) return this.say('That device has already gone.');
+    const device = await choose(
+      `${row.nick}'s devices`,
+      row.devices.map((d) => [String(d.device), deviceChoice(d), true] as [string, string, boolean]),
+    );
+    if (device === null) return;
+    // Asked of the row as it stands, and asked again where a device that
+    // left meanwhile made this one the last, which disconnects the person.
+    let asked: boolean | null = null;
+    for (;;) {
+      const now = this.store.user(uid)?.devices;
+      const chosen = now?.find((d) => String(d.device) === device);
+      if (!now || !chosen) return this.say('That device has already gone.');
+      const last = now.length === 1;
+      if (asked === last) break;
+      const yes = await ask({
+        title: `Disconnect this device of ${row.nick}?`,
+        body:
+          `${deviceChoice(chosen)}. ` +
+          (last
+            ? `It is the last of theirs here, so ${row.nick} is disconnected, and the room is told who did it.`
+            : `${row.nick} stays on their other devices, and the room is told nothing.`),
+        fields: [],
+        ok: 'Disconnect',
+        danger: true,
+      });
+      if (!yes) return;
+      asked = last;
+    }
+    try {
+      await conn.kick({ uid, device: Number(device) });
+    } catch (e) {
+      if (e instanceof WireFailure && e.wire.code === 'no_such_device') return this.say('That device has already gone.');
+      throw e;
+    }
   }
 
   private async kick(u: User): Promise<void> {
@@ -4776,7 +4827,7 @@ export class App {
       devices.map((d) => ({
         device: d.device,
         label: d.label,
-        facts: deviceFacts(d, (since) => new Date(since * 1000).toLocaleString()),
+        facts: deviceFacts(d),
         mine: d.device === conn.device,
       }));
     return {

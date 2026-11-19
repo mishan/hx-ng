@@ -127,17 +127,22 @@ describe('decodeDeviceCert', () => {
 });
 
 describe('decodeCard', () => {
-  it('matches hxd-ng for the fields a Phase B client reads', () => {
-    const card = decodeCard(hexToBytes(vectors.card.signed_hex));
-    const f = vectors.card.fields;
-    expect(bytesToHex(card.identity)).toBe(f.identity);
-    expect(card.updated).toBe(f.updated);
-    expect(card.name).toBe(f.name);
-  });
-
-  it('verifies against the identity key that signed it', async () => {
-    const bytes = hexToBytes(vectors.card.signed_hex);
+  // A key this client does not define, and an attestation of a `v` it
+  // cannot read, must neither fail the card nor be lost from what is
+  // forwarded: the server reads them.
+  it.each([
+    ['a plain card', vectors.card],
+    ['a card with a key it does not define', vectors.card_unknown_key],
+    ['a card embedding an attestation it cannot read', vectors.card_unknown_attestation],
+  ])('reads %s as hxd-ng does and keeps its bytes', async (_, v) => {
+    const bytes = hexToBytes(v.signed_hex);
+    const card = decodeCard(bytes);
+    expect(bytesToHex(card.identity)).toBe(v.fields.identity);
+    expect(card.updated).toBe(v.fields.updated);
+    expect(card.name).toBe(v.fields.name);
     await expect(verifyEnvelope(bytes, hexToBytes(vectors.keys.identity.public_hex), CARD_DOMAIN)).resolves.toBeDefined();
+    const opened = await openBundle(encodeBundle(hexToBytes(vectors.device_cert.signed_hex), bytes));
+    expect(bytesToHex(opened.card.raw)).toBe(v.signed_hex);
   });
 });
 

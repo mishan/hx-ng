@@ -31,6 +31,7 @@ import {
   CAP_SIGNED,
   BAD_SIGNATURE,
   CAP_PERSONS,
+  CAP_PRONOUNS,
   SIGNED_SKEW_SECONDS,
   base64urlToBytes,
   canonicalText,
@@ -76,6 +77,7 @@ import { serverFromUrl, type AppConfig } from '../config';
 import { sessionStore } from '../install';
 import { deviceChoice, durationWords, DURATIONS, lineReport, parseDuration, personRef } from '../moderation';
 import { notifyText } from '../news';
+import { pronounsRefusal } from '../pronouns';
 import {
   messageAddress,
   Claims,
@@ -4713,6 +4715,7 @@ export class App {
   }
 
   private openSettings(): void {
+    const conn = this.conn;
     openSettings({
       theme: readTheme(),
       setTheme: (t) => this.applyTheme(t),
@@ -4759,6 +4762,16 @@ export class App {
           ? { set: deviceLabelSet(this.url), otherwise: deviceLabelFrom(navigator.userAgent) ?? '' }
           : null,
       setDeviceLabel: (label) => writeDeviceLabel(this.url, label),
+      pronouns: conn?.hasCap(CAP_PRONOUNS) ? (this.store.self?.pronouns ?? '') : null,
+      setPronouns: async (value) => {
+        if (!conn || conn !== this.conn) return 'The connection changed since Settings opened. Open it again.';
+        try {
+          await conn.setPronouns(value);
+          return null;
+        } catch (e) {
+          return pronounsRefusal(e);
+        }
+      },
       openDebug: () => this.debug.toggle(true),
     });
   }

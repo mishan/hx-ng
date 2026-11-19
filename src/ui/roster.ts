@@ -137,6 +137,9 @@ function row(u: User, store: Store, media: VoiceSession | null, roles: RoleShown
       { class: 'who' },
       h('span', { class: 'nick', style: color !== undefined ? { color: nickColor(color) } : {} }, u.nick),
       u.admin ? h('span', { class: 'sr-only' }, ', administrator') : null,
+      // Isolated, so the user's own words cannot reorder what is around them.
+      u.pronouns ? h('span', { class: 'sr-only' }, ', pronouns: ') : null,
+      u.pronouns ? h('bdi', { class: 'pronouns' }, u.pronouns) : null,
       u.remote && !u.remote.tagged ? h('span', { class: 'tag' }, u.remote.tag) : null,
       status ? h('span', { class: 'status' }, status) : null,
     ),

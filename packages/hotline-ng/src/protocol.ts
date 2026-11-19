@@ -113,6 +113,12 @@ export interface User {
    *  user, its home server's. Theirs to choose, and a client's to tone
    *  down for contrast. */
   color?: number;
+  /** The pronouns the user states, shown exactly as sent, apart from
+   *  the nick and isolated for bidirectional layout (§7.4); absent when
+   *  they state none, and for a linked server's user. Theirs alone: the
+   *  server never sets or infers them. A change that clears them is a
+   *  `user_changed` without the key. */
+  pronouns?: string;
   /** Present only for a user of a linked server (hxd-ng's
    *  `docs/server-link.md` §5). Such a user is never `admin`, and can be
    *  messaged and kicked but not reported or purged. */
@@ -331,6 +337,12 @@ export type Signs = 'default' | 'able';
 /** The `signs` request: the user's choice, changed mid-session. */
 export interface SignsParams {
   signs: Signs;
+}
+
+/** The `pronouns` request: this session's account's pronouns, or
+ *  `null` to clear them (§7.3). */
+export interface PronounsParams {
+  pronouns: string | null;
 }
 
 export interface LoginParams {
@@ -2492,6 +2504,8 @@ export const CAP_HISTORY = 'history';
 export const CAP_MEDIA = 'media';
 export const CAP_NEWS = 'news';
 export const CAP_FILES = 'files';
+/** The server shows pronouns and takes the `pronouns` request. */
+export const CAP_PRONOUNS = 'pronouns';
 export const CAP_PUSH = 'push';
 export const CAP_CHAT_GUID = 'chat_guid';
 export const CAP_SIGNED = 'signed';

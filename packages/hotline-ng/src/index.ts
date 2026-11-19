@@ -46,6 +46,7 @@ export * from './protocol.js';
 export * from './news.js';
 export * from './files.js';
 export * from './emoji.js';
+export * from './pronouns.js';
 // Named rather than `*`: `splitChatBlocks` and `ChatBlock` are exported
 // from the module for the tests that pin GtkHx's block splitter, and are
 // not part of this package's API.

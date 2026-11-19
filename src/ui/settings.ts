@@ -126,11 +126,15 @@ function pronounsField(now: string, set: (value: string | null) => Promise<strin
   const commit = async () => {
     if (saving) return;
     if (check() !== null) return input.focus();
-    const value = input.value === '' ? null : input.value;
+    const draft = input.value;
+    const value = draft === '' ? null : draft;
     saving = save.disabled = true;
     said.textContent = 'Saving…';
     try {
-      said.textContent = (await set(value)) ?? (value === null ? 'Cleared.' : 'Saved.');
+      const refused = await set(value);
+      // A draft typed since is answered by its own check, not this save.
+      if (input.value === draft) said.textContent = refused ?? (value === null ? 'Cleared.' : 'Saved.');
+      else check();
     } finally {
       saving = save.disabled = false;
     }

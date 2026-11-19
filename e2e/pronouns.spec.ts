@@ -116,6 +116,39 @@ test.describe('pronouns against a real hxd-ng server', () => {
     await expect(row(bob, 'Alice').locator('bdi.pronouns')).toHaveText('she/her');
   });
 
+  test("a save answered after the draft changed leaves the draft's own message", async ({ browser }) => {
+    const context = await browser.newContext();
+    contexts.push(context);
+    // Hold the pronouns request on its way to the server until the draft
+    // has changed, so its answer arrives after.
+    let release: () => void = () => {};
+    const released = new Promise<void>((r) => (release = r));
+    await context.routeWebSocket(new RegExp(`:${NG_PORT}/ng`), (ws) => {
+      const server = ws.connectToServer();
+      ws.onMessage((m) => {
+        if (String(m).includes('"req":"pronouns"')) void released.then(() => server.send(m));
+        else server.send(m);
+      });
+    });
+    const bob = await context.newPage();
+    await bob.goto(`/?server=${encodeURIComponent(server.wsUrl)}`);
+    await bob.getByLabel('Account').fill('bob');
+    await bob.getByLabel('Password').fill('pw');
+    await bob.getByRole('button', { name: 'Connect', exact: true }).click();
+    await expect(bob.locator('.app')).toBeVisible();
+
+    const settings = await openSettings(bob);
+    const field = settings.getByLabel('Your pronouns');
+    await field.fill('he/him');
+    await field.press('Enter');
+    await expect(settings.getByRole('status')).toHaveText('Saving…');
+    await field.fill('he  him');
+    await expect(settings.getByRole('status')).toHaveText(/two spaces in a row/);
+    release();
+    await expect(bob.locator('.person.me bdi.pronouns')).toHaveText('he/him');
+    await expect(settings.getByRole('status')).toHaveText(/two spaces in a row/);
+  });
+
   test('a guest is told it may not, in words', async ({ browser }) => {
     const guest = await logIn(browser, server, null);
     const settings = await openSettings(guest);

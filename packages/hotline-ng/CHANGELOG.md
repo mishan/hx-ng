@@ -33,6 +33,11 @@ says how.
 
 ### Added
 
+- Pronouns (hxd-ng's `docs/hotline-ng.md` §7.3, §7.4): `User.pronouns`,
+  on the roster and in `user_changed`; `CAP_PRONOUNS`;
+  `setPronouns(value | null)` sets or clears the account's; and
+  `pronounsValid` with `PRONOUNS_MAX_CHARS`, the server's rule for a
+  value.
 - Persons (hxd-ng's `docs/hotline-ng.md` §7.6): `Credentials.persons`
   says `persons` at login and `Credentials.deviceLabel` says
   `device_label`; `CAP_PERSONS`. `Connection.device` is this session's

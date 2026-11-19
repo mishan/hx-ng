@@ -960,6 +960,18 @@ button.reaction:hover { background: var(--surface-2); }
 .person .who { min-width: 0; display: flex; flex-direction: column; line-height: 1.25; }
 .person .nick { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .person .tag { font-size: 0.68rem; color: var(--muted); }
+.person .pronouns {
+  unicode-bidi: isolate;
+  align-self: flex-start;
+  max-width: 100%;
+  margin: 0.05rem 0;
+  padding: 0 0.35rem;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  font-size: 0.68rem;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
 .person .status { font-size: 0.68rem; color: var(--muted); }
 .person.admin .nick { color: var(--admin); font-weight: 620; }
 .person.me .nick { font-weight: 620; }
@@ -1931,6 +1943,9 @@ dialog.picker.settings { width: min(32rem, 100vw - 1.5rem); }
 .setting-detail { font-size: 0.8rem; color: var(--muted); }
 .setting-row { display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap; }
 .settings-body p.setting-detail { margin: 0.5rem 0 0; }
+.pronouns-setting { display: flex; flex-direction: column; gap: 0.35rem; }
+.pronouns-setting input { flex: 1; min-width: 0; }
+.settings-body p.pronouns-said { margin: 0; min-height: 1lh; }
 dialog.settings button.ghost {
   padding: 0.3rem 0.6rem;
   border-radius: 7px;

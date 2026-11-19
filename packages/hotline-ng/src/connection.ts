@@ -79,6 +79,7 @@ import {
   type KickParams,
   type LoginOk,
   type LoginParams,
+  type PronounsParams,
   type Signs,
   type SignsParams,
   type Media,
@@ -1303,6 +1304,17 @@ export class Connection {
       }
     })();
     return this.signsTold;
+  }
+
+  /** Set this session's account's pronouns, or clear them with `null`,
+   *  on a server with the `pronouns` capability (§7.3). Every session of
+   *  the account then shows them, told as a `user_changed`, this one's
+   *  own included. Refused `bad_request` for a value `pronounsValid`
+   *  would refuse, `access_denied` for a guest or an account that may
+   *  not, `not_available` for a set where the server shows none, and
+   *  `rate_limited` with `retry_after` past one change in a while. */
+  setPronouns(pronouns: string | null): Promise<Record<string, never>> {
+    return this.request('pronouns', { pronouns } satisfies PronounsParams);
   }
 
   /** Stored mail, newest first, paging backwards with `before`. */

@@ -69,6 +69,7 @@ type SessionOf<C extends Connection> = Pick<
   | 'fetchBanner'
   | 'uploadAvatar'
   | 'clearAvatar'
+  | 'setPronouns'
   | 'fetchAvatar'
   | 'filesList'
   | 'fileInfo'

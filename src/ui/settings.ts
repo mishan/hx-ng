@@ -1,15 +1,18 @@
 /** This device's preferences, in one place rather than a row of
  * switches in the title bar.
  *
- * Everything here belongs to the browser, not the account: it lives in
- * `localStorage`, and of it a server hears only whether lines are signed
- * by default. So a change takes effect as it is made, and there is
- * nothing to save or cancel — the dialog has a Done and not an OK. A
+ * Nearly everything here belongs to the browser, not the account: it
+ * lives in `localStorage`, and of it a server hears only whether lines
+ * are signed by default. So a change takes effect as it is made, and
+ * there is nothing to save or cancel — the dialog has a Done and not an
+ * OK. Pronouns are the exception, the account's on the server it is
+ * connected to, and have a Save of their own. A
  * native `<dialog>`, as the icon picker is, so Escape and focus are the
  * platform's.
  */
 
 import type { LabelWrite } from '../devices';
+import { PRONOUN_SUGGESTIONS, pronounsProblem } from '../pronouns';
 import type { PmSigning } from '../signing';
 import { h } from './dom';
 
@@ -38,6 +41,11 @@ export interface Settings {
    *  that connection shows no devices. */
   deviceLabel: { set: string; otherwise: string } | null;
   setDeviceLabel(label: string): LabelWrite;
+  /** The account's pronouns on the server it is connected to, '' for
+   *  none; null where that server shows none. */
+  pronouns: string | null;
+  /** Ask the server; what it refused, in words, or null once taken. */
+  setPronouns(value: string | null): Promise<string | null>;
   openDebug(): void;
 }
 
@@ -84,6 +92,77 @@ function deviceLabelField(label: { set: string; otherwise: string }, set: (label
         ),
       ),
       input,
+    ),
+  );
+}
+
+function pronounsField(now: string, set: (value: string | null) => Promise<string | null>): HTMLElement {
+  const detail = h(
+    'span',
+    { class: 'setting-detail', id: 'pronouns-detail' },
+    'Shown beside your name to everyone on this server, on every device you use, exactly as you type them. Leave it empty for none.',
+  );
+  const said = h('p', { class: 'setting-detail pronouns-said', id: 'pronouns-said', role: 'status' });
+  const input = h('input', {
+    type: 'text',
+    id: 'pronouns-input',
+    value: now,
+    placeholder: 'e.g. she/her',
+    spellcheck: false,
+    autocomplete: 'off',
+  });
+  input.setAttribute('aria-describedby', 'pronouns-detail pronouns-said');
+  const save = h('button', { class: 'ghost', type: 'button' }, 'Save');
+  const check = (): string | null => {
+    const problem = pronounsProblem(input.value);
+    input.setAttribute('aria-invalid', String(problem !== null));
+    // A live region: written only when what it says changes, so a
+    // screen reader is not read the same words at every keystroke.
+    if (said.textContent !== (problem ?? '')) said.textContent = problem ?? '';
+    return problem;
+  };
+  input.oninput = () => void check();
+  let saving = false;
+  const commit = async () => {
+    if (saving) return;
+    if (check() !== null) return input.focus();
+    const value = input.value === '' ? null : input.value;
+    saving = save.disabled = true;
+    said.textContent = 'Saving…';
+    try {
+      said.textContent = (await set(value)) ?? (value === null ? 'Cleared.' : 'Saved.');
+    } finally {
+      saving = save.disabled = false;
+    }
+  };
+  save.onclick = () => void commit();
+  input.onkeydown = (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      void commit();
+    }
+  };
+  const picks = PRONOUN_SUGGESTIONS.map((p) => {
+    const b = h('button', { class: 'ghost', type: 'button', title: `Fill in ${p}` }, p);
+    b.onclick = () => {
+      input.value = p;
+      check();
+      input.focus();
+    };
+    return b;
+  });
+  return h(
+    'fieldset',
+    {},
+    h('legend', {}, 'Pronouns'),
+    h(
+      'div',
+      { class: 'pronouns-setting' },
+      h('label', { class: 'setting-label', htmlFor: 'pronouns-input' }, 'Your pronouns'),
+      detail,
+      h('div', { class: 'setting-row' }, input, save),
+      h('div', { class: 'setting-row', role: 'group', ariaLabel: 'Suggestions' }, ...picks),
+      said,
     ),
   );
 }
@@ -179,6 +258,7 @@ export function openSettings(s: Settings): void {
           (on) => s.setSignNews(on),
         ),
       ),
+      s.pronouns !== null ? pronounsField(s.pronouns, (value) => s.setPronouns(value)) : null,
       s.deviceLabel ? deviceLabelField(s.deviceLabel, (label) => s.setDeviceLabel(label)) : null,
       h(
         'fieldset',

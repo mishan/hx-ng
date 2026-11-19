@@ -1370,6 +1370,9 @@ export class ClassicConnection implements Session {
   async fetchAvatar(): Promise<never> {
     throw unavailable('pictures');
   }
+  async setPronouns(): Promise<never> {
+    throw unavailable('pronouns');
+  }
   async pushRegister(): Promise<never> {
     throw unavailable('notifications');
   }
